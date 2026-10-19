@@ -32,23 +32,29 @@ func TestCLIRejectsUnavailableProviders(t *testing.T) {
 		{name: "absolute path containing colon", flag: "bus-url", url: "nats://127.0.0.1:4222", filesystemForm: "path"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			if test.filesystemForm == "path" && runtime.GOOS == "windows" {
-				t.Skip("Windows does not support colons in filenames")
+			if runtime.GOOS == "windows" {
+				switch test.filesystemForm {
+				case "path":
+					t.Skip("Windows does not support colons in filenames")
+				case "FILE", "FS":
+					t.Skip("filesystem provider requires native Windows paths; covered by the other cases")
+				}
 			}
 			root := t.TempDir()
-			fileURL := func(name string) string {
-				if test.filesystemForm == "path" {
-					return filepath.Join(root, name+":1")
+			filesystemConnection := func(name string) string {
+				path := filepath.Join(root, name)
+				switch test.filesystemForm {
+				case "":
+					return path
+				case "path":
+					return path + ":1"
+				default:
+					return (&url.URL{Scheme: test.filesystemForm, Path: path}).String()
 				}
-				scheme := test.filesystemForm
-				if scheme == "" {
-					scheme = "file"
-				}
-				return (&url.URL{Scheme: scheme, Path: filepath.Join(root, name)}).String()
 			}
 			args := []string{
-				"--bus-url=" + fileURL("bus"),
-				"--storage-url=" + fileURL("storage"),
+				"--bus-url=" + filesystemConnection("bus"),
+				"--storage-url=" + filesystemConnection("storage"),
 				"--log-level=info", "--log-format=json",
 				"--" + test.flag + "=" + test.url,
 			}

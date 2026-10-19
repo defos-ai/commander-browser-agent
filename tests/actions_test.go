@@ -13,7 +13,8 @@ import (
 
 func TestBrowserDiscoveryRespectsExplicitScopeAndRediscovery(t *testing.T) {
 	directory := t.TempDir()
-	executable := filepath.Join(directory, "browser-fixture")
+	// Windows executable discovery requires a recognized extension.
+	executable := filepath.Join(directory, "browser-fixture.exe")
 	if err := os.WriteFile(executable, []byte("fixture executable, never launched"), 0700); err != nil {
 		t.Fatal(err)
 	}
