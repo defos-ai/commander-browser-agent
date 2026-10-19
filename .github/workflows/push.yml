@@ -1,0 +1,97 @@
+name: Push agent image
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        type: string
+        required: true
+    outputs:
+      digest:
+        value: ${{ jobs.push.outputs.digest }}
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  push:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      digest: ${{ steps.image.outputs.digest }}
+    env:
+      VERSION: ${{ inputs.version }}
+      DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+      GH_REPO: ${{ github.repository }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GOWORK: 'off'
+      GOTOOLCHAIN: local
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Validate package
+        id: package
+        shell: bash
+        run: |
+          test "$GITHUB_REF" = "refs/heads/$DEFAULT_BRANCH"
+          metadata=$(go run ./.github/scripts/release.go metadata --version "$VERSION" --repository "$GH_REPO")
+          echo "metadata=$metadata" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-qemu-action@v4
+        with:
+          platforms: arm64
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Require an unused image version
+        env:
+          IMAGE: ${{ fromJSON(steps.package.outputs.metadata).image }}
+        run: |
+          if result=$(docker buildx imagetools inspect "$IMAGE:$VERSION" 2>&1); then
+            echo 'This image version already exists; choose a new version.' >&2
+            exit 1
+          elif [[ "$result" != *"$IMAGE:$VERSION: not found"* && "$result" != *"manifest unknown"* && "$result" != *"MANIFEST_UNKNOWN"* ]]; then
+            echo "$result" >&2
+            exit 1
+          fi
+      - name: Reserve the release
+        shell: bash
+        run: |
+          releases=$(gh api --paginate "repos/$GH_REPO/releases?per_page=100" --jq '.[]')
+          draft=$(jq -sr --arg version "$VERSION" 'map(select(.tag_name == $version)) | if length == 0 then "missing" else .[0].draft end' <<< "$releases")
+          case "$draft" in
+            missing|true) ;;
+            *) echo 'This version is already published; choose a new version.' >&2; exit 1 ;;
+          esac
+          if git show-ref --verify --quiet "refs/tags/$VERSION"; then
+            test "$(git rev-parse "refs/tags/$VERSION^{commit}")" = "$GITHUB_SHA"
+          else
+            gh api --method POST "repos/$GH_REPO/git/refs" -f "ref=refs/tags/$VERSION" -f "sha=$GITHUB_SHA" > /dev/null
+          fi
+          if [[ "$draft" == missing ]]; then
+            gh release create "$VERSION" --verify-tag --target "$GITHUB_SHA" --draft --title "$VERSION" --generate-notes
+          fi
+      - name: Push tested image
+        id: image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: docker/Dockerfile
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ fromJSON(steps.package.outputs.metadata).image }}:build-${{ github.run_id }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ inputs.version }}
+          cache-from: type=gha,scope=agent
+          cache-to: type=gha,scope=agent,mode=max

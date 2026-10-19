@@ -1,0 +1,11 @@
+schema_version: 1
+type: "{{ .Type }}"
+version: {{ .Version }}
+native:
+{{- range .Native }}
+  {{ .Platform }}:
+    asset: {{ .Asset }}
+    sha256: "{{ .SHA256 }}"
+{{- end }}
+docker:
+  image: {{ .DockerImage }}

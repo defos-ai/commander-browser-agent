@@ -1,0 +1,21 @@
+[
+  {
+    "name": "review-page",
+    "objective": "Capture desktop and mobile screenshots of the supplied URL and check rendered accessibility. Review the artifacts and findings, then complete the operation with a short summary.",
+    "required_actions": ["capture-page", "check-accessibility"],
+    "starting_actions": ["capture-page", "check-accessibility"],
+    "rules": {},
+    "input_schema": {
+      "type": "object",
+      "properties": {"url": {"type": "string", "format": "uri"}},
+      "required": ["url"],
+      "additionalProperties": false
+    },
+    "output_schema": {
+      "type": "object",
+      "properties": {"summary": {"type": "string", "minLength": 1}},
+      "required": ["summary"],
+      "additionalProperties": false
+    }
+  }
+]

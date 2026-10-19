@@ -1,0 +1,81 @@
+name: Tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Test and vet
+        env:
+          GOWORK: "off"
+        run: |
+          go mod download
+          go test -race -count=1 -timeout=3m ./... ./.github/tests
+          go vet ./... ./.github/scripts ./.github/tests
+
+  integration:
+    needs: unit
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      COMPOSE_PROJECT_NAME: commander-browser-test
+      COMMANDER_API_URL: http://127.0.0.1:4284
+      API_USERNAME: commander
+      GOWORK: "off"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - uses: docker/setup-buildx-action@v4
+      - name: Build browser agent
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: docker/Dockerfile
+          load: true
+          tags: commander-browser-agent:local
+          cache-from: type=gha,scope=agent
+          cache-to: type=gha,scope=agent,mode=max
+      - name: Create API credentials
+        run: |
+          password="$(openssl rand -hex 32)"
+          echo "::add-mask::$password"
+          echo "API_PASSWORD=$password" >> "$GITHUB_ENV"
+      - name: Start test stack
+        run: docker compose -f compose.yaml -f .github/composes/compose.test.yaml up --no-build --wait --wait-timeout 120
+      - name: Check Playground startup
+        run: docker compose -f compose.yaml -f .github/composes/compose.test.yaml run --rm --no-deps -T playground --help
+      - name: Test operation and artifact
+        run: |
+          go mod download
+          go test -tags=integration -race -count=1 -timeout=3m -run '^TestAgentThroughAPI$' -v ./tests/...
+      - name: Show service logs on failure
+        if: failure()
+        run: docker compose -f compose.yaml -f .github/composes/compose.test.yaml logs --no-color --tail=100
+      - name: Clean up
+        if: always()
+        run: docker compose -f compose.yaml -f .github/composes/compose.test.yaml down --volumes --remove-orphans

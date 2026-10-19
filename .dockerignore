@@ -1,0 +1,15 @@
+.git
+.github
+.env
+.env.*
+**/.env
+**/.env.*
+go.work
+go.work.sum
+state
+bin
+dist
+coverage.out
+*.test
+*.exe
+commander-browser-agent

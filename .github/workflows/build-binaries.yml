@@ -1,0 +1,63 @@
+name: Build native binaries
+
+on:
+  workflow_call:
+    inputs:
+      binary:
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.goos }} / ${{ matrix.goarch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {goos: linux, goarch: amd64, runner: ubuntu-24.04}
+          - {goos: linux, goarch: arm64, runner: ubuntu-24.04-arm}
+          - {goos: darwin, goarch: amd64, runner: macos-15-intel}
+          - {goos: darwin, goarch: arm64, runner: macos-15}
+          - {goos: windows, goarch: amd64, runner: windows-2025}
+          - {goos: windows, goarch: arm64, runner: windows-11-arm}
+    defaults:
+      run:
+        shell: bash
+    env:
+      BINARY: ${{ inputs.binary }}
+      GOOS: ${{ matrix.goos }}
+      GOARCH: ${{ matrix.goarch }}
+      CGO_ENABLED: '0'
+      GOTOOLCHAIN: local
+      GOWORK: 'off'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Test on the target platform
+        run: go test -count=1 -timeout=3m ./...
+      - name: Build executable
+        run: |
+          [[ "$BINARY" =~ ^commander-[a-z0-9]+([._-][a-z0-9]+)*$ ]]
+          asset="${BINARY}_${GOOS}_${GOARCH}"
+          if [[ "$GOOS" == windows ]]; then asset+=.exe; fi
+          mkdir -p dist
+          go build -trimpath -buildvcs=false -o "dist/$asset" ./cmd
+          "./dist/$asset" --help
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-native-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+          overwrite: true

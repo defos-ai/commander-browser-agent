@@ -1,0 +1,21 @@
+# Local credentials and runtime output
+.env
+.env.*
+**/.env
+**/.env.*
+state/
+bin/
+dist/
+coverage.out
+*.test
+*.exe
+/commander-browser-agent
+
+# Optional checkout-local workspace (never publish local module replacements)
+go.work
+go.work.sum
+
+# Editor and OS files
+.idea/
+.vscode/
+.DS_Store

@@ -1,0 +1,80 @@
+name: Promote stable image and latest release
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        type: string
+        required: true
+      image:
+        type: string
+        required: true
+      digest:
+        type: string
+        required: true
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  promote:
+    if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      VERSION: ${{ inputs.version }}
+      IMAGE: ${{ inputs.image }}
+      DIGEST: ${{ inputs.digest }}
+      GH_REPO: ${{ github.repository }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GOWORK: 'off'
+      GOTOOLCHAIN: local
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Select the newest published release
+        id: select
+        shell: bash
+        run: |
+          metadata=$(go run ./.github/scripts/release.go metadata --version "$VERSION" --repository "$GH_REPO")
+          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          test "$IMAGE" = "$(jq -r '.image' <<< "$metadata")"
+          published=$(gh api --paginate "repos/$GH_REPO/releases?per_page=100" |
+            jq -r '.[] | select(.draft == false and .prerelease == false) | .tag_name |
+              select(test("^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"))')
+          if ! grep -Fxq -- "$VERSION" <<< "$published"; then
+            echo 'The release must be published before promotion.' >&2
+            exit 1
+          fi
+          newest=$(LC_ALL=C sort -V <<< "$published" | tail -n 1)
+          if [[ "$VERSION" != "$newest" ]]; then
+            echo "promote=false" >> "$GITHUB_OUTPUT"
+            echo "Skipping $VERSION: newer release $newest is already published." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          echo "promote=true" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@v4
+        if: steps.select.outputs.promote == 'true'
+      - uses: docker/login-action@v4
+        if: steps.select.outputs.promote == 'true'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Promote and verify stable
+        if: steps.select.outputs.promote == 'true'
+        shell: bash
+        run: |
+          actual=$(docker buildx imagetools inspect "$IMAGE:$VERSION" --format '{{json .Manifest}}' | jq -r '.digest')
+          test "$actual" = "$DIGEST"
+          docker buildx imagetools create --prefer-index=false --tag "$IMAGE:stable" "$IMAGE@$DIGEST"
+          actual=$(docker buildx imagetools inspect "$IMAGE:stable" --format '{{json .Manifest}}' | jq -r '.digest')
+          test "$actual" = "$DIGEST"
+          gh release edit "$VERSION" --latest
+          echo "- $IMAGE:stable → $VERSION ($DIGEST)" >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,243 @@
+name: commander-browser-agent
+
+x-environment: &environment
+  BUS_URL: file:///state/bus
+  STORAGE_URL: file:///state/storage
+  LOG_LEVEL: ${LOG_LEVEL:-info}
+
+x-runtime: &runtime
+  init: true
+  stop_grace_period: 30s
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+
+services:
+  mcp-credentials:
+    image: ghcr.io/defos-ai/commander-mcp:${COMMANDER_VERSION:-v0.1.0}
+    platform: linux/amd64
+    user: "0:1000"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        umask 077
+        chgrp 1000 /run/commander
+        chmod 750 /run/commander
+        if [ -e /run/commander/mcp-token ] || [ -L /run/commander/mcp-token ]; then
+          test -f /run/commander/mcp-token
+          test -s /run/commander/mcp-token
+          test ! -L /run/commander/mcp-token
+        fi
+        if [ -n "$$MCP_TOKEN" ] || [ ! -f /run/commander/mcp-token ]; then
+          temporary="$$(mktemp /run/commander/.mcp-token.XXXXXX)"
+          trap 'rm -f "$$temporary"' EXIT
+          MCP_TOKEN="$${MCP_TOKEN:-$$(openssl rand -hex 32)}"
+          export MCP_TOKEN
+          commander-mcp credentials --raw > "$$temporary"
+          chmod 440 "$$temporary"
+          mv "$$temporary" /run/commander/mcp-token
+        fi
+    environment:
+      MCP_TOKEN: ${MCP_TOKEN:-}
+    volumes:
+      - mcp-credentials:/run/commander
+
+  volume-init:
+    image: ghcr.io/defos-ai/commander-controller:${COMMANDER_VERSION:-v0.1.0}
+    platform: linux/amd64
+    user: "0:0"
+    network_mode: none
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [CHOWN]
+    security_opt: ["no-new-privileges:true"]
+    entrypoint: ["chown"]
+    command: ["1000:1000", "/bus", "/storage", "/database"]
+    volumes:
+      - bus:/bus
+      - storage:/storage
+      - database:/database
+
+  controller:
+    <<: *runtime
+    image: ghcr.io/defos-ai/commander-controller:${COMMANDER_VERSION:-v0.1.0}
+    platform: linux/amd64
+    command: ["--with-missions=/data/review-page.json"]
+    environment:
+      <<: *environment
+      DATABASE_URL: file:///state/database
+    volumes:
+      - bus:/state/bus
+      - storage:/state/storage
+      - database:/state/database
+    configs:
+      - source: missions
+        target: /data/review-page.json
+    depends_on:
+      volume-init:
+        condition: service_completed_successfully
+
+  agent:
+    <<: *runtime
+    image: commander-browser-agent:local
+    pull_policy: never
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    environment: *environment
+    volumes:
+      - bus:/state/bus
+      - storage:/state/storage
+    depends_on:
+      controller:
+        condition: service_started
+
+  mcp:
+    <<: *runtime
+    # Keep MCP at PID 1 for its credentials lookup command.
+    init: false
+    image: ghcr.io/defos-ai/commander-mcp:${COMMANDER_VERSION:-v0.1.0}
+    platform: linux/amd64
+    entrypoint:
+      - /bin/sh
+      - -ec
+      - |
+        MCP_TOKEN="$${MCP_TOKEN:-$$(cat /run/commander/mcp-token)}"
+        export MCP_TOKEN
+        exec commander-mcp "$$@"
+      - commander-mcp
+    command:
+      - --listen-address=:4273
+      - --allowed-hosts=localhost,127.0.0.1,::1,mcp
+    environment:
+      <<: *environment
+      DATABASE_URL: file:///state/database
+      MCP_TOKEN: ${MCP_TOKEN:-}
+      MCP_RUNTIME: docker-compose
+    volumes:
+      - bus:/state/bus
+      - storage:/state/storage
+      - database:/state/database
+      - mcp-credentials:/run/commander:ro
+    ports: ["127.0.0.1:4283:4273"]
+    depends_on:
+      mcp-credentials:
+        condition: service_completed_successfully
+      controller:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "--max-time", "2", "http://127.0.0.1:4273/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+
+  api:
+    <<: *runtime
+    # The credentials command reads the running API's environment at PID 1.
+    init: false
+    image: ghcr.io/defos-ai/commander-api:${COMMANDER_VERSION:-v0.1.0}
+    platform: linux/amd64
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        API_PASSWORD="$${API_PASSWORD:-$$(openssl rand -hex 32)}"
+        export API_PASSWORD
+        exec commander-api
+    environment:
+      <<: *environment
+      DATABASE_URL: file:///state/database
+      ENV: development
+      API_USERNAME: commander
+      API_PASSWORD: ${API_PASSWORD:-}
+      API_RUNTIME: docker-compose
+      API_LISTEN_ADDRESS: 0.0.0.0:4274
+      API_ALLOWED_HOSTS: localhost,127.0.0.1,::1,api
+      API_ALLOWED_ORIGINS: http://localhost:4285,http://127.0.0.1:4285
+    volumes:
+      - bus:/state/bus
+      - storage:/state/storage
+      - database:/state/database
+    ports: ["127.0.0.1:4284:4274"]
+    depends_on:
+      controller:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "--max-time", "2", "http://127.0.0.1:4274/readyz"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+
+  ui:
+    <<: *runtime
+    image: ghcr.io/defos-ai/commander-admin:${COMMANDER_VERSION:-v0.1.0}
+    platform: linux/amd64
+    read_only: true
+    environment:
+      UI_API_UPSTREAMS: localhost:4284=api:4274,127.0.0.1:4284=api:4274
+    ports: ["127.0.0.1:4285:4275"]
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--spider", "--timeout=2", "http://127.0.0.1:4275/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+
+  playground:
+    profiles: [playground]
+    image: ghcr.io/defos-ai/commander-playground:${COMMANDER_VERSION:-v0.1.0}
+    platform: linux/amd64
+    init: true
+    stdin_open: true
+    tty: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    entrypoint:
+      - /bin/sh
+      - -ec
+      - |
+        COMMANDER_MCP_TOKEN="$${COMMANDER_MCP_TOKEN:-$$(cat /run/commander/mcp-token)}"
+        export COMMANDER_MCP_TOKEN
+        exec commander "$$@"
+      - commander
+    environment:
+      COMMANDER_MCP_URL: http://mcp:4273/mcp
+      COMMANDER_MCP_TOKEN: ${COMMANDER_MCP_TOKEN:-${MCP_TOKEN:-}}
+      COMMANDER_LLM_PROVIDER: ${COMMANDER_LLM_PROVIDER:-}
+      COMMANDER_LLM_MODEL: ${COMMANDER_LLM_MODEL:-}
+      COMMANDER_LLM_BASE_URL: ${COMMANDER_LLM_BASE_URL:-}
+      COMMANDER_LLM_API_KEY: ${COMMANDER_LLM_API_KEY:-}
+      COMMANDER_DEBUG: ${COMMANDER_DEBUG:-false}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+      XAI_API_KEY: ${XAI_API_KEY:-}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      NO_COLOR: ${NO_COLOR:-}
+      TERM: ${TERM:-xterm-256color}
+    volumes:
+      - mcp-credentials:/run/commander:ro
+    depends_on:
+      mcp-credentials:
+        condition: service_completed_successfully
+      mcp:
+        condition: service_healthy
+      agent:
+        condition: service_started
+
+volumes:
+  mcp-credentials:
+  bus:
+  storage:
+  database:
+
+configs:
+  missions:
+    file: ./missions/review-page.json

@@ -1,0 +1,151 @@
+name: Make release
+run-name: Release agent ${{ inputs.version }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: New version (vMAJOR.MINOR.PATCH)
+        type: string
+        required: true
+        default: v0.2.0
+
+permissions:
+  contents: read
+
+concurrency:
+  group: agent-release
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      metadata: ${{ steps.package.outputs.metadata }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Validate version and package names
+        id: package
+        env:
+          VERSION: ${{ inputs.version }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GOWORK: 'off'
+          GOTOOLCHAIN: local
+        run: |
+          test "$GITHUB_REF" = "refs/heads/$DEFAULT_BRANCH"
+          metadata=$(go run ./.github/scripts/release.go metadata --version "$VERSION" --repository "$GITHUB_REPOSITORY")
+          echo "metadata=$metadata" >> "$GITHUB_OUTPUT"
+
+  tests:
+    needs: prepare
+    uses: ./.github/workflows/test.yml
+
+  binaries:
+    needs: [prepare, tests]
+    uses: ./.github/workflows/build-binaries.yml
+    with:
+      binary: ${{ fromJSON(needs.prepare.outputs.metadata).binary }}
+
+  image:
+    needs: [tests, binaries]
+    uses: ./.github/workflows/push.yml
+    permissions:
+      contents: write
+      packages: write
+    with:
+      version: ${{ inputs.version }}
+
+  publish:
+    needs: [prepare, binaries, image]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      packages: write
+    env:
+      VERSION: ${{ inputs.version }}
+      IMAGE: ${{ fromJSON(needs.prepare.outputs.metadata).image }}
+      DIGEST: ${{ needs.image.outputs.digest }}
+      GH_REPO: ${{ github.repository }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GOWORK: 'off'
+      GOTOOLCHAIN: local
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: agent-native-*
+          merge-multiple: true
+          path: dist
+      - name: Generate package manifest
+        run: |
+          go run ./.github/scripts/release.go manifest --version "$VERSION" --repository "$GH_REPO" --digest "$DIGEST" --assets dist
+          cp LICENSE dist/LICENSE
+      - name: Attach assets to the draft
+        shell: bash
+        run: |
+          test "$(git rev-parse "refs/tags/$VERSION^{commit}")" = "$GITHUB_SHA"
+          test "$(gh release view "$VERSION" --json isDraft --jq '.isDraft')" = true
+          existing=$(gh release view "$VERSION" --json assets --jq '.assets[].name')
+          check_dir=$(mktemp -d)
+          trap 'rm -rf "$check_dir"' EXIT
+          for file in dist/*; do
+            name=$(basename "$file")
+            if grep -Fxq "$name" <<< "$existing"; then
+              gh release download "$VERSION" --pattern "$name" --dir "$check_dir"
+              if ! cmp -s "$file" "$check_dir/$name"; then
+                echo "Draft asset differs: $name. Refusing to overwrite it." >&2
+                exit 1
+              fi
+            else
+              gh release upload "$VERSION" "$file"
+            fi
+          done
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish the version
+        run: |
+          test "$(gh release view "$VERSION" --json isDraft --jq '.isDraft')" = true
+          if result=$(docker buildx imagetools inspect "$IMAGE:$VERSION" --format '{{json .Manifest}}' 2>&1); then
+            test "$(jq -r '.digest' <<< "$result")" = "$DIGEST" || {
+              echo 'This image version has different content; refusing to overwrite it.' >&2
+              exit 1
+            }
+          elif [[ "$result" == *"$IMAGE:$VERSION: not found"* || "$result" == *"manifest unknown"* || "$result" == *"MANIFEST_UNKNOWN"* ]]; then
+            docker buildx imagetools create --prefer-index=false --tag "$IMAGE:$VERSION" "$IMAGE@$DIGEST"
+          else
+            echo "$result" >&2
+            exit 1
+          fi
+          actual=$(docker buildx imagetools inspect "$IMAGE:$VERSION" --format '{{json .Manifest}}' | jq -r '.digest')
+          test "$actual" = "$DIGEST"
+          gh release edit "$VERSION" --draft=false --latest=false
+
+  stable:
+    needs: [prepare, image, publish]
+    uses: ./.github/workflows/push-stable.yml
+    permissions:
+      contents: write
+      packages: write
+    with:
+      version: ${{ inputs.version }}
+      image: ${{ fromJSON(needs.prepare.outputs.metadata).image }}
+      digest: ${{ needs.image.outputs.digest }}
