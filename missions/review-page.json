@@ -1,7 +1,10 @@
 [
   {
     "name": "review-page",
-    "objective": "Capture desktop and mobile screenshots of the supplied URL and check rendered accessibility. Review the artifacts and findings, then complete the operation with a short summary.",
+    "objectives": [
+      "Capture desktop and mobile screenshots of the supplied URL and check rendered accessibility.",
+      "Review the artifacts and findings, then complete the operation with a short summary."
+    ],
     "required_actions": ["capture-page", "check-accessibility"],
     "starting_actions": ["capture-page", "check-accessibility"],
     "rules": {},

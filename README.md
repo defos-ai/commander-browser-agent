@@ -13,8 +13,10 @@ Static HTML checks and crawling belong to the
 
 ## Try it locally
 
-Requires Docker Compose. The image includes Chromium; Commander hosts default to
-`v0.1.0`. Set `COMMANDER_VERSION` to use another Commander release.
+Requires Docker Compose. The image includes Chromium. The current mission uses
+the `objectives` array and requires a compatible Commander host build; set
+`COMMANDER_VERSION` to that image tag. The Compose default `v0.1.0` does not
+accept this mission format.
 
 ```sh
 docker compose up --build --wait

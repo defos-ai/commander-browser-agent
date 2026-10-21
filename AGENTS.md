@@ -21,6 +21,10 @@
 - The demo [mission](missions/review-page.json) uses only `capture-page` and
   `check-accessibility`. Creating an operation does not start tasks. Static HTTP
   checks and crawling remain in the separate web-agent repository.
+  Root `objectives` is an ordered array of nonblank strings. All entries apply
+  to the mission and are displayed separately; step `objective` stays singular.
+  These mission definitions need a compatible Commander host;
+  the Compose default v0.1.0 cannot import the new format.
 
 ## Host and providers
 
