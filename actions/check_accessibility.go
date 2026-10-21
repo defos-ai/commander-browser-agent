@@ -12,6 +12,8 @@ import (
 	"github.com/chromedp/chromedp"
 )
 
+const CheckAccessibilityDescription = "Render a page in Chromium and check basic title, language, image alternatives, control labels and accessible names. Captures JavaScript errors. This is a limited diagnostic, not a full WCAG audit."
+
 type AccessibilityIssue struct {
 	Check    string   `json:"check"`
 	Count    int      `json:"count"`
@@ -29,7 +31,7 @@ type CheckAccessibilityOutput struct {
 type CheckAccessibility struct{ *browserAction }
 
 func NewCheckAccessibility() *CheckAccessibility {
-	return &CheckAccessibility{&browserAction{Base: action.NewBase(actionmodel.Action{Name: CheckAccessibilityName, Description: "Render a page in Chromium and check basic title, language, image alternatives, control labels and accessible names. Captures JavaScript errors. This is a limited diagnostic, not a full WCAG audit.", InputSchema: json.RawMessage(pageInputSchema), OutputSchema: outputSchema[CheckAccessibilityOutput]()})}}
+	return &CheckAccessibility{&browserAction{Base: action.NewBase(actionmodel.Action{Name: CheckAccessibilityName, Description: CheckAccessibilityDescription, InputSchema: json.RawMessage(pageInputSchema), OutputSchema: outputSchema[CheckAccessibilityOutput]()})}}
 }
 func (a *CheckAccessibility) Run(ctx context.Context, raw json.RawMessage) (action.Result, error) {
 	if err := a.Check(); err != nil {

@@ -12,6 +12,8 @@ import (
 	"github.com/chromedp/chromedp"
 )
 
+const CapturePageDescription = "Capture desktop and mobile viewport PNG screenshots with Chromium and report horizontal overflow. Returns one artifact containing desktop and mobile images for visual review."
+
 type Viewport struct {
 	Name               string `json:"name"`
 	Width              int    `json:"width"`
@@ -27,7 +29,7 @@ type CapturePageOutput struct {
 type CapturePage struct{ *browserAction }
 
 func NewCapturePage() *CapturePage {
-	return &CapturePage{&browserAction{Base: action.NewBase(actionmodel.Action{Name: CapturePageName, Description: "Capture desktop and mobile viewport PNG screenshots with Chromium and report horizontal overflow. Returns one artifact containing desktop and mobile images for visual review.", InputSchema: json.RawMessage(pageInputSchema), OutputSchema: outputSchema[CapturePageOutput]()})}}
+	return &CapturePage{&browserAction{Base: action.NewBase(actionmodel.Action{Name: CapturePageName, Description: CapturePageDescription, InputSchema: json.RawMessage(pageInputSchema), OutputSchema: outputSchema[CapturePageOutput]()})}}
 }
 func (a *CapturePage) Run(ctx context.Context, raw json.RawMessage) (action.Result, error) {
 	if err := a.Check(); err != nil {

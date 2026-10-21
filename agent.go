@@ -9,7 +9,7 @@ const AgentType agents.AgentType = "browser-agent"
 func NewAgent(config agents.AgentConfig) (*agents.Agent, error) {
 	config.Type = AgentType
 	if config.Responsibilities == nil {
-		config.Responsibilities = []string{"Check rendered accessibility and capture desktop/mobile screenshots"}
+		config.Responsibilities = Responsibilities()
 	}
 	if config.Actions == nil {
 		config.Actions = NewActions()

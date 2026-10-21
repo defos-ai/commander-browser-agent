@@ -72,7 +72,8 @@ go vet ./... ./.github/scripts ./.github/tests
 Run **Actions → Make release** with `v0.2.0` for the first standalone release.
 It publishes native binaries for Linux/macOS/Windows on amd64/arm64, the existing
 `ghcr.io/defos-ai/commander-browser-agent` image, and `agent.yaml` containing binary
-checksums and the image digest. The agent depends on published Commander modules
+checksums, the image digest and static responsibilities/action descriptions from
+[description.go](description.go). The agent depends on published Commander modules
 at `v0.1.0`; agent and Commander release versions are independent. Grant this
 repository Actions write access to the existing GHCR package before releasing.
 Complete releases promote Docker `stable` and GitHub `Latest` when they are the

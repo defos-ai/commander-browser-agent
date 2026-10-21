@@ -101,6 +101,9 @@ func TestReleaseMetadataRejectsInvalidInputs(t *testing.T) {
 }
 
 func TestReleaseManifest(t *testing.T) {
+	for _, name := range []string{"GH_TOKEN", "GITHUB_TOKEN", "CODEX_API_KEY", "SECRETS_ENCRYPTION_KEY"} {
+		t.Setenv(name, "not-for-agent-description")
+	}
 	directory := fixture(t)
 	args := manifestArgs()
 	args = append(args, "--template", "custom.yaml.tmpl")
@@ -113,7 +116,7 @@ func TestReleaseManifest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	expected := "schema_version: 1\ntype: \"custom-agent\"\nversion: v0.1.0\nnative:\n"
+	expected := "schema_version: 1\ntype: \"custom-agent\"\nversion: v0.1.0\nresponsibilities:\n  - \"Analyze custom text\"\nactions:\n  - name: \"analyze-custom\"\n    description: \"Count words in custom text.\"\nnative:\n"
 	for _, platform := range []string{"linux", "darwin", "windows"} {
 		for _, arch := range []string{"amd64", "arm64"} {
 			asset := assetName(platform, arch)
@@ -177,6 +180,16 @@ func TestReleaseManifestFailurePreservesExistingOutput(t *testing.T) {
 				t.Skipf("symlinks unavailable: %v", err)
 			}
 		},
+		"blank description": func(t *testing.T, directory string) {
+			writeFile(t, filepath.Join(directory, "description.go"), strings.Replace(descriptionFixtureSource, "Count words in custom text.", " ", 1))
+		},
+		"duplicate action": func(t *testing.T, directory string) {
+			original := `{Name: "analyze-custom", Description: "Count words in custom text."}`
+			writeFile(t, filepath.Join(directory, "description.go"), strings.Replace(descriptionFixtureSource, original, original+", "+original, 1))
+		},
+		"oversized rendered manifest": func(t *testing.T, directory string) {
+			writeFile(t, filepath.Join(directory, "agent.yaml.tmpl"), strings.Repeat("x", (64<<10)+1))
+		},
 		"invalid template": func(t *testing.T, directory string) {
 			writeFile(t, filepath.Join(directory, "agent.yaml.tmpl"), "{{")
 		},
@@ -217,6 +230,8 @@ func fixture(t *testing.T) string {
 	t.Helper()
 	directory := t.TempDir()
 	writeFile(t, filepath.Join(directory, "agent.go"), "package example\nconst AgentType = \"custom-agent\"\n")
+	writeFile(t, filepath.Join(directory, "go.mod"), "module example.invalid/custom-agent\n\ngo 1.26.7\n")
+	writeFile(t, filepath.Join(directory, "description.go"), descriptionFixtureSource)
 	writeFile(t, filepath.Join(directory, "agent.yaml.tmpl"), manifestTemplate)
 	if err := os.Mkdir(filepath.Join(directory, "dist"), 0o755); err != nil {
 		t.Fatal(err)
@@ -267,3 +282,21 @@ func assertFailure(t *testing.T, directory string, args ...string) {
 		t.Fatalf("expected failure for %v, got %s", args, output)
 	}
 }
+
+const descriptionFixtureSource = `package example
+
+import "os"
+
+type descriptionAction struct { Name, Description string }
+
+func Responsibilities() []string {
+    for _, name := range []string{"GH_TOKEN", "GITHUB_TOKEN", "CODEX_API_KEY", "SECRETS_ENCRYPTION_KEY"} {
+        if os.Getenv(name) != "" { panic("release exporter inherited a secret") }
+    }
+    return []string{"Analyze custom text"}
+}
+
+func ActionDescriptions() []descriptionAction {
+    return []descriptionAction{{Name: "analyze-custom", Description: "Count words in custom text."}}
+}
+`

@@ -3,6 +3,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
@@ -13,11 +14,15 @@ import (
 	"go/token"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"text/template"
+	"time"
+	"unicode/utf8"
 )
 
 type metadata struct {
@@ -144,6 +149,10 @@ func writeManifest(data metadata, digest, assets, source string) error {
 			native = append(native, nativeAsset{Platform: platform + "/" + arch, Asset: asset, SHA256: checksum})
 		}
 	}
+	description, err := readDescription(data.Type)
+	if err != nil {
+		return err
+	}
 	tmpl, err := template.New(filepath.Base(source)).Option("missingkey=error").ParseFiles(source)
 	if err != nil {
 		return err
@@ -151,10 +160,15 @@ func writeManifest(data metadata, digest, assets, source string) error {
 	var result bytes.Buffer
 	if err := tmpl.Execute(&result, struct {
 		metadata
-		Native      []nativeAsset
-		DockerImage string
-	}{data, native, data.Image + "@" + digest}); err != nil {
+		Native           []nativeAsset
+		DockerImage      string
+		Responsibilities []string
+		Actions          []actionDescription
+	}{data, native, data.Image + "@" + digest, description.Responsibilities, description.Actions}); err != nil {
 		return err
+	}
+	if result.Len() > 64<<10 {
+		return errors.New("rendered agent.yaml exceeds 64 KiB")
 	}
 	// Complete validation and rendering before replacing a previously generated manifest.
 	file, err := os.CreateTemp(assets, ".agent-*.yaml")
@@ -193,4 +207,123 @@ func hashAsset(path string) (string, error) {
 		return "", err
 	}
 	return fmt.Sprintf("%x", hash.Sum(nil)), nil
+}
+
+type actionDescription struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+}
+
+type agentDescription struct {
+	Type             string              `json:"type"`
+	Responsibilities []string            `json:"responsibilities"`
+	Actions          []actionDescription `json:"actions"`
+}
+
+// The import follows go.mod, so copying the template never leaves a hardcoded
+// example-agent import in the release tooling. Only pure metadata is called.
+const descriptionProgram = `package main
+import (
+    "encoding/json"
+    "os"
+    described %s
+)
+func main() {
+    descriptions := described.ActionDescriptions()
+    actions := make([]map[string]string, 0, len(descriptions))
+    for _, value := range descriptions {
+        actions = append(actions, map[string]string{"name": value.Name, "description": value.Description})
+    }
+    if err := json.NewEncoder(os.Stdout).Encode(map[string]any{
+        "type": string(described.AgentType),
+        "responsibilities": described.Responsibilities(),
+        "actions": actions,
+    }); err != nil {
+        os.Exit(1)
+    }
+}
+`
+
+func readDescription(agentType string) (agentDescription, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	moduleJSON, err := runGo(ctx, "mod", "edit", "-json")
+	if err != nil {
+		return agentDescription{}, err
+	}
+	var module struct{ Module *struct{ Path string } }
+	if json.Unmarshal(moduleJSON, &module) != nil || module.Module == nil || strings.TrimSpace(module.Module.Path) == "" {
+		return agentDescription{}, errors.New("cannot read the agent module path from go.mod")
+	}
+	directory, err := os.MkdirTemp("", "agent-description-")
+	if err != nil {
+		return agentDescription{}, errors.New("cannot prepare agent description exporter")
+	}
+	defer os.RemoveAll(directory)
+	program := filepath.Join(directory, "main.go")
+	if err := os.WriteFile(program, []byte(fmt.Sprintf(descriptionProgram, strconv.Quote(module.Module.Path))), 0o600); err != nil {
+		return agentDescription{}, errors.New("cannot write agent description exporter")
+	}
+	output, err := runGo(ctx, "run", program)
+	if err != nil {
+		return agentDescription{}, err
+	}
+	var result agentDescription
+	decoder := json.NewDecoder(bytes.NewReader(output))
+	decoder.DisallowUnknownFields()
+	if decoder.Decode(&result) != nil || decoder.Decode(new(any)) != io.EOF || result.Type != agentType {
+		return agentDescription{}, errors.New("agent description must match the declared AgentType")
+	}
+	if len(result.Responsibilities) == 0 || len(result.Responsibilities) > 100 || len(result.Actions) == 0 || len(result.Actions) > 100 {
+		return agentDescription{}, errors.New("agent description requires 1 to 100 responsibilities and actions")
+	}
+	validText := func(value string) bool {
+		return value != "" && strings.TrimSpace(value) == value && len(value) <= 8<<10 && utf8.ValidString(value) && !strings.ContainsRune(value, 0)
+	}
+	for _, value := range result.Responsibilities {
+		if !validText(value) {
+			return agentDescription{}, errors.New("agent responsibilities must be trimmed nonblank text of at most 8 KiB")
+		}
+	}
+	namePattern := regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
+	seen := make(map[string]bool, len(result.Actions))
+	for _, value := range result.Actions {
+		if !namePattern.MatchString(value.Name) || len(value.Name) > 128 || seen[value.Name] || !validText(value.Description) {
+			return agentDescription{}, errors.New("agent actions require unique valid names and trimmed nonblank descriptions of at most 8 KiB")
+		}
+		seen[value.Name] = true
+	}
+	sort.Slice(result.Actions, func(i, j int) bool { return result.Actions[i].Name < result.Actions[j].Name })
+	return result, nil
+}
+
+type boundedGoOutput struct{ bytes.Buffer }
+
+func (output *boundedGoOutput) Write(data []byte) (int, error) {
+	if len(data) > (64<<10)-output.Len() {
+		return 0, errors.New("agent description output exceeds 64 KiB")
+	}
+	return output.Buffer.Write(data)
+}
+
+func runGo(ctx context.Context, arguments ...string) ([]byte, error) {
+	command := exec.CommandContext(ctx, "go", arguments...)
+	command.WaitDelay = time.Second
+	// Release jobs may have GH_TOKEN in their environment. Exporters never
+	// inherit it, model keys or other deployment configuration.
+	for _, name := range []string{"PATH", "HOME", "USERPROFILE", "LOCALAPPDATA", "APPDATA", "SYSTEMROOT", "WINDIR", "TMPDIR", "TMP", "TEMP", "GOROOT", "GOPATH", "GOCACHE", "GOMODCACHE", "GOPROXY", "GOSUMDB", "CGO_ENABLED"} {
+		if value, exists := os.LookupEnv(name); exists {
+			command.Env = append(command.Env, name+"="+value)
+		}
+	}
+	command.Env = append(command.Env, "GOWORK=off", "GOTOOLCHAIN=local", "GOENV=off")
+	var output boundedGoOutput
+	command.Stdout, command.Stderr = &output, io.Discard
+	if err := command.Run(); err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, errors.New("cannot export the agent's static description; preserve Responsibilities and ActionDescriptions and verify its Go build")
+	}
+	return output.Bytes(), nil
 }

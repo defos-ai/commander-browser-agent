@@ -14,10 +14,10 @@ func NewActions() []action.Executor {
 }
 
 func ActionNames() []string {
-	actions := NewActions()
+	actions := ActionDescriptions()
 	names := make([]string, 0, len(actions))
 	for _, instance := range actions {
-		names = append(names, instance.Action().Name)
+		names = append(names, instance.Name)
 	}
 	sort.Strings(names)
 	return names
