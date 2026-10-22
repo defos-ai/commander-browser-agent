@@ -8,7 +8,7 @@ on:
         description: New version (vMAJOR.MINOR.PATCH)
         type: string
         required: true
-        default: v0.2.0
+        default: v0.2.1
 
 permissions:
   contents: read

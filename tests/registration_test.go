@@ -106,10 +106,10 @@ func TestCLIRejectsInvalidAgentIDSuffixBeforeOpeningProviders(t *testing.T) {
 			defer cancel()
 			args := []string{"--bus-url=" + filepath.Join(root, "bus"), "--storage-url=" + filepath.Join(root, "storage")}
 			err := cli.Run(ctx, args, nil)
-			if flagErr := cli.Run(ctx, append(args, "--agent-id-suffix="+suffix), nil); flagErr == nil || !strings.Contains(flagErr.Error(), "must be exactly 8 lowercase hex characters") {
+			if flagErr := cli.Run(ctx, append(args, "--agent-id-suffix="+suffix), nil); flagErr == nil || !strings.Contains(flagErr.Error(), "exactly 8 lowercase hex characters") {
 				t.Fatalf("expected invalid flag error, got %v", flagErr)
 			}
-			if err == nil || !strings.Contains(err.Error(), "must be exactly 8 lowercase hex characters") {
+			if err == nil || !strings.Contains(err.Error(), "exactly 8 lowercase hex characters") {
 				t.Fatalf("expected invalid agent ID suffix error, got %v", err)
 			}
 			entries, err := os.ReadDir(root)

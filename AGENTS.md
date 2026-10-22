@@ -23,8 +23,7 @@
   checks and crawling remain in the separate web-agent repository.
   Root `objectives` is an ordered array of nonblank strings. All entries apply
   to the mission and are displayed separately; step `objective` stays singular.
-  These mission definitions need a compatible Commander host;
-  the Compose default v0.1.0 cannot import the new format.
+  These mission definitions require Commander v0.2.0 or newer hosts.
 
 ## Host and providers
 
@@ -36,8 +35,8 @@
   before opening providers. `--agent-id-suffix` overrides
   `COMMANDER_AGENT_ID_SUFFIX`, including an explicitly empty flag. A nonempty
   suffix must be exactly eight lowercase hex characters. Compose the full ID from
-  fixed `AgentType` and validate with published v0.1.0 `id.RuntimeType`. No prefix
-  or full ID input, new framework helper, or public-configuration field is needed.
+  fixed `AgentType` using framework `id.AgentIDFromSuffix`. No prefix or full ID
+  input or public-configuration field is needed.
   Unset/empty generates a fresh ID. Never launch two instances with the same ID;
   the suffix provides correlation, not authorization or duplicate prevention.
 - [cli/factory.go](cli/factory.go) selects FS/RabbitMQ bus and FS/S3 artifact
@@ -67,7 +66,7 @@
 
 - [compose.yaml](compose.yaml) follows the example agent's isolated FS demo:
   UID1000-owned state, one controller, loopback MCP/API/Admin ports 4283/4284/4285,
-  and optional Playground using the same `COMMANDER_VERSION` (default `v0.1.0`).
+  and optional Playground using the same `COMMANDER_VERSION` (default `v0.2.0`).
   Commander host images explicitly use linux/amd64; the agent image supports
   linux/amd64 and linux/arm64. Never run demo Playground with `--all-in-one`.
 - `mcp-credentials` is the demo's sole credential-file exception. Retain tokens
@@ -82,9 +81,12 @@
   derive names. Keep the existing GHCR package `defos-ai/commander-browser-agent`.
   Grant the new repository write access before publishing. Do not let the old
   monorepo workflow keep publishing the same version/stable tags.
-- Use a new release version (first standalone release `v0.2.0`). Published
-  Commander framework/providers stay pinned to `v0.1.0`, with no local `replace`.
-  An ignored development workspace may map them to local checkouts.
+- The next standalone release is `v0.2.1`. Published Commander framework/providers
+  are pinned to `v0.2.0`, with no local `replace`. Agent release versions are
+  independent of Commander versions. An ignored development workspace may map
+  dependencies to local checkouts.
+- Manifest generation uses `framework/agent/manifest.Render` and its embedded
+  template. Do not add a repository-local template or a `--template` release flag.
 - Make release chains tests → six native builds → Docker image → digest-pinned
   `agent.yaml` and release assets from one tested revision. Keep build/push
   workflows reusable, serialize releases, preserve existing tags/assets and retry

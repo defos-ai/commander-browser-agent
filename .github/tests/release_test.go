@@ -2,23 +2,27 @@ package release_test
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/defos-ai/commander/framework/agent/manifest"
 )
 
-var releaseTool, manifestTemplate string
+var releaseTool string
 
 func TestMain(m *testing.M) {
 	_, source, _, _ := runtime.Caller(0)
 	root := filepath.Join(filepath.Dir(source), "..", "..")
-	directory, err := os.MkdirTemp("", "agent-release-tests-")
+	directory, err := os.MkdirTemp("", "example-agent-release-tests-")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -37,13 +41,6 @@ func TestMain(m *testing.M) {
 		os.RemoveAll(directory)
 		os.Exit(1)
 	}
-	contents, err := os.ReadFile(filepath.Join(root, "agent.yaml.tmpl"))
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.RemoveAll(directory)
-		os.Exit(1)
-	}
-	manifestTemplate = string(contents)
 	code := m.Run()
 	os.RemoveAll(directory)
 	os.Exit(code)
@@ -105,10 +102,7 @@ func TestReleaseManifest(t *testing.T) {
 		t.Setenv(name, "not-for-agent-description")
 	}
 	directory := fixture(t)
-	args := manifestArgs()
-	args = append(args, "--template", "custom.yaml.tmpl")
-	writeFile(t, filepath.Join(directory, "custom.yaml.tmpl"), manifestTemplate)
-	output, err := invoke(t, directory, args...)
+	output, err := invoke(t, directory, manifestArgs()...)
 	if err != nil {
 		t.Fatalf("manifest: %v\n%s", err, output)
 	}
@@ -116,48 +110,32 @@ func TestReleaseManifest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	expected := "schema_version: 1\ntype: \"custom-agent\"\nversion: v0.1.0\nresponsibilities:\n  - \"Analyze custom text\"\nactions:\n  - name: \"analyze-custom\"\n    description: \"Count words in custom text.\"\nnative:\n"
+	value, err := manifest.Parse(contents, "v0.1.0")
+	if err != nil {
+		t.Fatalf("manifest is incompatible with Commander: %v", err)
+	}
+	if value.Type != "custom-agent" || !reflect.DeepEqual(value.Responsibilities, []string{"Analyze custom text"}) ||
+		!reflect.DeepEqual(value.Actions, []manifest.Action{{Name: "analyze-custom", Description: "Count words in custom text."}}) {
+		t.Fatalf("manifest omitted static metadata: %+v", value)
+	}
+	if len(value.Native) != 6 {
+		t.Fatalf("manifest has %d native platforms; want 6", len(value.Native))
+	}
 	for _, platform := range []string{"linux", "darwin", "windows"} {
 		for _, arch := range []string{"amd64", "arm64"} {
 			asset := assetName(platform, arch)
-			checksum := "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad" // "abc"
-			if platform == "windows" {
-				checksum = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824" // "hello"
-			}
-			expected += fmt.Sprintf("  %s/%s:\n    asset: %s\n    sha256: \"%s\"\n", platform, arch, asset, checksum)
-		}
-	}
-	expected += "docker:\n  image: ghcr.io/exampleorg/commander-custom-agent@sha256:" + strings.Repeat("a", 64) + "\n"
-	if string(contents) != expected {
-		t.Fatalf("manifest differs:\ngot:\n%s\nwant:\n%s", contents, expected)
-	}
-}
-
-func TestReleaseManifestPreservesScalarLikeAgentTypes(t *testing.T) {
-	for _, agentType := range []string{"true", "null", "123"} {
-		t.Run(agentType, func(t *testing.T) {
-			directory := fixture(t)
-			writeFile(t, filepath.Join(directory, "agent.go"), "package example\nconst AgentType = \""+agentType+"\"\n")
-			for _, platform := range []string{"linux", "darwin", "windows"} {
-				for _, arch := range []string{"amd64", "arm64"} {
-					asset := assetName(platform, arch)
-					renamed := strings.Replace(asset, "custom-agent", agentType, 1)
-					if err := os.Rename(filepath.Join(directory, "dist", asset), filepath.Join(directory, "dist", renamed)); err != nil {
-						t.Fatal(err)
-					}
-				}
-			}
-			if output, err := invoke(t, directory, manifestArgs()...); err != nil {
-				t.Fatalf("manifest: %v\n%s", err, output)
-			}
-			contents, err := os.ReadFile(filepath.Join(directory, "dist", "agent.yaml"))
+			data, err := os.ReadFile(filepath.Join(directory, "dist", asset))
 			if err != nil {
 				t.Fatal(err)
 			}
-			if !strings.Contains(string(contents), "\ntype: \""+agentType+"\"\n") {
-				t.Fatalf("agent type must remain a YAML string:\n%s", contents)
+			want := manifest.NativeAsset{Asset: asset, SHA256: fmt.Sprintf("%x", sha256.Sum256(data))}
+			if got := value.Native[platform+"/"+arch]; got != want {
+				t.Errorf("%s/%s asset = %+v; want %+v", platform, arch, got, want)
 			}
-		})
+		}
+	}
+	if value.Docker == nil || value.Docker.Image != "ghcr.io/exampleorg/commander-custom-agent@sha256:"+strings.Repeat("a", 64) {
+		t.Fatalf("manifest lost the published image digest: %+v", value.Docker)
 	}
 }
 
@@ -187,14 +165,11 @@ func TestReleaseManifestFailurePreservesExistingOutput(t *testing.T) {
 			original := `{Name: "analyze-custom", Description: "Count words in custom text."}`
 			writeFile(t, filepath.Join(directory, "description.go"), strings.Replace(descriptionFixtureSource, original, original+", "+original, 1))
 		},
-		"oversized rendered manifest": func(t *testing.T, directory string) {
-			writeFile(t, filepath.Join(directory, "agent.yaml.tmpl"), strings.Repeat("x", (64<<10)+1))
+		"empty responsibilities": func(t *testing.T, directory string) {
+			writeFile(t, filepath.Join(directory, "description.go"), strings.Replace(descriptionFixtureSource, `[]string{"Analyze custom text"}`, `[]string{}`, 1))
 		},
-		"invalid template": func(t *testing.T, directory string) {
-			writeFile(t, filepath.Join(directory, "agent.yaml.tmpl"), "{{")
-		},
-		"template execution failure": func(t *testing.T, directory string) {
-			writeFile(t, filepath.Join(directory, "agent.yaml.tmpl"), "{{ .Unknown }}")
+		"oversized description output": func(t *testing.T, directory string) {
+			writeFile(t, filepath.Join(directory, "description.go"), strings.Replace(descriptionFixtureSource, "Analyze custom text", strings.Repeat("x", 64<<10), 1))
 		},
 	}
 	for name, mutate := range cases {
@@ -232,7 +207,6 @@ func fixture(t *testing.T) string {
 	writeFile(t, filepath.Join(directory, "agent.go"), "package example\nconst AgentType = \"custom-agent\"\n")
 	writeFile(t, filepath.Join(directory, "go.mod"), "module example.invalid/custom-agent\n\ngo 1.26.7\n")
 	writeFile(t, filepath.Join(directory, "description.go"), descriptionFixtureSource)
-	writeFile(t, filepath.Join(directory, "agent.yaml.tmpl"), manifestTemplate)
 	if err := os.Mkdir(filepath.Join(directory, "dist"), 0o755); err != nil {
 		t.Fatal(err)
 	}

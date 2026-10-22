@@ -60,10 +60,10 @@ func parseConfig(args []string, stderr io.Writer) (config, error) {
 	flags.Visit(func(f *flag.Flag) { provided[f.Name] = true })
 	suffix := host.Value(agentIDSuffix, provided["agent-id-suffix"], "COMMANDER_AGENT_ID_SUFFIX", "")
 	if suffix != "" {
-		idType := strings.TrimSuffix(string(browser.AgentType), "-agent")
-		result.agentID = idType + "-agent-" + suffix
-		if kind, ok := id.RuntimeType(result.agentID, id.Agent); len(suffix) != 8 || !ok || kind != idType {
-			return config{}, errors.New("agent-id-suffix / COMMANDER_AGENT_ID_SUFFIX must be exactly 8 lowercase hex characters")
+		var err error
+		result.agentID, err = id.AgentIDFromSuffix(string(browser.AgentType), suffix)
+		if err != nil {
+			return config{}, fmt.Errorf("agent-id-suffix / COMMANDER_AGENT_ID_SUFFIX: %w", err)
 		}
 	}
 	result.busURL = host.Value(busURL, provided["bus-url"], "BUS_URL", filepath.Join("state", "bus"))

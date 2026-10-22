@@ -17,12 +17,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"sort"
 	"strconv"
 	"strings"
-	"text/template"
 	"time"
-	"unicode/utf8"
+
+	"github.com/defos-ai/commander/framework/agent/manifest"
 )
 
 type metadata struct {
@@ -30,12 +29,6 @@ type metadata struct {
 	Type    string `json:"type"`
 	Binary  string `json:"binary"`
 	Image   string `json:"image"`
-}
-
-type nativeAsset struct {
-	Platform string
-	Asset    string
-	SHA256   string
 }
 
 func main() {
@@ -52,11 +45,10 @@ func run(args []string) error {
 	flags := flag.NewFlagSet(args[0], flag.ContinueOnError)
 	version := flags.String("version", "", "release version")
 	repository := flags.String("repository", "", "GitHub owner/repository")
-	var digest, assets, source string
+	var digest, assets string
 	if args[0] == "manifest" {
 		flags.StringVar(&digest, "digest", "", "published image digest")
 		flags.StringVar(&assets, "assets", "dist", "release asset directory")
-		flags.StringVar(&source, "template", "agent.yaml.tmpl", "manifest template")
 	}
 	if err := flags.Parse(args[1:]); err != nil {
 		return err
@@ -71,11 +63,11 @@ func run(args []string) error {
 	if args[0] == "metadata" {
 		return json.NewEncoder(os.Stdout).Encode(data)
 	}
-	return writeManifest(data, digest, assets, source)
+	return writeManifest(data, digest, assets)
 }
 
 func readMetadata(version, repository string) (metadata, error) {
-	if !regexp.MustCompile(`^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`).MatchString(version) || version == "v0.0.0" {
+	if !manifest.ValidVersion(version) {
 		return metadata{}, errors.New("version must be a nonzero stable vMAJOR.MINOR.PATCH tag")
 	}
 	if !regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9][A-Za-z0-9._-]*$`).MatchString(repository) {
@@ -131,11 +123,11 @@ func readAgentType() (string, error) {
 	return agentType, nil
 }
 
-func writeManifest(data metadata, digest, assets, source string) error {
+func writeManifest(data metadata, digest, assets string) error {
 	if !regexp.MustCompile(`^sha256:[0-9a-f]{64}$`).MatchString(digest) {
 		return errors.New("digest must be sha256: followed by 64 lowercase hexadecimal characters")
 	}
-	var native []nativeAsset
+	native := make(map[string]manifest.NativeAsset)
 	for _, platform := range []string{"linux", "darwin", "windows"} {
 		for _, arch := range []string{"amd64", "arm64"} {
 			asset := data.Binary + "_" + platform + "_" + arch
@@ -146,29 +138,24 @@ func writeManifest(data metadata, digest, assets, source string) error {
 			if err != nil {
 				return err
 			}
-			native = append(native, nativeAsset{Platform: platform + "/" + arch, Asset: asset, SHA256: checksum})
+			native[platform+"/"+arch] = manifest.NativeAsset{Asset: asset, SHA256: checksum}
 		}
 	}
 	description, err := readDescription(data.Type)
 	if err != nil {
 		return err
 	}
-	tmpl, err := template.New(filepath.Base(source)).Option("missingkey=error").ParseFiles(source)
+	result, err := manifest.Render(manifest.Manifest{
+		SchemaVersion:    1,
+		Type:             data.Type,
+		Version:          data.Version,
+		Responsibilities: description.Responsibilities,
+		Actions:          description.Actions,
+		Native:           native,
+		Docker:           &manifest.Docker{Image: data.Image + "@" + digest},
+	})
 	if err != nil {
 		return err
-	}
-	var result bytes.Buffer
-	if err := tmpl.Execute(&result, struct {
-		metadata
-		Native           []nativeAsset
-		DockerImage      string
-		Responsibilities []string
-		Actions          []actionDescription
-	}{data, native, data.Image + "@" + digest, description.Responsibilities, description.Actions}); err != nil {
-		return err
-	}
-	if result.Len() > 64<<10 {
-		return errors.New("rendered agent.yaml exceeds 64 KiB")
 	}
 	// Complete validation and rendering before replacing a previously generated manifest.
 	file, err := os.CreateTemp(assets, ".agent-*.yaml")
@@ -176,7 +163,7 @@ func writeManifest(data metadata, digest, assets, source string) error {
 		return err
 	}
 	defer os.Remove(file.Name())
-	if _, err := file.Write(result.Bytes()); err != nil {
+	if _, err := file.Write(result); err != nil {
 		file.Close()
 		return err
 	}
@@ -209,15 +196,10 @@ func hashAsset(path string) (string, error) {
 	return fmt.Sprintf("%x", hash.Sum(nil)), nil
 }
 
-type actionDescription struct {
-	Name        string `json:"name"`
-	Description string `json:"description"`
-}
-
 type agentDescription struct {
-	Type             string              `json:"type"`
-	Responsibilities []string            `json:"responsibilities"`
-	Actions          []actionDescription `json:"actions"`
+	Type             string            `json:"type"`
+	Responsibilities []string          `json:"responsibilities"`
+	Actions          []manifest.Action `json:"actions"`
 }
 
 // The import follows go.mod, so copying the template never leaves a hardcoded
@@ -274,26 +256,9 @@ func readDescription(agentType string) (agentDescription, error) {
 	if decoder.Decode(&result) != nil || decoder.Decode(new(any)) != io.EOF || result.Type != agentType {
 		return agentDescription{}, errors.New("agent description must match the declared AgentType")
 	}
-	if len(result.Responsibilities) == 0 || len(result.Responsibilities) > 100 || len(result.Actions) == 0 || len(result.Actions) > 100 {
-		return agentDescription{}, errors.New("agent description requires 1 to 100 responsibilities and actions")
+	if len(result.Responsibilities) == 0 || len(result.Actions) == 0 {
+		return agentDescription{}, errors.New("agent description requires nonempty responsibilities and actions")
 	}
-	validText := func(value string) bool {
-		return value != "" && strings.TrimSpace(value) == value && len(value) <= 8<<10 && utf8.ValidString(value) && !strings.ContainsRune(value, 0)
-	}
-	for _, value := range result.Responsibilities {
-		if !validText(value) {
-			return agentDescription{}, errors.New("agent responsibilities must be trimmed nonblank text of at most 8 KiB")
-		}
-	}
-	namePattern := regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
-	seen := make(map[string]bool, len(result.Actions))
-	for _, value := range result.Actions {
-		if !namePattern.MatchString(value.Name) || len(value.Name) > 128 || seen[value.Name] || !validText(value.Description) {
-			return agentDescription{}, errors.New("agent actions require unique valid names and trimmed nonblank descriptions of at most 8 KiB")
-		}
-		seen[value.Name] = true
-	}
-	sort.Slice(result.Actions, func(i, j int) bool { return result.Actions[i].Name < result.Actions[j].Name })
 	return result, nil
 }
 
