@@ -12,8 +12,47 @@ x-runtime: &runtime
   security_opt: ["no-new-privileges:true"]
 
 services:
+  api-credentials:
+    image: ghcr.io/defos-ai/commander-api:${COMMANDER_VERSION:-v0.3.0}
+    platform: linux/amd64
+    user: "0:1000"
+    network_mode: none
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        umask 077
+        chgrp 1000 /run/commander-api
+        chmod 750 /run/commander-api
+        password_file=/run/commander-api/api-password
+        if [ -e "$$password_file" ] || [ -L "$$password_file" ]; then
+          test -f "$$password_file"
+          test -s "$$password_file"
+          test ! -L "$$password_file"
+          saved="$$(cat "$$password_file")"
+          API_PASSWORD="$$saved" commander-api credentials --raw > /dev/null
+        fi
+        if [ -n "$$API_PASSWORD" ] || [ ! -f "$$password_file" ]; then
+          temporary="$$(mktemp /run/commander-api/.api-password.XXXXXX)"
+          trap 'rm -f "$$temporary"' EXIT
+          API_PASSWORD="$${API_PASSWORD:-$$(openssl rand -hex 32)}"
+          export API_PASSWORD
+          commander-api credentials --raw > "$$temporary"
+          chmod 440 "$$temporary"
+          mv "$$temporary" "$$password_file"
+        fi
+        chgrp 1000 "$$password_file"
+        chmod 440 "$$password_file"
+    environment:
+      API_USERNAME: ${API_USERNAME:-commander}
+      API_PASSWORD: ${API_PASSWORD:-}
+    volumes:
+      - api-credentials:/run/commander-api
+
   mcp-credentials:
-    image: ghcr.io/defos-ai/commander-mcp:${COMMANDER_VERSION:-v0.2.0}
+    image: ghcr.io/defos-ai/commander-mcp:${COMMANDER_VERSION:-v0.3.0}
     platform: linux/amd64
     user: "0:1000"
     read_only: true
@@ -45,7 +84,7 @@ services:
       - mcp-credentials:/run/commander
 
   volume-init:
-    image: ghcr.io/defos-ai/commander-controller:${COMMANDER_VERSION:-v0.2.0}
+    image: ghcr.io/defos-ai/commander-controller:${COMMANDER_VERSION:-v0.3.0}
     platform: linux/amd64
     user: "0:0"
     network_mode: none
@@ -62,9 +101,8 @@ services:
 
   controller:
     <<: *runtime
-    image: ghcr.io/defos-ai/commander-controller:${COMMANDER_VERSION:-v0.2.0}
+    image: ghcr.io/defos-ai/commander-controller:${COMMANDER_VERSION:-v0.3.0}
     platform: linux/amd64
-    command: ["--with-missions=/data/review-page.json"]
     environment:
       <<: *environment
       DATABASE_URL: file:///state/database
@@ -72,9 +110,6 @@ services:
       - bus:/state/bus
       - storage:/state/storage
       - database:/state/database
-    configs:
-      - source: missions
-        target: /data/review-page.json
     depends_on:
       volume-init:
         condition: service_completed_successfully
@@ -98,7 +133,7 @@ services:
     <<: *runtime
     # Keep MCP at PID 1 for its credentials lookup command.
     init: false
-    image: ghcr.io/defos-ai/commander-mcp:${COMMANDER_VERSION:-v0.2.0}
+    image: ghcr.io/defos-ai/commander-mcp:${COMMANDER_VERSION:-v0.3.0}
     platform: linux/amd64
     entrypoint:
       - /bin/sh
@@ -138,20 +173,20 @@ services:
     <<: *runtime
     # The credentials command reads the running API's environment at PID 1.
     init: false
-    image: ghcr.io/defos-ai/commander-api:${COMMANDER_VERSION:-v0.2.0}
+    image: ghcr.io/defos-ai/commander-api:${COMMANDER_VERSION:-v0.3.0}
     platform: linux/amd64
     entrypoint: ["/bin/sh", "-ec"]
     command:
       - |
-        API_PASSWORD="$${API_PASSWORD:-$$(openssl rand -hex 32)}"
+        API_PASSWORD="$$(cat /run/commander-api/api-password)"
+        test -n "$$API_PASSWORD"
         export API_PASSWORD
         exec commander-api
     environment:
       <<: *environment
       DATABASE_URL: file:///state/database
       ENV: development
-      API_USERNAME: commander
-      API_PASSWORD: ${API_PASSWORD:-}
+      API_USERNAME: ${API_USERNAME:-commander}
       API_RUNTIME: docker-compose
       API_LISTEN_ADDRESS: 0.0.0.0:4274
       API_ALLOWED_HOSTS: localhost,127.0.0.1,::1,api
@@ -160,8 +195,11 @@ services:
       - bus:/state/bus
       - storage:/state/storage
       - database:/state/database
+      - api-credentials:/run/commander-api:ro
     ports: ["127.0.0.1:4284:4274"]
     depends_on:
+      api-credentials:
+        condition: service_completed_successfully
       controller:
         condition: service_started
     healthcheck:
@@ -171,9 +209,39 @@ services:
       retries: 12
       start_period: 5s
 
+  missions:
+    <<: *runtime
+    image: ghcr.io/defos-ai/commander-admin:${COMMANDER_VERSION:-v0.3.0}
+    platform: linux/amd64
+    read_only: true
+    restart: "no"
+    entrypoint:
+      - /bin/sh
+      - -ec
+      - |
+        COMMANDER_API_PASSWORD="$$(cat /run/commander-api/api-password)"
+        test -n "$$COMMANDER_API_PASSWORD"
+        export COMMANDER_API_PASSWORD
+        exec commander-admin "$$@"
+      - commander-admin
+    command: ["missions", "import", "/data/review-page.json"]
+    environment:
+      COMMANDER_API_URL: http://api:4274
+      COMMANDER_API_USERNAME: ${API_USERNAME:-commander}
+    volumes:
+      - api-credentials:/run/commander-api:ro
+    configs:
+      - source: missions
+        target: /data/review-page.json
+    depends_on:
+      api-credentials:
+        condition: service_completed_successfully
+      api:
+        condition: service_healthy
+
   ui:
     <<: *runtime
-    image: ghcr.io/defos-ai/commander-admin:${COMMANDER_VERSION:-v0.2.0}
+    image: ghcr.io/defos-ai/commander-admin:${COMMANDER_VERSION:-v0.3.0}
     platform: linux/amd64
     read_only: true
     environment:
@@ -191,7 +259,7 @@ services:
 
   playground:
     profiles: [playground]
-    image: ghcr.io/defos-ai/commander-playground:${COMMANDER_VERSION:-v0.2.0}
+    image: ghcr.io/defos-ai/commander-playground:${COMMANDER_VERSION:-v0.3.0}
     platform: linux/amd64
     init: true
     stdin_open: true
@@ -203,12 +271,16 @@ services:
       - -ec
       - |
         COMMANDER_MCP_TOKEN="$${COMMANDER_MCP_TOKEN:-$$(cat /run/commander/mcp-token)}"
-        export COMMANDER_MCP_TOKEN
+        COMMANDER_API_PASSWORD="$$(cat /run/commander-api/api-password)"
+        test -n "$$COMMANDER_API_PASSWORD"
+        export COMMANDER_MCP_TOKEN COMMANDER_API_PASSWORD
         exec commander "$$@"
       - commander
     environment:
       COMMANDER_MCP_URL: http://mcp:4273/mcp
       COMMANDER_MCP_TOKEN: ${COMMANDER_MCP_TOKEN:-${MCP_TOKEN:-}}
+      COMMANDER_API_URL: http://api:4274
+      COMMANDER_API_USERNAME: ${API_USERNAME:-commander}
       COMMANDER_LLM_PROVIDER: ${COMMANDER_LLM_PROVIDER:-}
       COMMANDER_LLM_MODEL: ${COMMANDER_LLM_MODEL:-}
       COMMANDER_LLM_BASE_URL: ${COMMANDER_LLM_BASE_URL:-}
@@ -224,7 +296,12 @@ services:
       TERM: ${TERM:-xterm-256color}
     volumes:
       - mcp-credentials:/run/commander:ro
+      - api-credentials:/run/commander-api:ro
     depends_on:
+      api-credentials:
+        condition: service_completed_successfully
+      missions:
+        condition: service_completed_successfully
       mcp-credentials:
         condition: service_completed_successfully
       mcp:
@@ -233,6 +310,7 @@ services:
         condition: service_started
 
 volumes:
+  api-credentials:
   mcp-credentials:
   bus:
   storage:

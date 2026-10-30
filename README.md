@@ -14,7 +14,7 @@ Static HTML checks and crawling belong to the
 ## Try it locally
 
 Requires Docker Compose. The image includes Chromium; the demo uses Commander
-`v0.2.0` host images.
+`v0.3.0` host images.
 
 ```sh
 docker compose up --build --wait
@@ -74,7 +74,7 @@ It publishes native binaries for Linux/macOS/Windows on amd64/arm64, the existin
 `ghcr.io/defos-ai/commander-browser-agent` image, and `agent.yaml` containing binary
 checksums, the image digest and static responsibilities/action descriptions from
 [description.go](description.go), using the framework's manifest template. The agent
-depends on published Commander modules at `v0.2.0`; agent and Commander release
+depends on published Commander modules at `v0.3.0`; agent and Commander release
 versions are independent. Grant this repository Actions write access to the
 existing GHCR package before releasing.
 Complete releases promote Docker `stable` and GitHub `Latest` when they are the

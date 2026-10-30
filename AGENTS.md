@@ -22,8 +22,9 @@
   `check-accessibility`. Creating an operation does not start tasks. Static HTTP
   checks and crawling remain in the separate web-agent repository.
   Root `objectives` is an ordered array of nonblank strings. All entries apply
-  to the mission and are displayed separately; step `objective` stays singular.
-  These mission definitions require Commander v0.2.0 or newer hosts.
+  to the mission and are displayed separately. Mission steps are not supported.
+  The demo imports its mission through Admin CLI after API readiness; the controller
+  does not load mission files.
 
 ## Host and providers
 
@@ -66,12 +67,14 @@
 
 - [compose.yaml](compose.yaml) follows the example agent's isolated FS demo:
   UID1000-owned state, one controller, loopback MCP/API/Admin ports 4283/4284/4285,
-  and optional Playground using the same `COMMANDER_VERSION` (default `v0.2.0`).
+  and optional Playground using the same `COMMANDER_VERSION` (default `v0.3.0`).
   Commander host images explicitly use linux/amd64; the agent image supports
   linux/amd64 and linux/arm64. Never run demo Playground with `--all-in-one`.
-- `mcp-credentials` is the demo's sole credential-file exception. Retain tokens
-  across restarts, mount read-only into MCP/Playground, export before exec, preserve
-  configured overrides and never log secrets. API/MCP stay at PID1 for lookup.
+- Separate `api-credentials` and `mcp-credentials` volumes retain the demo logins.
+  Initializers validate saved values and preserve explicit overrides. API, mission
+  import and Playground mount the API password read-only; MCP and Playground
+  mount the token read-only. Export before exec and never log secrets. API/MCP
+  stay at PID1 for credential lookup. Browser Admin signs in independently.
 - The demo fixes API `ENV` to `development`.
   `.github/composes/compose.test.yaml` enables test-only API cleanup and adds a
   static HTTP fixture at `http://fixture/`, from
@@ -82,7 +85,7 @@
   Grant the new repository write access before publishing. Do not let the old
   monorepo workflow keep publishing the same version/stable tags.
 - The next standalone release is `v0.2.1`. Published Commander framework/providers
-  are pinned to `v0.2.0`, with no local `replace`. Agent release versions are
+  are pinned to `v0.3.0`, with no local `replace`. Agent release versions are
   independent of Commander versions. An ignored development workspace may map
   dependencies to local checkouts.
 - Manifest generation uses `framework/agent/manifest.Render` and its embedded
