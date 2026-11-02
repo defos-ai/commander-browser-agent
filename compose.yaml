@@ -121,7 +121,10 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile
-    environment: *environment
+    environment:
+      <<: *environment
+      BROWSER_MODEL_URL: ${BROWSER_MODEL_URL:-}
+      BROWSER_MODEL_NAME: ${BROWSER_MODEL_NAME:-}
     volumes:
       - bus:/state/bus
       - storage:/state/storage

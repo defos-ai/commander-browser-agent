@@ -11,6 +11,7 @@ import (
 	"syscall"
 
 	browser "github.com/defos-ai/commander-browser-agent"
+	browserruntime "github.com/defos-ai/commander-browser-agent/browser"
 	agents "github.com/defos-ai/commander/framework/agent"
 	"github.com/defos-ai/commander/framework/agent/action"
 	"github.com/defos-ai/commander/framework/host"
@@ -58,7 +59,16 @@ func Run(ctx context.Context, args []string, stderr io.Writer) (result error) {
 		return err
 	}
 	defer func() { result = errors.Join(result, dependencies.Close()) }()
-	actions := browser.NewActions()
+	sessions, err := browserruntime.New(agentID)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err := sessions.Close(); err != nil && !errors.Is(result, err) {
+			result = errors.Join(result, err)
+		}
+	}()
+	actions := browser.NewActions(sessions)
 	if configuration.actionNames != nil {
 		selected := make([]action.Executor, 0, len(configuration.actionNames))
 		for _, name := range configuration.actionNames {
@@ -73,6 +83,7 @@ func Run(ctx context.Context, args []string, stderr io.Writer) (result error) {
 	}
 	agent, err := browser.NewAgent(agents.AgentConfig{
 		ID:                agentID,
+		Sessions:          sessions,
 		Actions:           actions,
 		ArtifactFileStore: dependencies.ArtifactFileStore,
 		Logger:            logger,

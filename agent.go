@@ -1,6 +1,9 @@
 package browser
 
 import (
+	"errors"
+
+	agentactions "github.com/defos-ai/commander-browser-agent/actions"
 	browserruntime "github.com/defos-ai/commander-browser-agent/browser"
 	agents "github.com/defos-ai/commander/framework/agent"
 	"github.com/defos-ai/commander/framework/id"
@@ -30,7 +33,14 @@ func NewAgent(config agents.AgentConfig) (*agents.Agent, error) {
 		config.Responsibilities = Responsibilities()
 	}
 	if config.Actions == nil {
-		config.Actions = NewActions()
+		runner, ok := config.Sessions.(agentactions.BrowserRunner)
+		if !ok {
+			return nil, errors.New("default browser actions require a browser session runner")
+		}
+		config.Actions = NewActions(runner)
+	}
+	if config.Secrets == nil {
+		config.Secrets = &agents.SecretConfig{}
 	}
 	return agents.NewAgent(config)
 }

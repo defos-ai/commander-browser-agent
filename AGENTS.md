@@ -18,9 +18,10 @@
   chooses agents and mission rules control transitions. Upload bytes through
   `ArtifactFileStore`; the controller accepts metadata. Do not claim exactly-once
   execution or confuse broker ACKs with result acceptance.
-- The default action catalog is intentionally empty while `browse`, `login` and
-  `screenshot` are implemented. Do not restore legacy capture/accessibility actions
-  or their review mission. Static HTTP checks/crawling remain in the separate
+- The default action catalog exposes `browse`. Managed login, clarification,
+  checkpoints and text-only screenshots are subsequent steps. Do not restore
+  legacy capture/accessibility actions or their review mission. Static HTTP
+  checks/crawling remain in the separate
   web-agent repository. Creating an operation does not start tasks.
   Root `objectives` is an ordered array of nonblank strings; entries apply to the
   mission and display separately. Mission steps are not supported. Future demo
@@ -96,8 +97,44 @@
   during discovery.
   Managed sessions require Unix process-group support; native Windows must report
   the Docker/WSL requirement before starting a process, until job-based process-tree
-  ownership is implemented. The default action catalog stays empty until its new
-  actions are implemented.
+  ownership is implemented.
+
+## Intelligence and model access
+
+- [browser/intelligence/](browser/intelligence/) implements an in-process Go loop
+  on the existing session context. Do not launch the native Lightpanda agent or
+  attach another CDP connection. The pinned native agent has a fixed tool catalog,
+  creates its own browser/session and exposes environment values through `getEnv`;
+  a fake-model probe confirmed that path reaches model context. Its JSONL trace is
+  observation-only, not a custom callback bridge. Browser Use 0.13.14 also creates
+  its own connection and auto-reconnects. Neither preserves this session contract
+  through a suitable public hook. Relevant pinned sources:
+  [Lightpanda Agent](https://github.com/lightpanda-io/browser/blob/c5f7bb29b127040c899d4e181b5709f76fc71a6f/src/agent/Agent.zig),
+  [ToolSession](https://github.com/lightpanda-io/browser/blob/c5f7bb29b127040c899d4e181b5709f76fc71a6f/src/ToolSession.zig),
+  [Browser Use session](https://github.com/browser-use/browser-use/blob/2cc71890e65056b67fdb29d98bb407749c15bb08/browser_use/browser/session.py).
+- `BROWSER_MODEL_URL` is the exact Chat Completions endpoint and
+  `BROWSER_MODEL_NAME` selects the model. Discover through the environment
+  abstraction, clear stale state on rediscovery, and perform no model network
+  calls or secret requests during discovery. Require HTTPS except local HTTP;
+  reject embedded credentials, URL query/fragment and redirects. The wire format
+  follows the [official API reference](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create).
+- Enable framework managed secrets in the host. Request `browser-model-api-key`
+  through `action.RequestSecret` on demand; declaring it in RequiredSecrets would
+  block execution before the request can run. Never read a model key from the
+  process environment. Clear owned bytes after use; send the key only in the
+  model authentication header and redact known values from observations, output
+  and artifacts. Suppress raw provider/browser errors and protocol output.
+- Expose typed browser commands only, with one model command per turn and no
+  model-supplied JavaScript, selectors, credentials or raw CDP. Keep safe bounded
+  observations, exact document-host scope, evidence references and static execution
+  logs. Reject malformed/multiple commands before side effects. Stop on uncertain
+  browser operations instead of automatically retrying them. Bound wall time,
+  steps, completion allowances, observations, responses and evidence. Do not claim
+  a provider cost limit or transparent recovery from lost browser state.
+- The action factory receives the same production session runner as the host.
+  Preserve explicitly empty catalogs; do not create a second manager inside an
+  action. Return artifact bytes through action results for ArtifactFileStore
+  upload; never write raw DOM, model transcripts or credentials to artifacts.
 
 ## Demo and releases
 
@@ -157,10 +194,11 @@ go test -race -count=1 -timeout=3m ./... ./.github/tests
 go vet ./... ./.github/scripts ./.github/tests
 ```
 
-Real session tests use `-tags=browserintegration` and require absolute
+Real session/browse tests use `-tags=browserintegration` and require absolute
 `LIGHTPANDA_PATH`. They exercise Lightpanda and a test-only action through
 Commander dispatch, inventory and session controls over the FS bus, without a
-model or demo stack.
+external model or demo stack. Browse tests use a local fake model over its actual
+HTTP protocol and deliver a synthetic key through the framework secret exchange.
 The production manager owns browser lifecycle; fixtures own HTTP pages only.
 CI compiles the race-enabled test binary in the Go bookworm image to match the
 runtime's glibc, then executes it as the runtime image's UID1000 with no external

@@ -7,10 +7,9 @@ import (
 	"github.com/defos-ai/commander/framework/agent/action"
 )
 
-// NewActions creates the default catalog, currently empty while the new actions
-// are being implemented. Future instances must keep discovery state per host.
-func NewActions() []action.Executor {
-	return agentactions.NewActions()
+// NewActions creates fresh actions using this host's shared browser sessions.
+func NewActions(runner agentactions.BrowserRunner) []action.Executor {
+	return agentactions.NewActions(runner)
 }
 
 func ActionNames() []string {

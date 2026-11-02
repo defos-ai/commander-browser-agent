@@ -1,12 +1,15 @@
 # Commander browser agent
 
-A Lightpanda browser runtime and reusable Commander sessions for
+A model-driven Lightpanda browser agent with reusable sessions for
 [Commander](https://github.com/defos-ai/commander).
 
-The default action catalog is currently empty. The legacy page-capture and
-accessibility actions have been retired; `browse`, `login` and `screenshot` are
-being implemented. The planned screenshot action uses Lightpanda's text-only PNG
-renderer at desktop/mobile viewport sizes.
+`browse` accepts an objective, navigates and interacts with a website using the
+agent's own model, and returns structured findings with extracted evidence.
+Findings and evidence are also uploaded as JSON artifacts. Browser state stays
+in an isolated Commander session for reuse and inspect/verify/close controls.
+Completion requires extracted evidence and findings that cite it.
+Managed `login`, clarification questions, checkpoints and `screenshot` are planned
+next. Screenshots will use Lightpanda's text-only PNG renderer.
 
 Static HTML checks and crawling belong to the
 [web agent](https://github.com/defos-ai/commander-web-agent).
@@ -17,12 +20,19 @@ Requires Docker Compose. The image includes Lightpanda `1.0.2`; the demo uses
 Commander `v0.3.0` host images.
 
 ```sh
+export BROWSER_MODEL_URL=https://your-model-provider.example/v1/chat/completions
+export BROWSER_MODEL_NAME=your-tool-calling-model
 docker compose up --build --wait
 docker compose run --rm --no-deps playground
 ```
 
-The stack is a development environment for the new actions. No review mission is
-imported while the action catalog is empty.
+Use a model endpoint supporting Chat Completions function calls. The exact URL
+and model name are required; discovery reports missing configuration without
+calling the model. HTTPS is required except for local HTTP endpoints. Compose
+passes these two settings to the agent. Supply the model key through Commander's
+managed secret named `browser-model-api-key`; the agent requests it when work
+starts. Credentials are never supplied through action input or model prompts.
+No demo mission is imported yet.
 
 Open [Admin](http://localhost:4285) to inspect the registered agent and sessions.
 Add `http://localhost:4284`; get its credentials with:
@@ -32,6 +42,33 @@ docker compose exec api commander-api credentials
 ```
 
 Use `/exit` to close Playground and `docker compose down` to stop the stack.
+
+For example, a controller can dispatch `browse` with:
+
+```json
+{
+  "objective": "Find the support contact and summarize the available options.",
+  "url": "https://example.com/",
+  "engine": "lightpanda",
+  "session_scope": "2e2ca5a5-c552-4ab4-90a7-62807dcb3f50"
+}
+```
+
+The controller supplies the session binding. Reuse adds its `session_id` within
+the same scope. Navigation stays on the starting URL's exact hostname unless
+`allowed_hosts` explicitly lists additional hosts; ports may differ, while
+subdomains and `www` variants are separate hosts. Model operations use observed
+element IDs. Password and other credential fields are excluded from this action.
+URL query strings/fragments and form values are omitted from observations.
+
+Defaults are 12 steps, 120 seconds and 8,192 reserved completion tokens.
+`max_steps` (1–30), `timeout_seconds` (5–180) and `max_completion_tokens`
+(1,024–32,768) may lower or raise those limits. Each model call reserves up to
+1,024 completion tokens, independent of reported usage; input and response sizes
+are bounded separately. This allowance does not represent a provider price or a
+total input-token quota. Step/token exhaustion returns a partial report; timeouts
+and cancellation fail the execution. An unconfirmed browser operation stops work
+and asks for session inspection before retrying.
 
 ## Connect to Commander
 
