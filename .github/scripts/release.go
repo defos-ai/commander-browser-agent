@@ -256,8 +256,13 @@ func readDescription(agentType string) (agentDescription, error) {
 	if decoder.Decode(&result) != nil || decoder.Decode(new(any)) != io.EOF || result.Type != agentType {
 		return agentDescription{}, errors.New("agent description must match the declared AgentType")
 	}
-	if len(result.Responsibilities) == 0 || len(result.Actions) == 0 {
-		return agentDescription{}, errors.New("agent description requires nonempty responsibilities and actions")
+	if len(result.Responsibilities) == 0 {
+		return agentDescription{}, errors.New("agent description requires nonempty responsibilities")
+	}
+	if len(result.Actions) == 0 {
+		// The framework permits omitted action metadata, but rejects an explicit
+		// empty manifest list. Never repopulate an intentionally empty catalog.
+		result.Actions = nil
 	}
 	return result, nil
 }

@@ -31,6 +31,9 @@ type config struct {
 func parseConfig(args []string, stderr io.Writer) (config, error) {
 	knownActions := browser.ActionNames()
 	availableActions := strings.Join(knownActions, ",")
+	if len(knownActions) == 0 {
+		availableActions = "none"
+	}
 	var result config
 	var actionNames, searchPaths, agentIDSuffix string
 	var busURL, storageURL string

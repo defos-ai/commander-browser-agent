@@ -209,36 +209,6 @@ services:
       retries: 12
       start_period: 5s
 
-  missions:
-    <<: *runtime
-    image: ghcr.io/defos-ai/commander-admin:${COMMANDER_VERSION:-v0.3.0}
-    platform: linux/amd64
-    read_only: true
-    restart: "no"
-    entrypoint:
-      - /bin/sh
-      - -ec
-      - |
-        COMMANDER_API_PASSWORD="$$(cat /run/commander-api/api-password)"
-        test -n "$$COMMANDER_API_PASSWORD"
-        export COMMANDER_API_PASSWORD
-        exec commander-admin "$$@"
-      - commander-admin
-    command: ["missions", "import", "/data/review-page.json"]
-    environment:
-      COMMANDER_API_URL: http://api:4274
-      COMMANDER_API_USERNAME: ${API_USERNAME:-commander}
-    volumes:
-      - api-credentials:/run/commander-api:ro
-    configs:
-      - source: missions
-        target: /data/review-page.json
-    depends_on:
-      api-credentials:
-        condition: service_completed_successfully
-      api:
-        condition: service_healthy
-
   ui:
     <<: *runtime
     image: ghcr.io/defos-ai/commander-admin:${COMMANDER_VERSION:-v0.3.0}
@@ -298,9 +268,9 @@ services:
       - mcp-credentials:/run/commander:ro
       - api-credentials:/run/commander-api:ro
     depends_on:
+      api:
+        condition: service_healthy
       api-credentials:
-        condition: service_completed_successfully
-      missions:
         condition: service_completed_successfully
       mcp-credentials:
         condition: service_completed_successfully
@@ -315,7 +285,3 @@ volumes:
   bus:
   storage:
   database:
-
-configs:
-  missions:
-    file: ./missions/review-page.json

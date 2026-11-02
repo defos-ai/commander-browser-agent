@@ -1,31 +1,30 @@
 # Commander browser agent
 
-Render pages with Chromium, capture desktop/mobile screenshots and check rendered
-accessibility for [Commander](https://github.com/defos-ai/commander) missions.
+A Lightpanda browser runtime and reusable Commander sessions for
+[Commander](https://github.com/defos-ai/commander).
 
-| Action | Result |
-| --- | --- |
-| `capture-page` | Desktop/mobile PNGs, page title and horizontal overflow findings |
-| `check-accessibility` | Bounded checks for headings, image alternatives, form labels and links |
+The default action catalog is currently empty. The legacy page-capture and
+accessibility actions have been retired; `browse`, `login` and `screenshot` are
+being implemented. The planned screenshot action uses Lightpanda's text-only PNG
+renderer at desktop/mobile viewport sizes.
 
 Static HTML checks and crawling belong to the
 [web agent](https://github.com/defos-ai/commander-web-agent).
 
 ## Try it locally
 
-Requires Docker Compose. The image includes Chromium and Lightpanda `1.0.2`; the
-demo uses Commander `v0.3.0` host images.
+Requires Docker Compose. The image includes Lightpanda `1.0.2`; the demo uses
+Commander `v0.3.0` host images.
 
 ```sh
 docker compose up --build --wait
 docker compose run --rm --no-deps playground
 ```
 
-Choose a model provider and enter its API key. Try:
+The stack is a development environment for the new actions. No review mission is
+imported while the action catalog is empty.
 
-> Run review-page for https://defos.ai and summarize the screenshots and accessibility findings.
-
-Open [Admin](http://localhost:4285) to inspect results and download screenshots.
+Open [Admin](http://localhost:4285) to inspect the registered agent and sessions.
 Add `http://localhost:4284`; get its credentials with:
 
 ```sh
@@ -47,20 +46,21 @@ deployments use RabbitMQ (`BUS_URL=amqp://…` or `amqps://…`) and S3-compatib
 artifact storage (`STORAGE_URL=s3://bucket`), with service credentials supplied
 through the deployment environment.
 
-Native runs need Chromium or Chrome. Set `CHROMIUM_PATH` to an absolute executable
-path if discovery cannot find it. Native sandboxing stays enabled; the Docker
-image sets `CHROMIUM_NO_SANDBOX=true` and runs as an unprivileged user.
-
-For native Lightpanda support, install
+Native runs need
 [Lightpanda 1.0.2](https://github.com/lightpanda-io/browser/releases/tag/1.0.2) on
 `PATH`, or set `LIGHTPANDA_PATH` to its absolute executable path. Discovery checks
 the installed version before reporting readiness. Linux builds require glibc;
 Windows hosts can use the Docker image or WSL. The image disables Lightpanda
 telemetry and crash core dumps by default.
 
-Lightpanda is packaged for browser automation. The current `capture-page` and
-`check-accessibility` actions continue to use Chromium; packaging Lightpanda does
-not add browsing, login or reusable sessions yet.
+Session-aware actions share browser state through Commander sessions. Each
+session belongs to one running agent and explicitly selects `lightpanda`.
+Authentication stays within that session. Commander
+can inspect, verify or close it; a confirmed close interrupts active work and
+removes the browser profile. Agent shutdown retains the reference as lost;
+replacement requires explicit closure or controller-owned abandonment.
+Native reusable sessions currently require Linux or macOS; Windows hosts use
+Docker or WSL for this capability.
 
 Run `go run ./cmd --help` for settings. A spawner sets
 `COMMANDER_AGENT_ID_SUFFIX=0123abcd`, producing `browser-agent-0123abcd`.
@@ -71,8 +71,8 @@ Never use the same suffix for two running instances of this type.
 ## Develop and release
 
 This repository follows [commander-example-agent](https://github.com/defos-ai/commander-example-agent).
-The agent type lives in [agent.go](agent.go), rendering actions in [actions/](actions/),
-and the demo mission in [missions/review-page.json](missions/review-page.json).
+The agent type lives in [agent.go](agent.go), the action factory in [actions/](actions/),
+and browser runtime/session support in [browser/](browser/).
 Implementation and integration-test guidance are in [AGENTS.md](AGENTS.md).
 
 ```sh

@@ -139,6 +139,29 @@ func TestReleaseManifest(t *testing.T) {
 	}
 }
 
+func TestReleaseManifestAllowsEmptyActionCatalog(t *testing.T) {
+	directory := fixture(t)
+	source := strings.Replace(descriptionFixtureSource,
+		`return []descriptionAction{{Name: "analyze-custom", Description: "Count words in custom text."}}`,
+		`return []descriptionAction{}`, 1)
+	if source == descriptionFixtureSource {
+		t.Fatal("fixture did not remove its action catalog")
+	}
+	writeFile(t, filepath.Join(directory, "description.go"), source)
+	output, err := invoke(t, directory, manifestArgs()...)
+	if err != nil {
+		t.Fatalf("manifest with empty catalog: %v\n%s", err, output)
+	}
+	contents, err := os.ReadFile(filepath.Join(directory, "dist", "agent.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, err := manifest.Parse(contents, "v0.1.0")
+	if err != nil || len(value.Actions) != 0 || len(value.Responsibilities) != 1 {
+		t.Fatalf("empty catalog manifest did not preserve static metadata: %+v, %v", value, err)
+	}
+}
+
 func TestReleaseManifestFailurePreservesExistingOutput(t *testing.T) {
 	cases := map[string]func(*testing.T, string){
 		"missing asset": func(t *testing.T, directory string) {

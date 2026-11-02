@@ -18,13 +18,14 @@
   chooses agents and mission rules control transitions. Upload bytes through
   `ArtifactFileStore`; the controller accepts metadata. Do not claim exactly-once
   execution or confuse broker ACKs with result acceptance.
-- The demo [mission](missions/review-page.json) uses only `capture-page` and
-  `check-accessibility`. Creating an operation does not start tasks. Static HTTP
-  checks and crawling remain in the separate web-agent repository.
-  Root `objectives` is an ordered array of nonblank strings. All entries apply
-  to the mission and are displayed separately. Mission steps are not supported.
-  The demo imports its mission through Admin CLI after API readiness; the controller
-  does not load mission files.
+- The default action catalog is intentionally empty while `browse`, `login` and
+  `screenshot` are implemented. Do not restore legacy capture/accessibility actions
+  or their review mission. Static HTTP checks/crawling remain in the separate
+  web-agent repository. Creating an operation does not start tasks.
+  Root `objectives` is an ordered array of nonblank strings; entries apply to the
+  mission and display separately. Mission steps are not supported. Future demo
+  missions must import through Admin CLI after API readiness; the controller never
+  loads mission files.
 
 ## Host and providers
 
@@ -44,38 +45,59 @@
   providers. Unsupported schemes fail explicitly. Agents never connect to MongoDB.
   The browser needs no managed-secret decryption key.
 
-## Rendering
+## Browser runtime
 
-- [actions/url.go](actions/url.go) validates HTTP(S) URLs and exact hostname scope.
-  Ports may differ; subdomains and `www` variants are different hosts.
-- Discovery in [actions/browser.go](actions/browser.go) uses the environment
-  abstraction. `CHROMIUM_PATH` is absolute; explicit discovery scope wins.
-  Rediscovery clears stale configuration. Missing executables/configuration make
-  rendering actions unavailable with actionable requirements.
-- Each execution uses a fresh browser profile and bounded context. Keep GET/HEAD
-  restrictions and document navigation on the requested hostname while permitting
-  external page resources. CDP listeners must not issue synchronous commands to
-  their own target.
-- Native sandboxing stays enabled unless `CHROMIUM_NO_SANDBOX` is explicit. The
-  [Dockerfile](docker/Dockerfile) installs Chromium/fonts, sets container defaults,
-  and provides a real UID1000 user with a writable home for Chromium's crash
-  handler. Docker builds use standalone context and `GOWORK=off`.
-- [lightpanda](lightpanda/) discovers the separately packaged Lightpanda 1.0.2
-  runtime through the environment abstraction. `LIGHTPANDA_PATH` is absolute;
-  explicit discovery scope wins. Discovery returns fresh configuration, checks
-  the exact version under a bounded context, and reports structured readiness
-  requirements without echoing subprocess output. Current rendering actions
-  depend only on Chromium; do not add a dummy action or start a CDP server during
-  discovery. Session/process lifecycle belongs to the next implementation step.
-- Docker packages checksum-pinned Lightpanda binaries for linux/amd64 and
-  linux/arm64, fails unsupported architectures, and disables telemetry/core dumps.
-  Fetch and verify the upstream AGPL-3.0-or-later license and embedded-font notices
-  from the pinned source commit during the build, and retain them with runtime
-  attribution in `/usr/share/doc/lightpanda` in the image. Lightpanda remains a
-  separate runtime dependency; it does not change the agent source's MIT or
-  Commander's AGPL-3.0-only licensing.
-- Group desktop/mobile PNGs in one artifact with descriptive metadata.
-  Accessibility results are bounded checks, not a complete compliance audit.
+- [Lightpanda discovery](browser/lightpanda/) uses the environment abstraction.
+  `LIGHTPANDA_PATH` is absolute; explicit discovery scope wins. Return fresh
+  configuration, check the exact 1.0.2 version with a bounded context, and report
+  structured readiness requirements without echoing subprocess output. Never
+  start a CDP server during discovery.
+- [browser/](browser/) owns Lightpanda process/connection lifecycle. Do not add
+  Chromium as a fallback. The Dockerfile packages checksum-pinned linux/amd64 and
+  linux/arm64 binaries, fails unsupported architectures, and disables telemetry
+  and core dumps. Keep standalone context and `GOWORK=off`, a real UID1000 user
+  and writable home.
+- Fetch and verify the upstream AGPL-3.0-or-later license and embedded-font notices
+  from the pinned source commit during the build. Retain them with runtime
+  attribution in `/usr/share/doc/lightpanda`; do not vendor a third_party folder.
+  This separate runtime dependency does not change the agent's MIT or Commander's
+  AGPL-3.0-only licensing.
+- The future screenshot action uses Lightpanda text-only PNGs. Identify the
+  renderer in output/artifact metadata; desktop/mobile refer to viewport sizes,
+  not pixel-accurate page design or full mobile-device emulation. Do not restore
+  the old capture/accessibility actions to supply this capability.
+
+## Reusable browser sessions
+
+- [agent.go](agent.go) supplies one [session manager](browser/manager.go)
+  per agent unless the caller provides a Commander sessions provider. Constructors
+  and `Prepare` open no browsers. `Run` requires the exact framework-owned session
+  binding and creation claim from `action.SessionFromContext`.
+- Choose `lightpanda` explicitly; reject other engines. Keep its process, CDP
+  connection and page for reuse. Every session has its own private profile; never
+  transfer cookies or authentication between sessions or engines. Never reconnect
+  a lost session and describe it as restored.
+- Browser lifetime is independent of an action's cancellation after startup.
+  Preserve execution context values for questions, secrets, logs and checkpoints.
+  Serialize work within a session while allowing independent inspect/verify/close
+  controls. Close must interrupt work and join startup/cleanup before reporting
+  `closed`; uncertain cleanup and owner shutdown retain `lost` references.
+- Retain closed tombstones and original creation identities for the host lifetime.
+  Scope admission and release belong to the controller. Accept a new
+  framework-issued creation claim independently of an old identity in the same
+  scope: abandonment can authorize replacement before best-effort old cleanup.
+  Never rebind or transfer the old resource. Snapshots are quick, independently
+  cloned and revisioned, with coalesced change notifications. Expose engine/state/
+  reference metadata, never CDP endpoints, profile paths, page URLs, cookies,
+  credentials or browser output.
+- Managed processes use loopback CDP, discard browser/protocol logs, and disable
+  Lightpanda telemetry and core dumps. Bound startup and cleanup, terminate/reap
+  owned processes, and remove private profiles. No browser process is started
+  during discovery.
+  Managed sessions require Unix process-group support; native Windows must report
+  the Docker/WSL requirement before starting a process, until job-based process-tree
+  ownership is implemented. The default action catalog stays empty until its new
+  actions are implemented.
 
 ## Demo and releases
 
@@ -85,15 +107,12 @@
   Commander host images explicitly use linux/amd64; the agent image supports
   linux/amd64 and linux/arm64. Never run demo Playground with `--all-in-one`.
 - Separate `api-credentials` and `mcp-credentials` volumes retain the demo logins.
-  Initializers validate saved values and preserve explicit overrides. API, mission
-  import and Playground mount the API password read-only; MCP and Playground
+  Initializers validate saved values and preserve explicit overrides. API and
+  Playground mount the API password read-only; MCP and Playground
   mount the token read-only. Export before exec and never log secrets. API/MCP
   stay at PID1 for credential lookup. Browser Admin signs in independently.
-- The demo fixes API `ENV` to `development`.
-  `.github/composes/compose.test.yaml` enables test-only API cleanup and adds a
-  static HTTP fixture at `http://fixture/`, from
-  [tests/fixtures/site](tests/fixtures/site/). Keep fixtures and test-only services
-  in that override, not the demo. No public target/model is needed.
+- The demo fixes API `ENV` to `development`. Keep any future HTTP fixtures and
+  test-only API configuration in a dedicated test override, not the demo.
 - `.github/scripts/release.go` reads the literal `AgentType` from `agent.go` to
   derive names. Keep the existing GHCR package `defos-ai/commander-browser-agent`.
   Grant the new repository write access before publishing. Do not let the old
@@ -138,19 +157,15 @@ go test -race -count=1 -timeout=3m ./... ./.github/tests
 go vet ./... ./.github/scripts ./.github/tests
 ```
 
-The API integration test invokes global test cleanup. Use only a dedicated stack;
-Docker lifecycle belongs in setup/CI, outside Go tests. Ports 4283/4284/4285 must be free:
+Real session tests use `-tags=browserintegration` and require absolute
+`LIGHTPANDA_PATH`. They exercise Lightpanda and a test-only action through
+Commander dispatch, inventory and session controls over the FS bus, without a
+model or demo stack.
+The production manager owns browser lifecycle; fixtures own HTTP pages only.
+CI compiles the race-enabled test binary in the Go bookworm image to match the
+runtime's glibc, then executes it as the runtime image's UID1000 with no external
+network. Use `--init` for this test container to reap browser descendants.
 
-```sh
-export COMPOSE_PROJECT_NAME=commander-browser-test API_USERNAME=commander
-export API_PASSWORD="$(openssl rand -hex 32)"
-docker compose -f compose.yaml -f .github/composes/compose.test.yaml up --build --wait --wait-timeout 120
-docker compose -f compose.yaml -f .github/composes/compose.test.yaml run --rm --no-deps -T playground --help
-COMMANDER_API_URL=http://127.0.0.1:4284 go test -tags=integration -race -count=1 -timeout=3m -run '^TestAgentThroughAPI$' -v ./tests/...
-docker compose -f compose.yaml -f .github/composes/compose.test.yaml down --volumes --remove-orphans
-unset API_PASSWORD API_USERNAME COMPOSE_PROJECT_NAME
-```
-
-Always stop the test stack on failure. The test waits for registration, executes
-both rendering actions, downloads and decodes both PNGs, checks dimensions and
-hashes, completes the operation/report, then settles work and cleans state.
+Future API workflow tests that invoke global cleanup must use a dedicated stack,
+with Docker lifecycle owned by setup/CI outside Go tests. Keep fixtures under
+`tests/` and always stop that stack on failure.

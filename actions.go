@@ -7,8 +7,8 @@ import (
 	"github.com/defos-ai/commander/framework/agent/action"
 )
 
-// NewActions creates the default catalog. Each call returns fresh instances so
-// agents do not share mutable action discovery state.
+// NewActions creates the default catalog, currently empty while the new actions
+// are being implemented. Future instances must keep discovery state per host.
 func NewActions() []action.Executor {
 	return agentactions.NewActions()
 }

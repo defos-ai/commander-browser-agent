@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/defos-ai/commander-browser-agent/lightpanda"
+	"github.com/defos-ai/commander-browser-agent/browser/lightpanda"
 	"github.com/defos-ai/commander/framework/agent/environment"
 	actionmodel "github.com/defos-ai/commander/framework/domain/actions"
 )

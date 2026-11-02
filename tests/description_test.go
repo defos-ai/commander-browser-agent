@@ -24,7 +24,7 @@ func TestStaticDescriptionsMatchRuntimeCatalog(t *testing.T) {
 		t.Fatal("static responsibilities differ from registration")
 	}
 	descriptions := described.ActionDescriptions()
-	if len(descriptions) == 0 || len(descriptions) != len(runtime.Actions) {
+	if len(descriptions) != len(runtime.Actions) {
 		t.Fatal("static action descriptions differ from the registered catalog")
 	}
 	for _, registered := range runtime.Actions {
@@ -39,8 +39,19 @@ func TestStaticDescriptionsMatchRuntimeCatalog(t *testing.T) {
 		}
 	}
 	responsibilities[0] = "changed"
-	descriptions[0].Description = "changed"
-	if described.Responsibilities()[0] == "changed" || described.ActionDescriptions()[0].Description == "changed" {
+	if len(descriptions) > 0 {
+		descriptions[0].Description = "changed"
+		if described.ActionDescriptions()[0].Description == "changed" {
+			t.Fatal("action description calls share mutable slices")
+		}
+	}
+	if described.Responsibilities()[0] == "changed" {
 		t.Fatal("description calls share mutable slices")
+	}
+}
+
+func TestDefaultCatalogContainsNoRetiredActions(t *testing.T) {
+	if len(described.NewActions()) != 0 || len(described.ActionNames()) != 0 || len(described.ActionDescriptions()) != 0 {
+		t.Fatal("the default catalog restored retired actions")
 	}
 }

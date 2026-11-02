@@ -54,7 +54,7 @@ RUN set -eu; \
 
 FROM debian:bookworm-slim
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates chromium fonts-liberation \
+    && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 1000 commander \
     && useradd --uid 1000 --gid 1000 --create-home commander \
@@ -63,9 +63,8 @@ RUN apt-get update \
 COPY --from=build /out/commander-browser-agent /usr/local/bin/commander-browser-agent
 COPY --from=lightpanda /out/lightpanda /usr/local/bin/lightpanda
 COPY --from=lightpanda /out/licenses/ /usr/share/doc/lightpanda/
-# Chromium needs a writable real user's home. Docker supplies the outer sandbox;
-# native launches keep Chromium's sandbox enabled unless explicitly configured.
-ENV HOME=/home/commander CHROMIUM_PATH=/usr/bin/chromium CHROMIUM_NO_SANDBOX=true \
+# Provide a writable home for the unprivileged browser runtime.
+ENV HOME=/home/commander \
     LIGHTPANDA_PATH=/usr/local/bin/lightpanda LIGHTPANDA_DISABLE_TELEMETRY=true \
     LIGHTPANDA_DISABLE_CORE_DUMP=true \
     BUS_URL=file:///state/bus STORAGE_URL=file:///state/storage
