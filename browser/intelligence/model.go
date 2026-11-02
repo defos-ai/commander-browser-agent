@@ -19,20 +19,35 @@ import (
 
 const modelMessageLimit = 64 << 10
 
-// ModelConfig names an exact OpenAI-compatible Chat Completions endpoint and
-// model. Deployment configuration supplies both; no provider or model is chosen
-// implicitly.
+// ModelConfig selects a wire profile, an exact Chat Completions endpoint and a
+// model. An empty Provider preserves the Other compatibility profile. The host
+// binds provider credentials to their preset or explicitly configured endpoint.
 type ModelConfig struct {
-	URL  string
-	Name string
+	Provider string
+	URL      string
+	Name     string
 }
 
 func ValidateModelConfig(config ModelConfig) error {
-	endpoint, err := url.Parse(config.URL)
-	if err != nil || len(config.URL) == 0 || len(config.URL) > 2048 ||
-		strings.TrimSpace(config.URL) != config.URL || endpoint.Hostname() == "" ||
+	if config.Provider != "" {
+		if _, supported := Provider(config.Provider); !supported {
+			return errors.New("model provider is not supported")
+		}
+	}
+	if err := ValidateModelURL(config.URL); err != nil {
+		return err
+	}
+	return ValidateModelName(config.Name)
+}
+
+// ValidateModelURL checks an exact endpoint without contacting it or revealing
+// its value. It also supports validating a partial discovery configuration.
+func ValidateModelURL(raw string) error {
+	endpoint, err := url.Parse(raw)
+	if err != nil || len(raw) == 0 || len(raw) > 2048 ||
+		strings.TrimSpace(raw) != raw || endpoint.Hostname() == "" ||
 		endpoint.Opaque != "" || endpoint.User != nil || endpoint.RawQuery != "" ||
-		endpoint.ForceQuery || strings.Contains(config.URL, "#") || strings.HasSuffix(endpoint.Host, ":") {
+		endpoint.ForceQuery || strings.Contains(raw, "#") || strings.HasSuffix(endpoint.Host, ":") {
 		return errors.New("model endpoint must be an absolute HTTPS URL or HTTP loopback URL without credentials, query or fragment")
 	}
 	if endpoint.Scheme != "https" {
@@ -47,8 +62,14 @@ func ValidateModelConfig(config ModelConfig) error {
 			return errors.New("model endpoint port is invalid")
 		}
 	}
-	if !utf8.ValidString(config.Name) || len(config.Name) == 0 || len(config.Name) > 200 ||
-		strings.TrimSpace(config.Name) != config.Name || strings.IndexFunc(config.Name, unicode.IsControl) >= 0 {
+	return nil
+}
+
+// ValidateModelName validates an exact user-selected model ID without making a
+// provider request or choosing a model default.
+func ValidateModelName(name string) error {
+	if !utf8.ValidString(name) || len(name) == 0 || len(name) > 200 ||
+		strings.TrimSpace(name) != name || strings.IndexFunc(name, unicode.IsControl) >= 0 {
 		return errors.New("model name must contain 1 to 200 bytes without surrounding whitespace or control characters")
 	}
 	return nil
@@ -173,25 +194,25 @@ func (model *chatModel) Next(ctx context.Context, turn Turn, maxCompletionTokens
 	if err != nil || len(content) > modelMessageLimit {
 		return Command{}, errors.New("model input exceeds its supported limits")
 	}
-	payload, err := json.Marshal(struct {
-		Model               string           `json:"model"`
-		Messages            []map[string]any `json:"messages"`
-		Tools               []map[string]any `json:"tools"`
-		ToolChoice          string           `json:"tool_choice"`
-		ParallelToolCalls   bool             `json:"parallel_tool_calls"`
-		MaxCompletionTokens int              `json:"max_completion_tokens"`
-		Store               bool             `json:"store"`
-	}{
-		Model: model.config.Name,
-		Messages: []map[string]any{
+	profile := wireProfile(model.config.Provider)
+	payloadFields := map[string]any{
+		"model": model.config.Name,
+		"messages": []map[string]any{
 			{"role": "system", "content": browserModelPrompt},
 			{"role": "user", "content": string(content)},
 		},
-		Tools: []map[string]any{{"type": "function", "function": map[string]any{
+		"tools": []map[string]any{{"type": "function", "function": map[string]any{
 			"name": "browser_step", "description": "Choose one browser step within the operator's objective and allowed hosts.", "parameters": browserStepSchema,
 		}}},
-		ToolChoice: "required", ParallelToolCalls: false, MaxCompletionTokens: maxCompletionTokens, Store: false,
-	})
+		"tool_choice": profile.toolChoice, profile.tokenField: maxCompletionTokens,
+	}
+	if profile.parallelFlag {
+		payloadFields["parallel_tool_calls"] = false
+	}
+	if profile.storeFlag {
+		payloadFields["store"] = false
+	}
+	payload, err := json.Marshal(payloadFields)
 	if err != nil || len(payload) > modelMessageLimit || containsModelKey(payload, key) {
 		return Command{}, errors.New("model input cannot be sent safely within its limits")
 	}
@@ -246,8 +267,11 @@ func (model *chatModel) Next(ctx context.Context, turn Turn, maxCompletionTokens
 		choice.Message.Refusal != nil && *choice.Message.Refusal != "" || len(choice.Message.ToolCalls) != 1 {
 		return Command{}, errors.New("model did not return one complete browser command")
 	}
-	if len(choice.Message.Content) > 0 && !bytes.Equal(choice.Message.Content, []byte("null")) && !bytes.Equal(choice.Message.Content, []byte(`""`)) {
-		return Command{}, errors.New("model response must contain only a browser command")
+	if len(choice.Message.Content) > 0 && !bytes.Equal(choice.Message.Content, []byte("null")) {
+		var text string
+		if json.Unmarshal(choice.Message.Content, &text) != nil || !profile.allowText && text != "" {
+			return Command{}, errors.New("model response must contain only a browser command")
+		}
 	}
 	call := choice.Message.ToolCalls[0]
 	if call.Type != "function" || call.Function.Name != "browser_step" || len(call.ID) == 0 || len(call.ID) > 200 ||

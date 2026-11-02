@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	browser "github.com/defos-ai/commander-browser-agent"
 	"github.com/defos-ai/commander-browser-agent/actions"
@@ -14,7 +15,6 @@ import (
 	"github.com/defos-ai/commander/framework/agent"
 	"github.com/defos-ai/commander/framework/agent/action"
 	"github.com/defos-ai/commander/framework/agent/environment"
-	actionmodel "github.com/defos-ai/commander/framework/domain/actions"
 	"github.com/defos-ai/commander/framework/domain/sessions"
 	"github.com/defos-ai/commander/framework/id"
 	fsartifacts "github.com/defos-ai/commander/providers/fs/artifacts"
@@ -88,14 +88,15 @@ func TestBrowseRejectsInvalidInputBeforeRequestingCredentials(t *testing.T) {
 			executor := actions.NewBrowse(runner)
 			discoverBrowse(t, executor, browseDiscoveryEnvironment(t))
 			secrets := &browseSecretProbe{}
+			questions := &modelSetupQuestions{}
 			input := validBrowseInput()
 			test.change(input)
 			raw, err := json.Marshal(input)
 			if err != nil {
 				t.Fatal(err)
 			}
-			_, err = executor.Run(action.WithSecrets(t.Context(), secrets), raw)
-			if err == nil || secrets.requests != 0 || runner.calls != 0 {
+			_, err = executor.Run(action.WithQuestions(action.WithSecrets(t.Context(), secrets), questions), raw)
+			if err == nil || secrets.requests != 0 || len(questions.calls) != 0 || runner.calls != 0 {
 				t.Fatalf("invalid input crossed the credential/browser boundary: error=%v secret_requests=%d browser_calls=%d", err, secrets.requests, runner.calls)
 			}
 			if strings.Contains(err.Error(), "private-input-sentinel") {
@@ -108,49 +109,11 @@ func TestBrowseRejectsInvalidInputBeforeRequestingCredentials(t *testing.T) {
 		executor := actions.NewBrowse(runner)
 		discoverBrowse(t, executor, browseDiscoveryEnvironment(t))
 		secrets := &browseSecretProbe{}
-		raw, err := json.Marshal(validBrowseInput())
-		if err != nil {
-			t.Fatal(err)
-		}
-		_, err = executor.Run(action.WithSecrets(t.Context(), secrets), raw)
-		if !errors.Is(err, action.ErrSecretUnavailable) || secrets.requests != 1 || secrets.name != actions.BrowserModelSecret || runner.calls != 0 {
+		_, err := executeModelSetup(t, executor, t.Context(), newModelSetupBinding(), openAISetupQuestions(), secrets, 0)
+		if !errors.Is(err, action.ErrSecretUnavailable) || secrets.requests != 1 || secrets.name != "OPENAI_API_KEY" || runner.calls != 0 {
 			t.Fatalf("valid work did not request managed model credentials before opening a browser: error=%v requests=%d name=%q browser_calls=%d", err, secrets.requests, secrets.name, runner.calls)
 		}
 	})
-}
-
-func TestBrowseDiscoveryRequiresSafeExplicitModelConfiguration(t *testing.T) {
-	for _, test := range []struct {
-		name      string
-		configure func(*lightpandaEnvironment)
-		missing   string
-	}{
-		{name: "missing model endpoint", configure: func(env *lightpandaEnvironment) { delete(env.values, "BROWSER_MODEL_URL") }, missing: "BROWSER_MODEL_URL"},
-		{name: "missing model name", configure: func(env *lightpandaEnvironment) { delete(env.values, "BROWSER_MODEL_NAME") }, missing: "BROWSER_MODEL_NAME"},
-		{name: "endpoint credentials", configure: func(env *lightpandaEnvironment) {
-			env.values["BROWSER_MODEL_URL"] = "https://user:private-config-sentinel@model.example.test/v1/chat/completions"
-		}, missing: "BROWSER_MODEL_URL"},
-		{name: "nonlocal insecure model", configure: func(env *lightpandaEnvironment) {
-			env.values["BROWSER_MODEL_URL"] = "http://model.example.test/v1/chat/completions"
-		}, missing: "BROWSER_MODEL_URL"},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			runner := &browseUnusedRunner{}
-			executor := actions.NewBrowse(runner)
-			env := browseDiscoveryEnvironment(t)
-			test.configure(env)
-			secrets := &browseSecretProbe{}
-			status, err := executor.Discover(action.WithSecrets(t.Context(), secrets), env, nil)
-			snapshot := executor.Action()
-			want := actionmodel.Requirement{Kind: actionmodel.ConfigurationRequirement, Name: test.missing}
-			if err != nil || status != action.Unavailable || snapshot.Status != action.Unavailable || snapshot.StatusReason == "" || !slices.Contains(snapshot.MissingRequirements, want) {
-				t.Fatalf("invalid model configuration did not report its readiness requirement: action=%+v err=%v", snapshot, err)
-			}
-			if strings.Contains(snapshot.StatusReason, "private-config-sentinel") || secrets.requests != 0 || runner.calls != 0 {
-				t.Fatal("discovery exposed configuration or opened execution dependencies")
-			}
-		})
-	}
 }
 
 func TestBrowseRejectsModelCredentialInStartingURL(t *testing.T) {
@@ -167,13 +130,14 @@ func TestBrowseRejectsModelCredentialInStartingURL(t *testing.T) {
 			executor := actions.NewBrowse(runner)
 			discoverBrowse(t, executor, browseDiscoveryEnvironment(t))
 			secrets := &browseSecretProbe{value: []byte(credential)}
-			input := validBrowseInput()
+			binding := newModelSetupBinding()
+			input := modelSetupInput(binding)
 			input["url"] = test.url
 			raw, err := json.Marshal(input)
 			if err != nil {
 				t.Fatal(err)
 			}
-			result, err := executor.Run(action.WithSecrets(t.Context(), secrets), raw)
+			result, err := executor.Run(action.WithQuestions(action.WithSession(action.WithSecrets(t.Context(), secrets), &binding), openAISetupQuestions()), raw)
 			if err == nil || secrets.requests != 1 || runner.calls != 0 {
 				t.Fatalf("protected model credentials reached browser work: error=%v requests=%d browser_calls=%d", err, secrets.requests, runner.calls)
 			}
@@ -202,15 +166,15 @@ func TestBrowseRediscoveryClearsReadinessAndRespectsExecutableScope(t *testing.T
 		t.Fatal("restricted rediscovery retained an executable configuration")
 	}
 	discoverBrowse(t, executor, env)
-	delete(env.values, "BROWSER_MODEL_URL")
+	env.result.Stdout = "unsupported-version"
 	status, err = executor.Discover(t.Context(), env, nil)
 	if err != nil || status != action.Unavailable {
-		t.Fatalf("missing model configuration retained readiness: %s, %v", status, err)
+		t.Fatalf("invalid runtime version retained readiness: %s, %v", status, err)
 	}
 	if _, err := executor.Run(action.WithSecrets(t.Context(), secrets), raw); err == nil || secrets.requests != 0 {
-		t.Fatal("failed model rediscovery retained old configuration")
+		t.Fatal("failed runtime rediscovery retained old configuration")
 	}
-	env.values["BROWSER_MODEL_URL"] = "https://model.example.test/v1/chat/completions"
+	env.result.Stdout = "1.0.2"
 	discoverBrowse(t, executor, env)
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
@@ -224,12 +188,10 @@ func browseDiscoveryEnvironment(t *testing.T) *lightpandaEnvironment {
 	t.Helper()
 	env, executable := newLightpandaEnvironment(t)
 	env.values["LIGHTPANDA_PATH"] = executable
-	env.values["BROWSER_MODEL_URL"] = "https://model.example.test/v1/chat/completions"
-	env.values["BROWSER_MODEL_NAME"] = "fixture-model"
 	return env
 }
 
-func discoverBrowse(t *testing.T, executor *actions.Browse, env *lightpandaEnvironment) {
+func discoverBrowse(t *testing.T, executor *actions.Browse, env environment.Environment) {
 	t.Helper()
 	status, err := executor.Discover(t.Context(), env, nil)
 	if err != nil || status != action.Ready {
@@ -241,10 +203,20 @@ func validBrowseInput() map[string]any {
 	return map[string]any{"objective": "Extract the study names", "url": "https://example.test/", "engine": "lightpanda", "session_scope": id.New()}
 }
 
-type browseUnusedRunner struct{ calls int }
+type browseUnusedRunner struct {
+	calls    int
+	err      error
+	deadline time.Duration
+}
 
-func (runner *browseUnusedRunner) Run(context.Context, browserruntime.Options, func(context.Context) error) (sessions.Session, error) {
+func (runner *browseUnusedRunner) Run(ctx context.Context, _ browserruntime.Options, _ func(context.Context) error) (sessions.Session, error) {
 	runner.calls++
+	if deadline, ok := ctx.Deadline(); ok {
+		runner.deadline = time.Until(deadline)
+	}
+	if runner.err != nil {
+		return sessions.Session{}, runner.err
+	}
 	return sessions.Session{}, errors.New("unexpected browser use")
 }
 
@@ -252,6 +224,11 @@ type browseSecretProbe struct {
 	requests int
 	name     string
 	value    []byte
+	names    []string
+	values   map[string][]byte
+	returned [][]byte
+	wait     bool
+	entered  chan string
 }
 
 type browseInventoryOnlyProvider struct{}
@@ -264,11 +241,25 @@ func (browseInventoryOnlyProvider) Control(context.Context, sessions.Control) (s
 }
 
 func (*browseSecretProbe) Secret(string) ([]byte, error) { return nil, action.ErrSecretUnavailable }
-func (probe *browseSecretProbe) RequestSecret(_ context.Context, name string) ([]byte, error) {
+func (probe *browseSecretProbe) RequestSecret(ctx context.Context, name string) ([]byte, error) {
 	probe.requests++
 	probe.name = name
-	if probe.value != nil {
-		return slices.Clone(probe.value), nil
+	probe.names = append(probe.names, name)
+	if probe.entered != nil {
+		probe.entered <- name
+	}
+	if probe.wait {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	value, ok := probe.values[name]
+	if !ok && probe.value != nil {
+		value, ok = probe.value, true
+	}
+	if ok {
+		returned := slices.Clone(value)
+		probe.returned = append(probe.returned, returned)
+		return returned, nil
 	}
 	return nil, action.ErrSecretUnavailable
 }

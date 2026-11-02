@@ -102,6 +102,68 @@ func (m *Manager) Snapshot() []sessions.Session {
 
 func (m *Manager) Changes() <-chan struct{} { return m.changes }
 
+// WithSession binds preparation work to an already prepared identity without
+// starting a browser. Closing the session also cancels questions or secret waits.
+func (m *Manager) WithSession(ctx context.Context, work func(context.Context) error) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if work == nil {
+		return errors.New("browser session work is required")
+	}
+	binding, ok := action.SessionFromContext(ctx)
+	if !ok {
+		return errors.New("browser work requires a framework session binding")
+	}
+	if err := binding.Validate(); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	item := m.items[binding.ID]
+	if item == nil {
+		m.mu.Unlock()
+		return sessions.ErrUnknownSession
+	}
+	if item.claim != binding.Claim() {
+		m.mu.Unlock()
+		return sessions.ErrConflict
+	}
+	if err := m.availableLocked(item); err != nil {
+		m.mu.Unlock()
+		return err
+	}
+	stopping := item.stopping
+	m.mu.Unlock()
+
+	workCtx, cancel := context.WithCancelCause(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		select {
+		case <-stopping:
+			cancel(sessions.ErrSessionClosing)
+		case <-workCtx.Done():
+		}
+	}()
+	defer func() { cancel(nil); <-done }()
+	select {
+	case <-stopping:
+		cancel(sessions.ErrSessionClosing)
+	default:
+	}
+	if err := workCtx.Err(); err != nil {
+		return err
+	}
+	err := work(workCtx)
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if err == nil {
+		err = workCtx.Err()
+	}
+	return err
+}
+
 // Run uses the exact framework binding and an explicitly selected engine.
 // Action cancellation interrupts this work without closing a connected session.
 func (m *Manager) Run(ctx context.Context, options Options, work func(context.Context) error) (view sessions.Session, runErr error) {

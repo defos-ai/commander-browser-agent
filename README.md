@@ -8,8 +8,9 @@ agent's own model, and returns structured findings with extracted evidence.
 Findings and evidence are also uploaded as JSON artifacts. Browser state stays
 in an isolated Commander session for reuse and inspect/verify/close controls.
 Completion requires extracted evidence and findings that cite it.
-Managed `login`, clarification questions, checkpoints and `screenshot` are planned
-next. Screenshots will use Lightpanda's text-only PNG renderer.
+Model setup uses Commander's questions and managed secrets. Managed `login`,
+browsing clarification questions, checkpoints and `screenshot` are planned next.
+Screenshots will use Lightpanda's text-only PNG renderer.
 
 Static HTML checks and crawling belong to the
 [web agent](https://github.com/defos-ai/commander-web-agent).
@@ -20,18 +21,57 @@ Requires Docker Compose. The image includes Lightpanda `1.0.2`; the demo uses
 Commander `v0.3.0` host images.
 
 ```sh
-export BROWSER_MODEL_URL=https://your-model-provider.example/v1/chat/completions
-export BROWSER_MODEL_NAME=your-tool-calling-model
 docker compose up --build --wait
 docker compose run --rm --no-deps playground
 ```
 
-Use a model endpoint supporting Chat Completions function calls. The exact URL
-and model name are required; discovery reports missing configuration without
-calling the model. HTTPS is required except for local HTTP endpoints. Compose
-passes these two settings to the agent. Supply the model key through Commander's
-managed secret named `browser-model-api-key`; the agent requests it when work
-starts. Credentials are never supplied through action input or model prompts.
+Compose does not automatically forward model API keys. Enter the selected key
+in Playground's masked setup, or explicitly pass that one host variable:
+
+```sh
+docker compose run --rm --no-deps -e OPENAI_API_KEY playground
+```
+
+On first work in a browser session, the agent asks for a provider and exact
+tool-calling model ID/version through Commander's question flow. Providers are
+OpenAI, Anthropic, Google Gemini, xAI, DeepSeek and Other (OpenAI-compatible),
+grouped to fit Commander's four-option limit. Only Other needs an endpoint URL.
+Model IDs are entered explicitly: no live catalog is requested before credentials.
+Operator answers come first; the Commander client/model can answer after the
+framework's waiting window. The unconfigured browser model cannot answer its own
+setup questions.
+
+Then the agent requests that provider's managed secret. Playground already shares
+standard provider keys under these names when API access is configured:
+
+| Provider | Managed secret |
+| --- | --- |
+| OpenAI | `OPENAI_API_KEY` |
+| Anthropic | `ANTHROPIC_API_KEY` |
+| Google Gemini | `GEMINI_API_KEY` |
+| xAI | `XAI_API_KEY` |
+| DeepSeek | `DEEPSEEK_API_KEY` |
+| Other | Managed name derived from its exact endpoint |
+
+Custom managed keys use `browser-model-api-key-` followed by the endpoint URL's
+full hexadecimal SHA256; the running agent requests the exact
+name. Standard provider keys are never automatically sent to custom endpoints.
+Provider/model selections stay in memory for that Commander session. Reuse skips
+setup questions; credentials are requested again for each execution through
+Commander's leased secret cache. Already stored keys need no new value entry.
+Changing a session's provider, endpoint or model requires a new session.
+
+The agent does not read model configuration or API keys from environment
+variables. New sessions obtain provider/model choices through questions; standard
+endpoints are fixed and Other asks for the exact Chat Completions URL (HTTPS, or
+local HTTP). Existing model environment variables do not bypass setup or secret
+requests. Browser/runtime and Commander transport settings remain separate.
+Keys never belong in action input, question answers, model prompts, logs or
+artifacts.
+
+Setup has a separate ten-minute bound and remains subject to the task's deadline.
+Commander v0.3.0 is retained, using its existing `RequestSecret` exchange without a
+default-value argument.
 No demo mission is imported yet.
 
 Open [Admin](http://localhost:4285) to inspect the registered agent and sessions.
@@ -61,12 +101,14 @@ subdomains and `www` variants are separate hosts. Model operations use observed
 element IDs. Password and other credential fields are excluded from this action.
 URL query strings/fragments and form values are omitted from observations.
 
-Defaults are 12 steps, 120 seconds and 8,192 reserved completion tokens.
+Active browsing defaults to 12 steps, 120 seconds and 8,192 reserved completion
+tokens, starting after setup and credential resolution.
 `max_steps` (1–30), `timeout_seconds` (5–180) and `max_completion_tokens`
 (1,024–32,768) may lower or raise those limits. Each model call reserves up to
-1,024 completion tokens, independent of reported usage; input and response sizes
-are bounded separately. This allowance does not represent a provider price or a
-total input-token quota. Step/token exhaustion returns a partial report; timeouts
+1,024 requested completion tokens, independent of reported usage; input and
+response sizes are bounded separately. Provider accounting differs, including
+reasoning/function-call tokens, so this allowance is neither a provider cost cap
+nor a total-generation/input-token quota. Step/token exhaustion returns a partial report; timeouts
 and cancellation fail the execution. An unconfirmed browser operation stops work
 and asks for session inspection before retrying.
 

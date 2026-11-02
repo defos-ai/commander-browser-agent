@@ -121,10 +121,7 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile
-    environment:
-      <<: *environment
-      BROWSER_MODEL_URL: ${BROWSER_MODEL_URL:-}
-      BROWSER_MODEL_NAME: ${BROWSER_MODEL_NAME:-}
+    environment: *environment
     volumes:
       - bus:/state/bus
       - storage:/state/storage
@@ -257,14 +254,7 @@ services:
       COMMANDER_LLM_PROVIDER: ${COMMANDER_LLM_PROVIDER:-}
       COMMANDER_LLM_MODEL: ${COMMANDER_LLM_MODEL:-}
       COMMANDER_LLM_BASE_URL: ${COMMANDER_LLM_BASE_URL:-}
-      COMMANDER_LLM_API_KEY: ${COMMANDER_LLM_API_KEY:-}
       COMMANDER_DEBUG: ${COMMANDER_DEBUG:-false}
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
-      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
-      XAI_API_KEY: ${XAI_API_KEY:-}
-      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
       NO_COLOR: ${NO_COLOR:-}
       TERM: ${TERM:-xterm-256color}
     volumes:

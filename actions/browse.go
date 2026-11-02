@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 	"unicode/utf8"
@@ -26,12 +27,15 @@ import (
 
 const BrowseName = "browse"
 const BrowseDescription = "Navigate, interact with and extract structured findings from websites using the browser agent's own model and an isolated Lightpanda session"
-const BrowserModelSecret = "browser-model-api-key"
 
 // BrowserRunner is the shared host-owned browser session runtime. Action
 // constructors accept the production dependency without creating another owner.
 type BrowserRunner interface {
 	Run(context.Context, browserruntime.Options, func(context.Context) error) (sessions.Session, error)
+}
+
+type browserSetupRunner interface {
+	WithSession(context.Context, func(context.Context) error) error
 }
 
 type BrowseInput struct {
@@ -57,11 +61,12 @@ type Browse struct {
 	configuration  atomic.Pointer[browseConfiguration]
 	validateInput  func(any) error
 	validateOutput func(any) error
+	setupMu        sync.Mutex
+	setups         map[string]*modelSetup
 }
 
 type browseConfiguration struct {
 	runtime lightpanda.Runtime
-	model   intelligence.ModelConfig
 }
 
 // NewBrowse prepares a fresh action without discovery, credentials or I/O.
@@ -80,6 +85,7 @@ func NewBrowse(runner BrowserRunner) *Browse {
 			InputSchema: json.RawMessage(browseInputSchema), OutputSchema: json.RawMessage(browseOutputSchema),
 		}),
 		runner: runner, validateInput: input.Validate, validateOutput: output.Validate,
+		setups: make(map[string]*modelSetup),
 	}
 }
 
@@ -109,25 +115,10 @@ func (a *Browse) Discover(ctx context.Context, env environment.Environment, scop
 		}
 		return action.Unknown, err
 	}
-	modelURL, _ := env.LookupEnv("BROWSER_MODEL_URL")
-	modelName, _ := env.LookupEnv("BROWSER_MODEL_NAME")
-	if strings.TrimSpace(modelURL) == "" {
-		a.SetUnavailable("Set BROWSER_MODEL_URL to the model's exact Chat Completions endpoint", actionmodel.Requirement{Kind: actionmodel.ConfigurationRequirement, Name: "BROWSER_MODEL_URL"})
-		return action.Unavailable, nil
-	}
-	if strings.TrimSpace(modelName) == "" {
-		a.SetUnavailable("Set BROWSER_MODEL_NAME to the model used by the browser agent", actionmodel.Requirement{Kind: actionmodel.ConfigurationRequirement, Name: "BROWSER_MODEL_NAME"})
-		return action.Unavailable, nil
-	}
-	model := intelligence.ModelConfig{URL: modelURL, Name: modelName}
-	if err := intelligence.ValidateModelConfig(model); err != nil {
-		a.SetUnavailable("Correct BROWSER_MODEL_URL and BROWSER_MODEL_NAME; use HTTPS or a local HTTP model endpoint without credentials, query or fragment", actionmodel.Requirement{Kind: actionmodel.ConfigurationRequirement, Name: "BROWSER_MODEL_URL"}, actionmodel.Requirement{Kind: actionmodel.ConfigurationRequirement, Name: "BROWSER_MODEL_NAME"})
-		return action.Unavailable, nil
-	}
 	if err := ctx.Err(); err != nil {
 		return action.Unknown, err
 	}
-	a.configuration.Store(&browseConfiguration{runtime: runtime, model: model})
+	a.configuration.Store(&browseConfiguration{runtime: runtime})
 	a.SetStatus(action.Ready)
 	return action.Ready, nil
 }
@@ -156,13 +147,32 @@ func (a *Browse) Run(ctx context.Context, raw json.RawMessage) (action.Result, e
 	if err := input.validate(); err != nil {
 		return action.Result{}, err
 	}
-	budget, cancel := context.WithTimeout(ctx, time.Duration(input.TimeoutSeconds)*time.Second)
-	defer cancel()
-	key, err := action.RequestSecret(budget, BrowserModelSecret)
+	// Operator-first setup has its own bound. It must not consume the active
+	// browsing allowance, and it never extends the controller's task deadline.
+	setupCtx, stopSetup := context.WithTimeout(ctx, 10*time.Minute)
+	var modelConfiguration intelligence.ModelConfig
+	var key []byte
+	prepare := func(ctx context.Context) error {
+		var err error
+		modelConfiguration, key, err = a.prepareModel(ctx, input)
+		return err
+	}
+	var err error
+	if runner, ok := a.runner.(browserSetupRunner); ok {
+		err = runner.WithSession(setupCtx, prepare)
+	} else {
+		err = prepare(setupCtx)
+	}
+	if err == nil {
+		err = setupCtx.Err()
+	}
+	stopSetup()
 	defer clear(key)
 	if err != nil {
 		return action.Result{}, err
 	}
+	budget, cancel := context.WithTimeout(ctx, time.Duration(input.TimeoutSeconds)*time.Second)
+	defer cancel()
 	if len(key) == 0 || len(key) > 4096 || strings.ContainsAny(string(key), "\r\n") {
 		return action.Result{}, errors.New("browser model credentials are invalid")
 	}
@@ -171,7 +181,7 @@ func (a *Browse) Run(ctx context.Context, raw json.RawMessage) (action.Result, e
 	if err := checkBrowseURLCredential(input.URL, credential); err != nil {
 		return action.Result{}, err
 	}
-	model, err := intelligence.NewModel(configuration.model, key)
+	model, err := intelligence.NewModel(modelConfiguration, key)
 	if err != nil {
 		return action.Result{}, errors.New("cannot configure the browser model client")
 	}

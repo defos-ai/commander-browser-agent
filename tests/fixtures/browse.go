@@ -125,6 +125,7 @@ func NewBrowseModel(t *testing.T, key string, decide func(intelligence.Turn) int
 			}
 		}
 		var request struct {
+			Model    string `json:"model"`
 			Messages []struct {
 				Role    string `json:"role"`
 				Content string `json:"content"`
@@ -133,7 +134,7 @@ func NewBrowseModel(t *testing.T, key string, decide func(intelligence.Turn) int
 			Parallel bool `json:"parallel_tool_calls"`
 			Store    bool `json:"store"`
 		}
-		if json.Unmarshal(body, &request) != nil || request.Limit < 1 || request.Limit > 1024 || request.Parallel || request.Store {
+		if json.Unmarshal(body, &request) != nil || request.Model != "fixture-model" || request.Limit < 1 || request.Limit > 1024 || request.Parallel || request.Store {
 			t.Error("model request did not preserve execution bounds")
 		}
 		var turn intelligence.Turn
