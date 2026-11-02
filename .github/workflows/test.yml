@@ -60,6 +60,15 @@ jobs:
           tags: commander-browser-agent:local
           cache-from: type=gha,scope=agent
           cache-to: type=gha,scope=agent,mode=max
+      - name: Check packaged Lightpanda
+        run: |
+          docker run --rm --network none --entrypoint /bin/sh commander-browser-agent:local -ec '
+            test "$(id -u)" = 1000
+            "$LIGHTPANDA_PATH" version
+            test -s /usr/share/doc/lightpanda/LICENSE
+            test -s /usr/share/doc/lightpanda/FONT-LICENSE
+            test -s /usr/share/doc/lightpanda/NOTICE
+          '
       - name: Create API credentials
         run: |
           password="$(openssl rand -hex 32)"

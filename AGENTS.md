@@ -60,6 +60,20 @@
   [Dockerfile](docker/Dockerfile) installs Chromium/fonts, sets container defaults,
   and provides a real UID1000 user with a writable home for Chromium's crash
   handler. Docker builds use standalone context and `GOWORK=off`.
+- [lightpanda](lightpanda/) discovers the separately packaged Lightpanda 1.0.2
+  runtime through the environment abstraction. `LIGHTPANDA_PATH` is absolute;
+  explicit discovery scope wins. Discovery returns fresh configuration, checks
+  the exact version under a bounded context, and reports structured readiness
+  requirements without echoing subprocess output. Current rendering actions
+  depend only on Chromium; do not add a dummy action or start a CDP server during
+  discovery. Session/process lifecycle belongs to the next implementation step.
+- Docker packages checksum-pinned Lightpanda binaries for linux/amd64 and
+  linux/arm64, fails unsupported architectures, and disables telemetry/core dumps.
+  Fetch and verify the upstream AGPL-3.0-or-later license and embedded-font notices
+  from the pinned source commit during the build, and retain them with runtime
+  attribution in `/usr/share/doc/lightpanda` in the image. Lightpanda remains a
+  separate runtime dependency; it does not change the agent source's MIT or
+  Commander's AGPL-3.0-only licensing.
 - Group desktop/mobile PNGs in one artifact with descriptive metadata.
   Accessibility results are bounded checks, not a complete compliance audit.
 
