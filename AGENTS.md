@@ -383,6 +383,10 @@ Keep tests/fixtures under `tests/`, with external packages testing public action
 and host APIs. Prefer API scenarios for registration, real rendering and artifact
 acceptance; retain focused discovery/identity failure tests. Do not add production
 configuration or exported injection solely for tests.
+Keep the suite lean: prioritize agent behavior and meaningful regressions over
+repeated schema/configuration permutations or tests of framework internals.
+Shared HTTP pages belong in `tests/fixtures/`; the fake HTTP model belongs in
+`tests/fakes/`.
 
 ```sh
 go test -race -count=1 -timeout=3m ./... ./.github/tests
@@ -390,17 +394,16 @@ go vet ./... ./.github/scripts ./.github/tests
 ```
 
 Real session/browse tests use `-tags=browserintegration` and require absolute
-`LIGHTPANDA_PATH`. They exercise Lightpanda and a test-only action through
-Commander dispatch, inventory and session controls over the FS bus, without an
-external model or demo stack. Browse tests use a local fake model over its actual
-HTTP protocol, answer framework setup questions and deliver synthetic keys through
-the framework secret exchange. Cover pending-question retries, saved answers,
-ignored model environment variables, managed credentials, cancellation and reuse
-without new questions.
-Checkpoint cases cover immutable persistence/retries, fences before browser
-effects, privacy, cancellation/close during waits and the thirty-step limit.
-Two-account cases verify independent same-origin logins under one agent and
-continued use of one session after closing the other.
+`LIGHTPANDA_PATH`. They exercise the production agent's actions with Lightpanda
+through Commander dispatch, inventory and session controls over the FS bus, without an
+external model or demo stack. A local fake model uses the actual HTTP protocol;
+the harness answers setup/clarification questions and delivers synthetic managed
+secrets. Retain the main login → clarification → interact/extract → screenshot →
+reuse → close workflow, two-account isolation, checkpoint receipt retries and
+navigation uncertainty, challenge/credential-wait cancellation, execution budgets
+and grounded completion. Screenshot checks compare decoded pixels, source state
+and renderer cleanup. Focused tests cover catalog/ownership, managed setup/reuse,
+saved-checkpoint rejection and each supported provider's wire/secret boundaries.
 The production manager owns browser lifecycle; fixtures own HTTP pages only.
 CI compiles the race-enabled test binary in the Go bookworm image to match the
 runtime's glibc, then executes it as the runtime image's UID1000 with no external

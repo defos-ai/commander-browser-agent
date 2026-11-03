@@ -1,0 +1,217 @@
+package browser_test
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"reflect"
+	"slices"
+	"strings"
+	"testing"
+
+	browser "github.com/defos-ai/commander-browser-agent"
+	"github.com/defos-ai/commander-browser-agent/actions"
+	runtime "github.com/defos-ai/commander-browser-agent/browser"
+	"github.com/defos-ai/commander/framework/agent"
+	"github.com/defos-ai/commander/framework/agent/action"
+	"github.com/defos-ai/commander/framework/agent/environment"
+	"github.com/defos-ai/commander/framework/domain/operations"
+	"github.com/defos-ai/commander/framework/domain/sessions"
+	"github.com/defos-ai/commander/framework/id"
+	fsartifacts "github.com/defos-ai/commander/providers/fs/artifacts"
+)
+
+func TestAgentCatalogMatchesMetadataAndPreservesEmptySelection(t *testing.T) {
+	files, err := fsartifacts.NewArtifactFileFsStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	host, err := browser.NewAgent(agent.AgentConfig{ArtifactFileStore: files})
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata, snapshot := browser.ActionDescriptions(), host.Describe()
+	if !slices.Equal(browser.ActionNames(), []string{"browse", "login", "screenshot"}) || len(metadata) != len(snapshot.Actions) || !reflect.DeepEqual(browser.Responsibilities(), snapshot.Responsibilities) {
+		t.Fatal("registered capabilities differ from release metadata")
+	}
+	first, second := browser.NewActions(nil), browser.NewActions(nil)
+	for i, registered := range snapshot.Actions {
+		if registered.Name != metadata[i].Name || registered.Description != metadata[i].Description || registered.SessionMode != metadata[i].SessionMode || len(registered.RequiredSecrets) != 0 || first[i] == second[i] {
+			t.Fatal("catalog shares readiness, requires early secrets, or differs from metadata")
+		}
+	}
+	metadata[0].Description = "caller mutation"
+	if browser.ActionDescriptions()[0].Description == metadata[0].Description {
+		t.Fatal("metadata shares mutable state")
+	}
+	empty, err := browser.NewAgent(agent.AgentConfig{ArtifactFileStore: files, Actions: []action.Executor{}})
+	if err != nil || len(empty.Describe().Actions) != 0 {
+		t.Fatal("explicitly empty catalog gained default actions")
+	}
+}
+
+func TestSessionClaimsAndDelayedCloseKeepIdentitiesIsolated(t *testing.T) {
+	binding := unitBinding()
+	manager, err := runtime.New(binding.OwnerAgentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	if err := manager.Prepare(t.Context(), binding.Claim()); err != nil || manager.Snapshot()[0].State != "starting" {
+		t.Fatal("preparation did not retain an unstarted session")
+	}
+	conflict := binding
+	conflict.Creation.OperationID = id.New()
+	if err := manager.Prepare(t.Context(), conflict.Claim()); !errors.Is(err, sessions.ErrConflict) {
+		t.Fatal("retained identity accepted a conflicting creation")
+	}
+	foreign := unitBinding()
+	foreign.OwnerAgentID = "browser-agent-89abcdef"
+	if err := manager.Prepare(t.Context(), foreign.Claim()); !errors.Is(err, sessions.ErrConflict) {
+		t.Fatal("session accepted a different owning agent")
+	}
+	replacement := unitBinding()
+	replacement.ScopeID = binding.ScopeID
+	if err := manager.Prepare(t.Context(), replacement.Claim()); err != nil {
+		t.Fatal("controller-admitted replacement was rejected")
+	}
+	closed, err := manager.Control(t.Context(), sessions.Control{Reference: binding.Reference, Method: "close", RequestID: id.New(), Creation: &binding.Creation})
+	if err != nil || closed.State != "closed" || len(manager.Snapshot()) != 2 {
+		t.Fatal("close discarded identity evidence")
+	}
+	if err := manager.Prepare(t.Context(), binding.Claim()); !errors.Is(err, sessions.ErrSessionClosed) {
+		t.Fatal("delayed preparation restored a closed identity")
+	}
+	called := false
+	err = manager.WithSession(action.WithSession(t.Context(), &replacement), func(context.Context) error { called = true; return nil })
+	if err != nil || !called {
+		t.Fatal("closing an old identity affected its independent replacement")
+	}
+}
+
+func TestBrowseSetupUsesManagedKeysAndRetainsOnlySessionSelection(t *testing.T) {
+	const endpoint = "https://custom.example.test/v1/chat/completions"
+	for _, provider := range []string{"OpenAI", "Other"} {
+		t.Run(provider, func(t *testing.T) {
+			t.Setenv("BROWSER_MODEL_PROVIDER", "invalid-legacy-provider")
+			t.Setenv("BROWSER_MODEL_API_KEY", "ignored-environment-key")
+			t.Setenv("OPENAI_API_KEY", "ignored-environment-key")
+			probe := &unitSetup{t: t, key: "fixture-first-private-model-key", answers: map[string]string{"browser_model_provider": provider, "browser_model_name": "exact-model-v1", "browser_model_url": endpoint}}
+			executor := actions.NewBrowse(probe)
+			if status, err := executor.Discover(t.Context(), unitEnvironment{probe}, nil); err != nil || status != action.Ready || len(probe.events) != 0 {
+				t.Fatal("discovery started setup or required credentials")
+			}
+			binding := unitBinding()
+			run := func(binding sessions.Binding) error {
+				input := map[string]any{"objective": "Find a price", "url": "https://example.test/", "session_scope": binding.ScopeID}
+				if binding.Mode == sessions.Reuse {
+					input["session_id"] = binding.ID
+				}
+				raw, _ := json.Marshal(input)
+				ctx := action.WithQuestions(action.WithSecrets(action.WithSession(t.Context(), &binding), probe), probe)
+				result, err := executor.Run(ctx, raw)
+				if err != nil && (strings.Contains(err.Error(), probe.key) || len(result.Output) != 0 || len(result.Artifacts) != 0) {
+					t.Fatal("failed browser work exposed credentials or artifacts")
+				}
+				return err
+			}
+			name := "OPENAI_API_KEY"
+			want := []string{"browser_model_provider", "browser_model_name"}
+			if provider == "Other" {
+				name = fmt.Sprintf("browser-model-api-key-%x", sha256.Sum256([]byte(endpoint)))
+				want = append(want, "browser_model_url")
+			}
+			want = append(want, name)
+			if run(binding) == nil || !slices.Equal(probe.events, want) || probe.runs != 1 {
+				t.Fatal("setup did not ask provider/model before its canonical managed key")
+			}
+			binding.Mode, probe.key, probe.events = sessions.Reuse, "fixture-rotated-private-model-key", nil
+			if run(binding) == nil || !slices.Equal(probe.events, []string{name}) || probe.runs != 2 {
+				t.Fatal("reuse repeated questions or cached a plaintext key")
+			}
+			binding.Creation.OperationID = id.New()
+			if err := run(binding); !errors.Is(err, sessions.ErrConflict) || len(probe.events) != 1 || probe.runs != 2 {
+				t.Fatal("conflicting creation reused model setup")
+			}
+			for _, value := range probe.returned {
+				if bytesRemain := strings.Trim(string(value), "\x00"); bytesRemain != "" {
+					t.Fatal("managed key buffer was retained")
+				}
+			}
+		})
+	}
+}
+
+func TestCheckpointRecoveryGateStopsBeforeModelSetup(t *testing.T) {
+	for _, failure := range []error{nil, errors.New("private-checkpoint-provider-error")} {
+		probe := &unitSetup{t: t}
+		executor := actions.NewBrowse(probe)
+		if status, err := executor.Discover(t.Context(), unitEnvironment{probe}, nil); err != nil || status != action.Ready {
+			t.Fatal("checkpoint fixture discovery failed")
+		}
+		binding := unitBinding()
+		raw, _ := json.Marshal(map[string]string{"objective": "Find a price", "url": "https://example.test/", "session_scope": binding.ScopeID})
+		ctx := action.WithCheckpoints(action.WithSession(t.Context(), &binding), unitCheckpoint{failure})
+		ctx = action.WithQuestions(action.WithSecrets(ctx, probe), probe)
+		result, err := executor.Run(ctx, raw)
+		if err == nil || strings.Contains(err.Error(), "private-checkpoint-provider-error") || len(probe.events) != 0 || probe.runs != 0 || len(result.Output) != 0 || len(result.Artifacts) != 0 {
+			t.Fatal("saved or unconfirmed progress reached setup/browser work or exposed provider details")
+		}
+	}
+}
+
+type unitCheckpoint struct{ err error }
+
+func (p unitCheckpoint) LoadCheckpoint(context.Context, string) (json.RawMessage, bool, error) {
+	return json.RawMessage(`{}`), true, p.err
+}
+func (unitCheckpoint) SaveCheckpoint(context.Context, string, json.RawMessage) error {
+	return errors.New("unexpected checkpoint write")
+}
+
+type unitSetup struct {
+	t        *testing.T
+	key      string
+	answers  map[string]string
+	events   []string
+	returned [][]byte
+	runs     int
+}
+
+func (p *unitSetup) LookupEnv(name string) (string, bool) {
+	if name != "LIGHTPANDA_PATH" {
+		p.t.Error("agent read model configuration from the environment")
+	}
+	return "/fixture/lightpanda", true
+}
+func (*unitSetup) FindExecutable(context.Context, string, *environment.DiscoveryScope) (string, error) {
+	return "/fixture/lightpanda", nil
+}
+
+type unitEnvironment struct{ *unitSetup }
+
+func (unitEnvironment) Run(context.Context, []string) (environment.Result, error) {
+	return environment.Result{Stdout: "1.0.2"}, nil
+}
+func (p *unitSetup) Question(_ context.Context, key, text string, options []string) (operations.Question, error) {
+	p.events = append(p.events, key)
+	return operations.Question{Status: operations.QuestionAnswered, Key: key, Text: text, Options: options, Answer: p.answers[key], AnsweredBy: operations.AnswerOperator}, nil
+}
+func (*unitSetup) Secret(string) ([]byte, error) { return nil, action.ErrSecretUnavailable }
+func (p *unitSetup) RequestSecret(_ context.Context, name string) ([]byte, error) {
+	p.events = append(p.events, name)
+	value := []byte(p.key)
+	p.returned = append(p.returned, value)
+	return value, nil
+}
+func (p *unitSetup) Run(context.Context, runtime.Options, func(context.Context) error) (sessions.Session, error) {
+	p.runs++
+	return sessions.Session{}, errors.New("fixture browser failure: " + p.key)
+}
+
+func unitBinding() sessions.Binding {
+	task := id.New()
+	return sessions.Binding{Reference: sessions.Reference{ID: id.New(), ScopeID: id.New(), OwnerAgentID: "browser-agent-0123abcd"}, Mode: sessions.Create, Creation: sessions.ExecutionRef{OperationID: id.New(), TaskID: task, CommandID: task}}
+}

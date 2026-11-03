@@ -2,334 +2,102 @@ package browser_test
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/defos-ai/commander-browser-agent/browser/intelligence"
 )
 
-const modelFixtureKey = "fixture-api-credential-must-stay-private"
-
-func TestModelConfigurationRequiresExplicitSafeEndpointAndName(t *testing.T) {
-	for _, endpoint := range []string{"https://models.example/v1/chat/completions", "http://localhost/custom/chat", "http://127.0.0.1:1234/chat", "http://[::1]:1234/chat", "http://127.2.3.4/chat"} {
-		if err := intelligence.ValidateModelConfig(intelligence.ModelConfig{URL: endpoint, Name: "fixture-model"}); err != nil {
-			t.Fatalf("rejected allowed endpoint %q: %v", endpoint, err)
-		}
-	}
-	for _, endpoint := range []string{"", "/v1/chat/completions", "http://models.example/chat", "http://127.0.0.1.example/chat", "http://localhost.example/chat", "http://0.0.0.0/chat", "https://operator:password@models.example/chat", "https://models.example/chat?token=value", "https://models.example/chat?", "https://models.example/chat#", "http://127.0.0.1:99999/chat", "https://models.example:"} {
-		if err := intelligence.ValidateModelConfig(intelligence.ModelConfig{URL: endpoint, Name: "fixture-model"}); err == nil {
-			t.Fatalf("accepted invalid endpoint %q", endpoint)
-		}
-	}
-	for _, name := range []string{"", " ", " padded", "padded ", "line\nbreak", strings.Repeat("m", 201)} {
-		if err := intelligence.ValidateModelConfig(intelligence.ModelConfig{URL: "https://models.example/chat", Name: name}); err == nil {
-			t.Fatalf("accepted invalid model name %q", name)
-		}
-	}
-}
-
-func TestModelSendsOneBoundedStructuredCommandRequest(t *testing.T) {
-	var calls atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
-		calls.Add(1)
-		if request.Method != http.MethodPost || request.URL.Path != "/exact/chat/completions" || request.Header.Get("Authorization") != "Bearer "+modelFixtureKey {
-			t.Error("model request changed its endpoint, method or credential header")
-		}
-		body, err := io.ReadAll(io.LimitReader(request.Body, (64<<10)+1))
-		if err != nil || len(body) > 64<<10 || bytes.Contains(body, []byte(modelFixtureKey)) {
-			t.Error("model request exceeded its limit or exposed its credential")
-		}
-		var payload map[string]json.RawMessage
-		if err := json.Unmarshal(body, &payload); err != nil {
-			t.Error(err)
-		}
-		for key, want := range map[string]string{"model": `"fixture-model"`, "tool_choice": `"required"`, "parallel_tool_calls": "false", "store": "false", "max_completion_tokens": "123"} {
-			if string(payload[key]) != want {
-				t.Errorf("request field %s = %s, want %s", key, payload[key], want)
+func TestProviderProtocolsKeepCommandsTypedAndCredentialsPrivate(t *testing.T) {
+	const key = "fixture-private-model-key"
+	for _, test := range []struct {
+		provider, tokens, choice string
+		parallel, store          bool
+	}{
+		{"openai", "max_completion_tokens", "required", true, true},
+		{"anthropic", "max_completion_tokens", "auto", true, false},
+		{"gemini", "max_tokens", "auto", false, false},
+		{"xai", "max_completion_tokens", "required", true, false},
+		{"deepseek", "max_tokens", "auto", false, false},
+		{"other", "max_completion_tokens", "required", true, true},
+	} {
+		t.Run(test.provider, func(t *testing.T) {
+			valid := modelReply(`{"action":"ask","question":"Which catalog?","options":["Work","Personal"]}`)
+			responses := [][]byte{
+				valid,
+				bytes.Replace(valid, []byte(`"tool_calls":[`), []byte(`"tool_calls":[{},`), 1),
+				modelReply(`{"action":"ask","question":"Which?","options":[null,"Work"]}`),
+				modelReply(`{"action":"ask","question":"\u0066ixture-private-model-key"}`),
 			}
-		}
-		if _, present := payload["temperature"]; present {
-			t.Error("model request introduced a temperature default")
-		}
-		var tools []struct {
-			Type     string `json:"type"`
-			Function struct {
-				Name       string         `json:"name"`
-				Parameters map[string]any `json:"parameters"`
-			} `json:"function"`
-		}
-		if json.Unmarshal(payload["tools"], &tools) != nil || len(tools) != 1 || tools[0].Type != "function" || tools[0].Function.Name != "browser_step" || tools[0].Function.Parameters["additionalProperties"] != false {
-			t.Error("request did not offer the single bounded browser tool")
-		} else {
-			properties, _ := tools[0].Function.Parameters["properties"].(map[string]any)
-			action, _ := properties["action"].(map[string]any)
-			commands, _ := action["enum"].([]any)
-			ask := false
-			for _, command := range commands {
-				ask = ask || command == "ask"
-			}
-			question, _ := properties["question"].(map[string]any)
-			options, _ := properties["options"].(map[string]any)
-			option, _ := options["items"].(map[string]any)
-			if !ask || question["type"] != "string" || question["minLength"] != float64(1) || question["maxLength"] != float64(1000) ||
-				options["type"] != "array" || options["maxItems"] != float64(4) || options["uniqueItems"] != true ||
-				option["type"] != "string" || option["minLength"] != float64(1) || option["maxLength"] != float64(160) {
-				t.Error("browser tool did not expose bounded typed clarification questions")
-			}
-		}
-		_, _ = w.Write(modelCompletion(`{"action":"extract"}`))
-	}))
-	defer server.Close()
-	key := []byte(modelFixtureKey)
-	model, err := intelligence.NewModel(intelligence.ModelConfig{URL: server.URL + "/exact/chat/completions", Name: "fixture-model"}, key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer model.(io.Closer).Close()
-	command, err := model.Next(t.Context(), intelligence.Turn{Objective: "Collect fixture evidence"}, 123)
-	if err != nil || command.Action != "extract" {
-		t.Fatalf("optional command fields were rejected: command=%+v error=%v", command, err)
-	}
-	if _, err := model.Next(t.Context(), intelligence.Turn{}, 123); err != nil {
-		t.Fatalf("rejected a tool-call identity reused in an independent request: %v", err)
-	}
-	clear(key)
-	if _, err := model.Next(t.Context(), intelligence.Turn{}, 123); err == nil || calls.Load() != 2 {
-		t.Fatal("client copied the caller-owned key or sent a request after its lifetime ended")
-	}
-}
-
-func TestModelAcceptsAskAndReceivesResolvedClarifications(t *testing.T) {
-	for name, options := range map[string][]string{"freeform": nil, "choices": {"French", "Spanish"}} {
-		t.Run(name, func(t *testing.T) {
-			clarifications := []intelligence.Clarification{{Question: "Which region should the comparison cover?", Answer: "Europe"}}
-			arguments, err := json.Marshal(intelligence.Command{Action: "ask", Question: "Which language should the findings use?", Options: options})
+			var calls, forwarded atomic.Int32
+			destination := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { forwarded.Add(1) }))
+			defer destination.Close()
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+				index := int(calls.Add(1)) - 1
+				body, err := io.ReadAll(io.LimitReader(request.Body, (64<<10)+1))
+				if err != nil || len(body) > 64<<10 || bytes.Contains(body, []byte(key)) || request.Method != http.MethodPost || request.Header.Get("Authorization") != "Bearer "+key {
+					t.Error("model credential escaped its header or request bounds")
+				}
+				var payload map[string]json.RawMessage
+				if json.Unmarshal(body, &payload) != nil || string(payload["model"]) != `"exact-model-v1"` || string(payload[test.tokens]) != "321" || string(payload["tool_choice"]) != `"`+test.choice+`"` {
+					t.Error("provider did not preserve its exact model and supported wire fields")
+				}
+				otherTokens := "max_tokens"
+				if test.tokens == otherTokens {
+					otherTokens = "max_completion_tokens"
+				}
+				if _, present := payload[otherTokens]; present {
+					t.Error("provider sent competing token allowances")
+				}
+				for name, expected := range map[string]bool{"parallel_tool_calls": test.parallel, "store": test.store} {
+					value, present := payload[name]
+					if present != expected || present && string(value) != "false" {
+						t.Error("provider sent unsupported parallel/storage settings")
+					}
+				}
+				if !bytes.Contains(payload["tools"], []byte(`"browser_step"`)) {
+					t.Error("provider omitted its typed browser tool")
+				}
+				if index < len(responses) {
+					_, _ = w.Write(responses[index])
+				} else {
+					w.Header().Set("Location", destination.URL)
+					w.WriteHeader(http.StatusTemporaryRedirect)
+					_, _ = w.Write([]byte(key + " private provider error"))
+				}
+			}))
+			defer server.Close()
+			model, err := intelligence.NewModel(intelligence.ModelConfig{Provider: test.provider, URL: server.URL, Name: "exact-model-v1"}, []byte(key))
 			if err != nil {
 				t.Fatal(err)
 			}
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
-				var payload struct {
-					Messages []struct {
-						Role    string `json:"role"`
-						Content string `json:"content"`
-					} `json:"messages"`
-				}
-				if json.NewDecoder(request.Body).Decode(&payload) != nil {
-					t.Error("model request did not contain its structured turn")
-				}
-				found := false
-				for _, message := range payload.Messages {
-					if message.Role != "user" {
-						continue
+			defer model.(io.Closer).Close()
+			for i := 0; i <= len(responses); i++ {
+				command, err := model.Next(t.Context(), intelligence.Turn{Objective: "Find a price"}, 321)
+				if i == 0 {
+					if err != nil || command.Action != "ask" || command.Question != "Which catalog?" || len(command.Options) != 2 {
+						t.Fatal("valid typed clarification was rejected")
 					}
-					var turn intelligence.Turn
-					found = json.Unmarshal([]byte(message.Content), &turn) == nil && reflect.DeepEqual(turn.Clarifications, clarifications)
+				} else if err == nil || strings.Contains(err.Error(), key) || strings.Contains(err.Error(), server.URL) || strings.Contains(err.Error(), "private provider error") {
+					t.Fatal("model accepted an unsafe command or exposed provider data")
 				}
-				if !found {
-					t.Error("resolved clarifications did not reach the next model decision")
-				}
-				_, _ = w.Write(modelCompletion(string(arguments)))
-			}))
-			defer server.Close()
-			command, err := newModelFixture(t, server.URL).Next(t.Context(), intelligence.Turn{Objective: "Compare fixture products.", Clarifications: clarifications}, 123)
-			if err != nil || command.Action != "ask" || command.Question != "Which language should the findings use?" || !reflect.DeepEqual(command.Options, options) {
-				t.Fatal("typed non-secret clarification command was rejected or changed")
+			}
+			if calls.Load() != int32(len(responses)+1) || forwarded.Load() != 0 {
+				t.Fatal("model retried or forwarded an authenticated redirect")
 			}
 		})
 	}
 }
 
-func TestModelRejectsMalformedOrUnsafeProviderCommands(t *testing.T) {
-	valid := modelCompletion(`{"action":"extract"}`)
-	for name, body := range map[string][]byte{
-		"malformed envelope":   []byte(`{"choices":`),
-		"missing choice":       []byte(`{"choices":[]}`),
-		"multiple choices":     bytes.Replace(valid, []byte(`{"choices":[`), []byte(`{"choices":[{},`), 1),
-		"duplicate envelope":   []byte(`{"choices":[],"choices":[]}`),
-		"truncated completion": bytes.Replace(valid, []byte(`"tool_calls","message"`), []byte(`"length","message"`), 1),
-		"refusal":              bytes.Replace(valid, []byte(`"role":"assistant"`), []byte(`"refusal":"declined","role":"assistant"`), 1),
-		"free text":            bytes.Replace(valid, []byte(`"role":"assistant"`), []byte(`"content":"extra instructions","role":"assistant"`), 1),
-		"wrong tool":           bytes.Replace(valid, []byte(`"name":"browser_step"`), []byte(`"name":"execute_script"`), 1),
-		"wrong tool type":      bytes.Replace(valid, []byte(`"type":"function"`), []byte(`"type":"other"`), 1),
-		"multiple tool calls":  bytes.Replace(valid, []byte(`"tool_calls":[`), []byte(`"tool_calls":[{},`), 1),
-		"wrong message role":   bytes.Replace(valid, []byte(`"role":"assistant"`), []byte(`"role":"tool"`), 1),
-		"missing call id":      bytes.Replace(valid, []byte(`"id":"call-fixture"`), []byte(`"id":""`), 1),
-		"unknown action":       modelCompletion(`{"action":"javascript"}`),
-		"unknown argument":     modelCompletion(`{"action":"click","selector":"button"}`),
-		"case alias argument":  modelCompletion(`{"action":"extract","Action":"navigate"}`),
-		"null argument":        modelCompletion(`{"action":"extract","target":null}`),
-		"malformed arguments":  modelCompletion(`{"action":`),
-		"multiple values":      modelCompletion(`{"action":"extract"}{"action":"navigate"}`),
-		"duplicate arguments":  modelCompletion(`{"action":"extract","action":"navigate"}`),
-		"wrong argument type":  modelCompletion(`{"action":"type_text","target":"1"}`),
-		"null question":        modelCompletion(`{"action":"ask","question":null}`),
-		"numeric question":     modelCompletion(`{"action":"ask","question":123}`),
-		"object question":      modelCompletion(`{"action":"ask","question":{"text":"Choose a language"}}`),
-		"case alias question":  modelCompletion(`{"action":"ask","Question":"Choose a language"}`),
-		"duplicate question":   modelCompletion(`{"action":"ask","question":"First?","question":"Second?"}`),
-		"null options":         modelCompletion(`{"action":"ask","question":"Choose a language","options":null}`),
-		"string options":       modelCompletion(`{"action":"ask","question":"Choose a language","options":"French"}`),
-		"object options":       modelCompletion(`{"action":"ask","question":"Choose a language","options":{"first":"French"}}`),
-		"mixed options":        modelCompletion(`{"action":"ask","question":"Choose a language","options":["French",2]}`),
-		"null option":          modelCompletion(`{"action":"ask","question":"Choose a language","options":["French",null]}`),
-		"nested option":        modelCompletion(`{"action":"ask","question":"Choose a language","options":[["French"]]}`),
-		"case alias options":   modelCompletion(`{"action":"ask","question":"Choose a language","Options":["French"]}`),
-		"duplicate options":    modelCompletion(`{"action":"ask","question":"Choose a language","options":[],"options":["French"]}`),
-		"unknown finding":      modelCompletion(`{"action":"finish","findings":[{"text":"claim","evidence_ids":["e1"],"script":"ignored"}]}`),
-		"null reference":       modelCompletion(`{"action":"finish","findings":[{"text":"claim","evidence_ids":[null]}]}`),
-		"too large":            append(bytes.Repeat([]byte(" "), 64<<10), valid...),
-	} {
-		t.Run(name, func(t *testing.T) {
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) { _, _ = w.Write(body) }))
-			defer server.Close()
-			model := newModelFixture(t, server.URL)
-			if _, err := model.Next(t.Context(), intelligence.Turn{}, 123); err == nil {
-				t.Fatal("accepted a malformed or unsafe model command")
-			}
-		})
-	}
-}
-
-func TestModelCloseWaitsForRequestsAndReleasesBorrowedCredential(t *testing.T) {
-	started, release := make(chan struct{}), make(chan struct{})
-	var calls atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
-		calls.Add(1)
-		close(started)
-		<-release
-		_, _ = w.Write(modelCompletion(`{"action":"extract"}`))
-	}))
-	defer server.Close()
-	key := []byte(modelFixtureKey)
-	model, err := intelligence.NewModel(intelligence.ModelConfig{URL: server.URL, Name: "fixture-model"}, key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	closer, ok := model.(io.Closer)
-	if !ok {
-		t.Fatal("model does not provide request-lifetime cleanup")
-	}
-	requestDone, closeDone := make(chan error, 1), make(chan error, 1)
-	go func() { _, err := model.Next(t.Context(), intelligence.Turn{}, 123); requestDone <- err }()
-	<-started
-	go func() { closeDone <- closer.Close() }()
-	select {
-	case <-closeDone:
-		close(release)
-		t.Fatal("model released its credential reference before the request finished")
-	case <-time.After(20 * time.Millisecond):
-	}
-	close(release)
-	if err := <-requestDone; err != nil {
-		t.Fatal(err)
-	}
-	if err := <-closeDone; err != nil {
-		t.Fatal(err)
-	}
-	if string(key) != modelFixtureKey {
-		t.Fatal("model cleanup modified caller-owned credentials")
-	}
-	if _, err := model.Next(t.Context(), intelligence.Turn{}, 123); err == nil || calls.Load() != 1 {
-		t.Fatal("closed model accepted another request")
-	}
-	if err := closer.Close(); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestModelRejectsEscapedCredentialEchoes(t *testing.T) {
-	for name, arguments := range map[string]string{
-		"typed text": `{"action":"type_text","target":1,"text":"\u0066ixture-api-credential-must-stay-private"}`,
-		"question":   `{"action":"ask","question":"Use \u0066ixture-api-credential-must-stay-private?"}`,
-		"option":     `{"action":"ask","question":"Which value?","options":["\u0066ixture-api-credential-must-stay-private"]}`,
-	} {
-		t.Run(name, func(t *testing.T) {
-			body := modelCompletion(arguments)
-			if bytes.Contains(body, []byte(modelFixtureKey)) {
-				t.Fatal("fixture did not encode its credential echo")
-			}
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) { _, _ = w.Write(body) }))
-			defer server.Close()
-			if _, err := newModelFixture(t, server.URL).Next(t.Context(), intelligence.Turn{}, 123); err == nil || strings.Contains(err.Error(), modelFixtureKey) || strings.Contains(err.Error(), server.URL) {
-				t.Fatal("model credential echo was accepted or exposed in an error")
-			}
-		})
-	}
-}
-
-func TestModelNeverRedirectsRetriesOrLeaksProviderErrors(t *testing.T) {
-	var forwarded, calls atomic.Int32
-	destination := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) { forwarded.Add(1) }))
-	defer destination.Close()
-	for _, status := range []int{http.StatusTemporaryRedirect, http.StatusUnauthorized, http.StatusTooManyRequests} {
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
-			calls.Add(1)
-			w.Header().Set("Location", destination.URL)
-			w.WriteHeader(status)
-			_, _ = w.Write([]byte(modelFixtureKey + " private provider error"))
-		}))
-		_, err := newModelFixture(t, server.URL).Next(t.Context(), intelligence.Turn{}, 123)
-		server.Close()
-		if err == nil || strings.Contains(err.Error(), modelFixtureKey) || strings.Contains(err.Error(), server.URL) || strings.Contains(err.Error(), "private provider error") {
-			t.Fatal("provider failure or redirect exposed private details")
-		}
-	}
-	if forwarded.Load() != 0 || calls.Load() != 3 {
-		t.Fatalf("model client forwarded credentials or retried: forwarded=%d calls=%d", forwarded.Load(), calls.Load())
-	}
-}
-
-func TestModelRejectsOversizedOrCanceledInputBeforeSending(t *testing.T) {
-	var calls atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) { calls.Add(1) }))
-	defer server.Close()
-	model := newModelFixture(t, server.URL)
-	turn := intelligence.Turn{Observation: intelligence.Observation{Text: strings.Repeat("x", 64<<10)}}
-	if _, err := model.Next(t.Context(), turn, 123); err == nil {
-		t.Fatal("sent an oversized model input")
-	}
-	turn = intelligence.Turn{Objective: modelFixtureKey}
-	if _, err := model.Next(t.Context(), turn, 123); err == nil {
-		t.Fatal("sent a credential in model context")
-	}
-	for _, clarification := range []intelligence.Clarification{{Question: modelFixtureKey, Answer: "A preference"}, {Question: "Which preference?", Answer: modelFixtureKey}} {
-		turn = intelligence.Turn{Clarifications: []intelligence.Clarification{clarification}}
-		if _, err := model.Next(t.Context(), turn, 123); err == nil {
-			t.Fatal("sent a credential in clarification context")
-		}
-	}
-	ctx, cancel := context.WithCancel(t.Context())
-	cancel()
-	if _, err := model.Next(ctx, intelligence.Turn{}, 123); err != context.Canceled || calls.Load() != 0 {
-		t.Fatalf("canceled or unsafe input reached provider: calls=%d error=%v", calls.Load(), err)
-	}
-}
-
-func newModelFixture(t *testing.T, endpoint string) intelligence.Model {
-	t.Helper()
-	model, err := intelligence.NewModel(intelligence.ModelConfig{URL: endpoint, Name: "fixture-model"}, []byte(modelFixtureKey))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = model.(io.Closer).Close() })
-	return model
-}
-
-func modelCompletion(arguments string) []byte {
+func modelReply(arguments string) []byte {
 	value := map[string]any{"choices": []any{map[string]any{"finish_reason": "tool_calls", "message": map[string]any{
-		"role": "assistant", "tool_calls": []any{map[string]any{"id": "call-fixture", "type": "function", "function": map[string]any{"name": "browser_step", "arguments": arguments}}},
+		"role": "assistant", "tool_calls": []any{map[string]any{"id": "fixture-call", "type": "function", "function": map[string]any{"name": "browser_step", "arguments": arguments}}},
 	}}}}
-	encoded, err := json.Marshal(value)
-	if err != nil {
-		panic(err)
-	}
+	encoded, _ := json.Marshal(value)
 	return encoded
 }

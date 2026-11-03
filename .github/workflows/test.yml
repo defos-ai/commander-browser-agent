@@ -66,7 +66,7 @@ jobs:
             test -s /usr/share/doc/lightpanda/FONT-LICENSE
             test -s /usr/share/doc/lightpanda/NOTICE
           '
-      - name: Build browser session tests
+      - name: Build agent workflow tests
         run: |
           docker run --rm --user "$(id -u):$(id -g)" --workdir /src \
             --mount "type=bind,source=$PWD,target=/src,readonly" \
@@ -82,7 +82,7 @@ jobs:
           docker run --rm --init --network none \
             --mount "type=bind,source=$RUNNER_TEMP/browser-session-tests,target=/browser-session-tests,readonly" \
             --entrypoint /bin/sh commander-browser-agent:local -ec '
-              /browser-session-tests -test.run "^Test(BrowserSessions|Browse|Login|Screenshot)" -test.v -test.count=1 -test.timeout=3m
+              /browser-session-tests -test.v -test.count=1 -test.timeout=3m
               browsers_running() {
                 for process_comm in /proc/[0-9]*/comm; do
                   if IFS= read -r process_name 2>/dev/null < "$process_comm"; then
