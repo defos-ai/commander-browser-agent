@@ -18,9 +18,9 @@
   chooses agents and mission rules control transitions. Upload bytes through
   `ArtifactFileStore`; the controller accepts metadata. Do not claim exactly-once
   execution or confuse broker ACKs with result acceptance.
-- The default action catalog exposes `browse` and `login`, with model-setup and
-  in-browser non-secret clarification questions. Checkpoints and text-only
-  screenshots are subsequent steps. Do not restore
+- The default action catalog exposes `browse`, `login` and `screenshot`, with
+  model-setup and in-browser non-secret clarification questions. Checkpoints are
+  a subsequent step. Do not restore
   legacy capture/accessibility actions or their review mission. Static HTTP
   checks/crawling remain in the separate
   web-agent repository. Creating an operation does not start tasks.
@@ -64,7 +64,7 @@
   attribution in `/usr/share/doc/lightpanda`; do not vendor a third_party folder.
   This separate runtime dependency does not change the agent's MIT or Commander's
   AGPL-3.0-only licensing.
-- The future screenshot action uses Lightpanda text-only PNGs. Identify the
+- The screenshot action uses Lightpanda text-only PNGs. Identify the
   renderer in output/artifact metadata; desktop/mobile refer to viewport sizes,
   not pixel-accurate page design or full mobile-device emulation. Do not restore
   the old capture/accessibility actions to supply this capability.
@@ -105,7 +105,8 @@
 
 - [browser/intelligence/](browser/intelligence/) implements an in-process Go loop
   on the existing session context. Do not launch the native Lightpanda agent or
-  attach another CDP connection. The pinned native agent has a fixed tool catalog,
+  attach another CDP connection for automation. Screenshot rendering has the
+  isolated, unauthenticated connection described below. The pinned native agent has a fixed tool catalog,
   creates its own browser/session and exposes environment values through `getEnv`;
   a fake-model probe confirmed that path reaches model context. Its JSONL trace is
   observation-only, not a custom callback bridge. Browser Use 0.13.14 also creates
@@ -217,6 +218,39 @@
   confirmed close. Never expose fingerprints in snapshots or store raw credential
   text for future browsing. Exact/common value redaction is bounded; do not claim
   universal protection against arbitrary website transformations.
+
+## Protected text screenshots
+
+- [actions/screenshot.go](actions/screenshot.go) is use-only: require the exact
+  framework `use` binding, existing session ID and scope. Do not navigate, create
+  an automation session, ask model questions or request credentials for capture.
+  Keep the host's production runner and preserve explicit empty action catalogs.
+- [browser/screenshot/](browser/screenshot/) reads the retained main page using a
+  fixed isolated-world function. Bound title/body extraction, exclude hidden and
+  form values, and apply the shared session redactor before excerpt truncation
+  and before passing text to rendering. Never capture raw authenticated DOM and
+  attempt to redact the PNG afterward; do not mutate/restore the live document.
+  Retain model-key fingerprints in the managed session before browsing so later
+  screenshots also protect those values without asking for the key again. Missing
+  tracking on a custom runner does not imply that it can render screenshots.
+- Lightpanda 1.0.2 permits one target/context per CDP connection. A temporary
+  renderer connection to the same owned process receives only protected plain
+  text in an inert blank document. Never copy cookies, storage, authentication,
+  source HTML or source scripts. Keep its endpoint and runtime handle private.
+  Renderer-local metrics must not change the source page's viewport/media state.
+- [browser/render.go](browser/render.go) owns temporary renderer connections and
+  joins target/allocator/socket cleanup, including on action cancellation and
+  session close. Bind the private renderer handle to the original `Manager.Run`
+  lifetime; detached contexts cannot render after that callback ends. Source
+  shutdown stops admission and waits for render borrows.
+  Return PNG bytes only after confirmed cleanup; uncertain cleanup retains
+  ownership and marks the source runtime lost rather than silently reconnecting.
+- Use native PNG output, validate its byte/pixel bounds and actual dimensions,
+  and upload through ArtifactFileStore via action results. Renderer metadata
+  belongs in output and `screenshot.json` beside `screenshot.png`; never include
+  source text, URLs, DOM or secrets in the sidecar. `desktop`/`mobile` are text
+  viewports (1280x720/390x844), not responsive-design/device emulation. The source
+  excerpt truncation flag does not promise that all text fits in the image.
 
 ## Demo and releases
 

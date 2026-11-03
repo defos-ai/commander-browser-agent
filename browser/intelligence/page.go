@@ -11,7 +11,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-	"unicode/utf8"
 
 	"github.com/chromedp/cdproto/cdp"
 	"github.com/chromedp/cdproto/fetch"
@@ -271,13 +270,13 @@ func (p *pageDriver) Observe(ctx context.Context) (Observation, error) {
 	}
 	p.nextID += 60
 	p.targets = make(map[int]string, len(observation.Targets))
-	observation.URL, observation.Title, observation.Text = address, protectedPageText(ctx, observation.Title, 256), protectedPageText(ctx, observation.Text, 10000)
+	observation.URL, observation.Title, observation.Text = address, sensitive.Excerpt(ctx, observation.Title, 256), sensitive.Excerpt(ctx, observation.Text, 10000)
 	if len(observation.Targets) > 60 {
 		observation.Targets = observation.Targets[:60]
 	}
 	for i := range observation.Targets {
 		item := &observation.Targets[i]
-		item.Label, item.URL = protectedPageText(ctx, item.Label, 160), safePageURL(item.URL)
+		item.Label, item.URL = sensitive.Excerpt(ctx, item.Label, 160), safePageURL(item.URL)
 		p.targets[item.ID] = item.Kind
 	}
 	return observation, nil
@@ -345,39 +344,8 @@ func (p *pageDriver) Extract(ctx context.Context, targetID int) (Evidence, error
 	if err := p.evaluate(bounded, extractDOM, targetID, &evidence); err != nil {
 		return Evidence{}, err
 	}
-	evidence.URL, evidence.Title, evidence.Text = address, protectedPageText(ctx, evidence.Title, 256), protectedPageText(ctx, evidence.Text, 4000)
+	evidence.URL, evidence.Title, evidence.Text = address, sensitive.Excerpt(ctx, evidence.Title, 256), sensitive.Excerpt(ctx, evidence.Text, 4000)
 	return evidence, nil
-}
-
-func protectedPageText(ctx context.Context, value string, limit int) string {
-	end := min(len(value), limit)
-	for end > 0 && !utf8.ValidString(value[:end]) {
-		end--
-	}
-	// The source contains lookahead beyond the excerpt. Redact before cutting,
-	// then retain only the common protected prefix: shrinking earlier matches
-	// must not expose an unprotected tail from the extra source window.
-	full := sensitive.Redact(ctx, value)
-	prefix := sensitive.Redact(ctx, value[:end])
-	common := 0
-	for common < len(full) && common < len(prefix) && full[common] == prefix[common] {
-		common++
-	}
-	for common > 0 && !utf8.ValidString(full[:common]) {
-		common--
-	}
-	return boundedPageText(strings.Join(strings.Fields(full[:common]), " "), limit)
-}
-
-func boundedPageText(value string, limit int) string {
-	value = strings.TrimSpace(value)
-	if len(value) > limit {
-		value = value[:limit]
-		for !utf8.ValidString(value) {
-			value = value[:len(value)-1]
-		}
-	}
-	return value
 }
 
 const safeDOM = `

@@ -11,8 +11,8 @@ Completion requires extracted evidence and findings that cite it.
 Model setup uses Commander's questions and managed secrets. During browsing, the
 agent can ask non-secret clarification questions and continue with the saved
 answers. `login` uses managed username/password credentials and retains the same
-browser for later work. Checkpoints and `screenshot` are planned next.
-Screenshots will use Lightpanda's text-only PNG renderer.
+browser for later work. `screenshot` captures a protected text-only PNG from an
+existing session. Checkpoints are planned next.
 
 Static HTML checks and crawling belong to the
 [web agent](https://github.com/defos-ai/commander-web-agent).
@@ -204,6 +204,42 @@ redaction, not a guarantee against arbitrary transformations by a website.
 Login defaults to a 120-second active allowance, configurable with
 `timeout_seconds` (5–180). Missing credential waits pause that allowance and are
 individually bounded to three minutes; the outer task deadline still applies.
+
+## Capture a screenshot
+
+Use `screenshot` with an existing session returned by `browse` or `login`:
+
+```json
+{
+  "session_scope": "2e2ca5a5-c552-4ab4-90a7-62807dcb3f50",
+  "session_id": "9ac8e694-582c-4a9f-8a76-fbdc238d5910",
+  "viewport": "desktop"
+}
+```
+
+The action captures the retained page without navigating it. It needs no URL,
+model setup or secret request. `viewport` defaults to `desktop` (1280 × 720);
+`mobile` selects 390 × 844. These sizes apply to the text rendering and do not
+emulate a mobile device or reproduce the website's responsive design. The default
+timeout is 30 seconds, configurable with `timeout_seconds` (5–60).
+
+Lightpanda renders a bounded snapshot of the page's visible title and body text.
+Form values, hidden content and scripts are excluded; submitted credentials are
+redacted using the session's protection state before rendering. Images, CSS layout
+and other page-design pixels are outside this text-only capture.
+
+The protected text is rendered in a temporary unauthenticated CDP context within
+the same owned Lightpanda process. Its viewport is independent of the retained
+page, and no cookies, storage or authentication are copied into it. It closes
+before a successful result is returned. The live page and authenticated browser
+remain available for subsequent work.
+
+Results identify the renderer as `lightpanda-text-snapshot` and include the PNG
+dimensions, viewport and media type. The artifact contains `screenshot.png` and
+`screenshot.json` with the same metadata. `truncated` reports the bounded source
+text excerpt; the viewport can also crop rendered text. No raw DOM or source-text
+transcript is added to the artifact. Value redaction retains the same limits as
+browsing and does not detect arbitrary transformations of submitted credentials.
 
 ## Connect to Commander
 

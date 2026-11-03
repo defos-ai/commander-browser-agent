@@ -69,6 +69,10 @@ type browserRuntime struct {
 	closed          chan struct{}
 	profileMu       sync.Mutex
 	removal         *profileRemoval
+	endpoint        string
+	renderMu        sync.Mutex
+	renderClosing   bool
+	renderers       sync.WaitGroup
 }
 
 type profileRemoval struct {
@@ -151,6 +155,7 @@ func launchAttempt(parent context.Context, options Options) (retained *browserRu
 		}
 		return nil, errors.New("browser startup failed; check the executable and platform requirements")
 	}
+	r.endpoint = endpoint
 	allocator, cancelAllocator := chromedp.NewRemoteAllocator(ctx, endpoint, chromedp.NoModifyURL)
 	r.cancelAllocator = cancelAllocator
 	r.page, r.cancelPage = chromedp.NewContext(allocator,
@@ -258,12 +263,16 @@ func (r *browserRuntime) Verify(ctx context.Context) error {
 }
 
 func (r *browserRuntime) Close() error {
+	r.renderMu.Lock()
+	r.renderClosing = true
 	r.cancel()
+	r.renderMu.Unlock()
 	r.closeOnce.Do(func() {
 		go func() {
 			if r.waited != nil {
 				<-r.waited
 			}
+			r.renderers.Wait()
 			if r.initialized != nil {
 				<-r.initialized
 			}

@@ -96,8 +96,8 @@ func startBrowseFramework(t *testing.T, key string) *browseFramework {
 		}
 		names[registered.Name] = true
 	}
-	if len(snapshot.Actions) != 2 || !names["browse"] || !names["login"] {
-		t.Fatal("browse and login were not registered before model setup")
+	if len(snapshot.Actions) != 3 || !names["browse"] || !names["login"] || !names["screenshot"] {
+		t.Fatal("browse, login and screenshot were not registered before model setup")
 	}
 	for _, message := range peer.pending {
 		if message.Type == controllerevents.SecretSyncRequested || message.Type == controllerevents.QuestionRequested {

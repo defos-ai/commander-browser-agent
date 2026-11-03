@@ -223,6 +223,7 @@ func (m *Manager) Run(ctx context.Context, options Options, work func(context.Co
 	}
 	workCtx, cancel := context.WithCancel(ctx)
 	workCtx = sensitive.WithValues(workCtx, item.values)
+	workCtx = withRendererRuntime(workCtx, browser)
 	stopBrowser := context.AfterFunc(browser.Context(), cancel)
 	stopLifetime := context.AfterFunc(item.lifetime, cancel)
 	defer func() { stopBrowser(); stopLifetime(); cancel() }()

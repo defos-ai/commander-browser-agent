@@ -17,6 +17,7 @@ import (
 	"github.com/defos-ai/commander-browser-agent/browser/intelligence"
 	"github.com/defos-ai/commander-browser-agent/browser/lightpanda"
 	"github.com/defos-ai/commander-browser-agent/internal/browsing"
+	"github.com/defos-ai/commander-browser-agent/internal/sensitive"
 	"github.com/defos-ai/commander/framework/agent/action"
 	"github.com/defos-ai/commander/framework/agent/environment"
 	actionmodel "github.com/defos-ai/commander/framework/domain/actions"
@@ -207,6 +208,11 @@ func (a *Browse) Run(ctx context.Context, raw json.RawMessage) (action.Result, e
 	}
 	var findings intelligence.Result
 	snapshot, runErr := a.runner.Run(budget.Context(), browserruntime.Options{Engine: browserruntime.Lightpanda, Executable: configuration.runtime.Executable()}, func(ctx context.Context) error {
+		if sensitive.HasValues(ctx) {
+			if err := sensitive.Remember(ctx, key); err != nil {
+				return errors.New("cannot protect model credentials in this browser session; use a new session")
+			}
+		}
 		var err error
 		findings, err = intelligence.Run(ctx, request, model, hooks)
 		return err

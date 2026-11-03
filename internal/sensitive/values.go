@@ -13,7 +13,7 @@ import (
 	"sync"
 )
 
-const MaxValueBytes = 1024
+const MaxValueBytes = 4096
 const maxValues = 32
 const prefixBytes = 8
 const replacement = "[REDACTED]"
@@ -53,6 +53,13 @@ func WithValues(ctx context.Context, values *Values) context.Context {
 	return context.WithValue(ctx, contextKey{}, values)
 }
 
+// HasValues reports ownership of a tracker, including a retired tracker whose
+// registration must fail closed. It does not expose its fingerprints or values.
+func HasValues(ctx context.Context) bool {
+	values, _ := ctx.Value(contextKey{}).(*Values)
+	return values != nil
+}
+
 // Remember registers all values atomically. The caller still owns and must clear
 // the supplied bytes. Existing fingerprints are never evicted to make room.
 func Remember(ctx context.Context, submitted ...[]byte) error {
@@ -78,7 +85,7 @@ func Remember(ctx context.Context, submitted ...[]byte) error {
 			return err
 		}
 		if len(value) == 0 || len(value) > MaxValueBytes {
-			return errors.New("protected credentials must contain 1 to 1024 bytes")
+			return errors.New("protected values must contain 1 to 4096 bytes")
 		}
 		full := fingerprint{length: len(value), digest: sum(mac, value)}
 		if _, exists := values.known[full]; exists {
