@@ -59,6 +59,7 @@ func Run(ctx context.Context, request Request, model Model, hooks Hooks) (result
 		return result, errors.New("cannot open the starting page within the permitted browser scope")
 	}
 	remaining := request.MaxCompletionTokens
+	var clarifications []Clarification
 	for step := 0; step < request.MaxSteps && remaining > 0; step++ {
 		if err := ctx.Err(); err != nil {
 			return result, err
@@ -83,10 +84,13 @@ func Run(ctx context.Context, request Request, model Model, hooks Hooks) (result
 			return result, err
 		}
 		turn := Turn{Objective: hooks.Redact(request.Objective), AllowedHosts: request.AllowedHosts, Observation: observation,
-			Evidence: modelEvidence(result.Evidence), RecentSteps: recent}
+			Evidence: modelEvidence(result.Evidence), RecentSteps: recent, Clarifications: modelClarifications(clarifications)}
 		command, err := model.Next(ctx, turn, allowance)
 		if err != nil {
 			return result, errors.New("browser model request failed or returned an invalid command")
+		}
+		if err := validCommand(command, result.Evidence); err != nil {
+			return result, err
 		}
 		command = safeCommand(command, hooks.Redact)
 		if err := validCommand(command, result.Evidence); err != nil {
@@ -95,6 +99,13 @@ func Run(ctx context.Context, request Request, model Model, hooks Hooks) (result
 		if command.Action == "extract" && len(result.Evidence) >= 8 {
 			result.Summary, result.Status = "The evidence limit was reached.", "budget_exhausted"
 			if err := log("Browser evidence budget reached"); err != nil {
+				return result, err
+			}
+			return result, nil
+		}
+		if command.Action == "ask" && len(clarifications) >= 4 {
+			result.Summary, result.Status = "The browser clarification limit was reached.", "budget_exhausted"
+			if err := log("Browser clarification limit reached"); err != nil {
 				return result, err
 			}
 			return result, nil
@@ -130,6 +141,38 @@ func Run(ctx context.Context, request Request, model Model, hooks Hooks) (result
 			case <-ctx.Done():
 				operationErr = ctx.Err()
 			case <-time.After(250 * time.Millisecond):
+			}
+		case "ask":
+			if hooks.Question == nil {
+				return result, errors.New("browser clarification requires the execution question bridge")
+			}
+			if err := log("Waiting for a non-secret browser clarification"); err != nil {
+				return result, err
+			}
+			key := fmt.Sprintf("browser_clarification_%d", len(clarifications)+1)
+			answer, err := hooks.Question(ctx, key, command.Question, slices.Clone(command.Options))
+			if ctx.Err() != nil {
+				return result, ctx.Err()
+			}
+			if err != nil {
+				if errors.Is(err, context.DeadlineExceeded) {
+					return result, fmt.Errorf("browser clarification timed out: %w", context.DeadlineExceeded)
+				}
+				if errors.Is(err, context.Canceled) {
+					return result, context.Canceled
+				}
+				return result, errors.New("browser clarification could not be answered")
+			}
+			if !validClarificationText(answer, 2000) {
+				return result, errors.New("browser clarification answer must be nonblank UTF-8 of at most 2000 bytes")
+			}
+			answer = strings.TrimSpace(hooks.Redact(answer))
+			if !validClarificationText(answer, 2000) {
+				return result, errors.New("browser clarification answer is invalid after redaction")
+			}
+			clarifications = append(clarifications, Clarification{Question: command.Question, Options: slices.Clone(command.Options), Answer: answer})
+			if err := log("Browser clarification answered; continuing"); err != nil {
+				return result, err
 			}
 		case "finish":
 			result.Status, result.Summary, result.Findings = "completed", command.Summary, command.Findings
@@ -177,6 +220,9 @@ func validCommand(command Command, evidence []Evidence) error {
 	if command.Action != "navigate" && command.URL != "" || command.Action != "type_text" && command.Text != "" {
 		return invalid
 	}
+	if command.Action != "ask" && (command.Question != "" || len(command.Options) != 0) {
+		return invalid
+	}
 	switch command.Action {
 	case "navigate":
 		if command.URL == "" || command.Target != 0 {
@@ -194,6 +240,17 @@ func validCommand(command Command, evidence []Evidence) error {
 	case "wait":
 		if command.Target != 0 {
 			return invalid
+		}
+	case "ask":
+		if command.Target != 0 || !validClarificationText(command.Question, 1000) || len(command.Options) > 4 {
+			return invalid
+		}
+		seen := make(map[string]bool, len(command.Options))
+		for _, option := range command.Options {
+			if !validClarificationText(option, 160) || seen[strings.ToLower(option)] {
+				return invalid
+			}
+			seen[strings.ToLower(option)] = true
 		}
 	case "finish":
 		if command.Target != 0 || strings.TrimSpace(command.Summary) == "" || len(command.Findings) > 12 {
@@ -235,6 +292,11 @@ func safeObservation(value Observation, redact func(string) string) Observation 
 
 func safeCommand(value Command, redact func(string) string) Command {
 	value.URL, value.Text, value.Summary = redact(value.URL), redact(value.Text), redact(value.Summary)
+	value.Question = strings.TrimSpace(redact(value.Question))
+	value.Options = slices.Clone(value.Options)
+	for i, option := range value.Options {
+		value.Options[i] = strings.TrimSpace(redact(option))
+	}
 	for i := range value.Findings {
 		value.Findings[i].Text = redact(value.Findings[i].Text)
 		for j := range value.Findings[i].EvidenceIDs {
@@ -242,6 +304,10 @@ func safeCommand(value Command, redact func(string) string) Command {
 		}
 	}
 	return value
+}
+
+func validClarificationText(value string, limit int) bool {
+	return len(value) <= limit && utf8.ValidString(value) && strings.TrimSpace(value) != ""
 }
 
 // Redact decoded URL components before serializing. RawPath may otherwise retain
@@ -262,6 +328,14 @@ func modelEvidence(evidence []Evidence) []Evidence {
 	copy(items, evidence)
 	for i := range items {
 		items[i].Text = bounded(items[i].Text, 2000)
+	}
+	return items
+}
+
+func modelClarifications(clarifications []Clarification) []Clarification {
+	items := slices.Clone(clarifications)
+	for i := range items {
+		items[i].Options = slices.Clone(items[i].Options)
 	}
 	return items
 }

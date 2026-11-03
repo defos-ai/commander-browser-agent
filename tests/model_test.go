@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -67,6 +68,22 @@ func TestModelSendsOneBoundedStructuredCommandRequest(t *testing.T) {
 		}
 		if json.Unmarshal(payload["tools"], &tools) != nil || len(tools) != 1 || tools[0].Type != "function" || tools[0].Function.Name != "browser_step" || tools[0].Function.Parameters["additionalProperties"] != false {
 			t.Error("request did not offer the single bounded browser tool")
+		} else {
+			properties, _ := tools[0].Function.Parameters["properties"].(map[string]any)
+			action, _ := properties["action"].(map[string]any)
+			commands, _ := action["enum"].([]any)
+			ask := false
+			for _, command := range commands {
+				ask = ask || command == "ask"
+			}
+			question, _ := properties["question"].(map[string]any)
+			options, _ := properties["options"].(map[string]any)
+			option, _ := options["items"].(map[string]any)
+			if !ask || question["type"] != "string" || question["minLength"] != float64(1) || question["maxLength"] != float64(1000) ||
+				options["type"] != "array" || options["maxItems"] != float64(4) || options["uniqueItems"] != true ||
+				option["type"] != "string" || option["minLength"] != float64(1) || option["maxLength"] != float64(160) {
+				t.Error("browser tool did not expose bounded typed clarification questions")
+			}
 		}
 		_, _ = w.Write(modelCompletion(`{"action":"extract"}`))
 	}))
@@ -87,6 +104,46 @@ func TestModelSendsOneBoundedStructuredCommandRequest(t *testing.T) {
 	clear(key)
 	if _, err := model.Next(t.Context(), intelligence.Turn{}, 123); err == nil || calls.Load() != 2 {
 		t.Fatal("client copied the caller-owned key or sent a request after its lifetime ended")
+	}
+}
+
+func TestModelAcceptsAskAndReceivesResolvedClarifications(t *testing.T) {
+	for name, options := range map[string][]string{"freeform": nil, "choices": {"French", "Spanish"}} {
+		t.Run(name, func(t *testing.T) {
+			clarifications := []intelligence.Clarification{{Question: "Which region should the comparison cover?", Answer: "Europe"}}
+			arguments, err := json.Marshal(intelligence.Command{Action: "ask", Question: "Which language should the findings use?", Options: options})
+			if err != nil {
+				t.Fatal(err)
+			}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+				var payload struct {
+					Messages []struct {
+						Role    string `json:"role"`
+						Content string `json:"content"`
+					} `json:"messages"`
+				}
+				if json.NewDecoder(request.Body).Decode(&payload) != nil {
+					t.Error("model request did not contain its structured turn")
+				}
+				found := false
+				for _, message := range payload.Messages {
+					if message.Role != "user" {
+						continue
+					}
+					var turn intelligence.Turn
+					found = json.Unmarshal([]byte(message.Content), &turn) == nil && reflect.DeepEqual(turn.Clarifications, clarifications)
+				}
+				if !found {
+					t.Error("resolved clarifications did not reach the next model decision")
+				}
+				_, _ = w.Write(modelCompletion(string(arguments)))
+			}))
+			defer server.Close()
+			command, err := newModelFixture(t, server.URL).Next(t.Context(), intelligence.Turn{Objective: "Compare fixture products.", Clarifications: clarifications}, 123)
+			if err != nil || command.Action != "ask" || command.Question != "Which language should the findings use?" || !reflect.DeepEqual(command.Options, options) {
+				t.Fatal("typed non-secret clarification command was rejected or changed")
+			}
+		})
 	}
 }
 
@@ -113,6 +170,19 @@ func TestModelRejectsMalformedOrUnsafeProviderCommands(t *testing.T) {
 		"multiple values":      modelCompletion(`{"action":"extract"}{"action":"navigate"}`),
 		"duplicate arguments":  modelCompletion(`{"action":"extract","action":"navigate"}`),
 		"wrong argument type":  modelCompletion(`{"action":"type_text","target":"1"}`),
+		"null question":        modelCompletion(`{"action":"ask","question":null}`),
+		"numeric question":     modelCompletion(`{"action":"ask","question":123}`),
+		"object question":      modelCompletion(`{"action":"ask","question":{"text":"Choose a language"}}`),
+		"case alias question":  modelCompletion(`{"action":"ask","Question":"Choose a language"}`),
+		"duplicate question":   modelCompletion(`{"action":"ask","question":"First?","question":"Second?"}`),
+		"null options":         modelCompletion(`{"action":"ask","question":"Choose a language","options":null}`),
+		"string options":       modelCompletion(`{"action":"ask","question":"Choose a language","options":"French"}`),
+		"object options":       modelCompletion(`{"action":"ask","question":"Choose a language","options":{"first":"French"}}`),
+		"mixed options":        modelCompletion(`{"action":"ask","question":"Choose a language","options":["French",2]}`),
+		"null option":          modelCompletion(`{"action":"ask","question":"Choose a language","options":["French",null]}`),
+		"nested option":        modelCompletion(`{"action":"ask","question":"Choose a language","options":[["French"]]}`),
+		"case alias options":   modelCompletion(`{"action":"ask","question":"Choose a language","Options":["French"]}`),
+		"duplicate options":    modelCompletion(`{"action":"ask","question":"Choose a language","options":[],"options":["French"]}`),
 		"unknown finding":      modelCompletion(`{"action":"finish","findings":[{"text":"claim","evidence_ids":["e1"],"script":"ignored"}]}`),
 		"null reference":       modelCompletion(`{"action":"finish","findings":[{"text":"claim","evidence_ids":[null]}]}`),
 		"too large":            append(bytes.Repeat([]byte(" "), 64<<10), valid...),
@@ -176,15 +246,22 @@ func TestModelCloseWaitsForRequestsAndReleasesBorrowedCredential(t *testing.T) {
 }
 
 func TestModelRejectsEscapedCredentialEchoes(t *testing.T) {
-	arguments := `{"action":"type_text","target":1,"text":"\u0066ixture-api-credential-must-stay-private"}`
-	body := modelCompletion(arguments)
-	if bytes.Contains(body, []byte(modelFixtureKey)) {
-		t.Fatal("fixture did not encode its credential echo")
-	}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) { _, _ = w.Write(body) }))
-	defer server.Close()
-	if _, err := newModelFixture(t, server.URL).Next(t.Context(), intelligence.Turn{}, 123); err == nil || strings.Contains(err.Error(), modelFixtureKey) || strings.Contains(err.Error(), server.URL) {
-		t.Fatal("model credential echo was accepted or exposed in an error")
+	for name, arguments := range map[string]string{
+		"typed text": `{"action":"type_text","target":1,"text":"\u0066ixture-api-credential-must-stay-private"}`,
+		"question":   `{"action":"ask","question":"Use \u0066ixture-api-credential-must-stay-private?"}`,
+		"option":     `{"action":"ask","question":"Which value?","options":["\u0066ixture-api-credential-must-stay-private"]}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			body := modelCompletion(arguments)
+			if bytes.Contains(body, []byte(modelFixtureKey)) {
+				t.Fatal("fixture did not encode its credential echo")
+			}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) { _, _ = w.Write(body) }))
+			defer server.Close()
+			if _, err := newModelFixture(t, server.URL).Next(t.Context(), intelligence.Turn{}, 123); err == nil || strings.Contains(err.Error(), modelFixtureKey) || strings.Contains(err.Error(), server.URL) {
+				t.Fatal("model credential echo was accepted or exposed in an error")
+			}
+		})
 	}
 }
 
@@ -222,6 +299,12 @@ func TestModelRejectsOversizedOrCanceledInputBeforeSending(t *testing.T) {
 	turn = intelligence.Turn{Objective: modelFixtureKey}
 	if _, err := model.Next(t.Context(), turn, 123); err == nil {
 		t.Fatal("sent a credential in model context")
+	}
+	for _, clarification := range []intelligence.Clarification{{Question: modelFixtureKey, Answer: "A preference"}, {Question: "Which preference?", Answer: modelFixtureKey}} {
+		turn = intelligence.Turn{Clarifications: []intelligence.Clarification{clarification}}
+		if _, err := model.Next(t.Context(), turn, 123); err == nil {
+			t.Fatal("sent a credential in clarification context")
+		}
 	}
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()

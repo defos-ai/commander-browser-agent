@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/defos-ai/commander-browser-agent/actions"
+	browserruntime "github.com/defos-ai/commander-browser-agent/browser"
 	"github.com/defos-ai/commander/framework/agent/action"
 	"github.com/defos-ai/commander/framework/domain/operations"
 	"github.com/defos-ai/commander/framework/domain/sessions"
@@ -189,17 +190,44 @@ func TestModelSetupCancellationAndBudgetsPrecedeBrowserExecution(t *testing.T) {
 	}
 	t.Run("browser budget starts after setup", func(t *testing.T) {
 		env := newModelSetupEnvironment(t)
-		runner := &browseUnusedRunner{}
+		runner := &modelSetupBudgetRunner{}
 		executor := actions.NewBrowse(runner)
 		discoverBrowse(t, executor, env)
 		questions := openAISetupQuestions()
 		ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 		defer cancel()
-		_, _ = executeModelSetup(t, executor, ctx, newModelSetupBinding(), questions, &browseSecretProbe{value: []byte("fixture-budget-managed-key-9b97771d")}, 5)
-		if len(questions.calls) != 2 || questions.calls[0].remaining < 20*time.Second || questions.calls[0].remaining > 30*time.Second || runner.deadline < 4*time.Second || runner.deadline > 5*time.Second {
+		_, err := executeModelSetup(t, executor, ctx, newModelSetupBinding(), questions, &browseSecretProbe{value: []byte("fixture-budget-managed-key-9b97771d")}, 5)
+		if !errors.Is(err, context.DeadlineExceeded) || ctx.Err() != nil || len(questions.calls) != 2 || questions.calls[0].remaining < 20*time.Second || questions.calls[0].remaining > 30*time.Second || runner.elapsed < 4*time.Second || runner.elapsed > 10*time.Second {
 			t.Fatal("operator setup consumed browser budget or escaped parent deadline")
 		}
 	})
+	t.Run("parent cancellation cause stays private", func(t *testing.T) {
+		const key = "fixture-cancel-cause-key-88dc74b3"
+		ctx, cancel := context.WithCancelCause(t.Context())
+		defer cancel(context.Canceled)
+		runner := &modelSetupBudgetRunner{onRun: func() { cancel(errors.New("private model credential: " + key)) }}
+		executor := actions.NewBrowse(runner)
+		discoverBrowse(t, executor, newModelSetupEnvironment(t))
+		result, err := executeModelSetup(t, executor, ctx, newModelSetupBinding(), openAISetupQuestions(), &browseSecretProbe{value: []byte(key)}, 5)
+		if !errors.Is(err, context.Canceled) || strings.Contains(err.Error(), key) || len(result.Output) != 0 || len(result.Artifacts) != 0 {
+			t.Fatal("parent cancellation leaked its private cause or lost cancellation classification")
+		}
+	})
+}
+
+type modelSetupBudgetRunner struct {
+	elapsed time.Duration
+	onRun   func()
+}
+
+func (runner *modelSetupBudgetRunner) Run(ctx context.Context, _ browserruntime.Options, _ func(context.Context) error) (sessions.Session, error) {
+	started := time.Now()
+	if runner.onRun != nil {
+		runner.onRun()
+	}
+	<-ctx.Done()
+	runner.elapsed = time.Since(started)
+	return sessions.Session{}, ctx.Err()
 }
 
 type modelSetupQuestionCall struct {

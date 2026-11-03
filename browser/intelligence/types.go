@@ -34,6 +34,8 @@ type Command struct {
 	Text     string    `json:"text,omitempty"`
 	Summary  string    `json:"summary,omitempty"`
 	Findings []Finding `json:"findings,omitempty"`
+	Question string    `json:"question,omitempty"`
+	Options  []string  `json:"options,omitempty"`
 }
 
 type Finding struct {
@@ -53,12 +55,21 @@ type Step struct {
 	Outcome string `json:"outcome"`
 }
 
+// Clarification is retained only for this browsing execution's model decisions.
+// It is not a browser result, an execution log or an evidence artifact.
+type Clarification struct {
+	Question string   `json:"question"`
+	Options  []string `json:"options,omitempty"`
+	Answer   string   `json:"answer"`
+}
+
 type Turn struct {
-	Objective    string      `json:"objective"`
-	AllowedHosts []string    `json:"allowed_hosts"`
-	Observation  Observation `json:"observation"`
-	Evidence     []Evidence  `json:"evidence"`
-	RecentSteps  []Step      `json:"recent_steps"`
+	Objective      string          `json:"objective"`
+	AllowedHosts   []string        `json:"allowed_hosts"`
+	Observation    Observation     `json:"observation"`
+	Evidence       []Evidence      `json:"evidence"`
+	RecentSteps    []Step          `json:"recent_steps"`
+	Clarifications []Clarification `json:"clarifications,omitempty"`
 }
 
 // Model implementations receive only safe observations. The token limit is a
@@ -68,8 +79,9 @@ type Model interface {
 }
 
 type Hooks struct {
-	Log    func(context.Context, string) error
-	Redact func(string) string
+	Log      func(context.Context, string) error
+	Redact   func(string) string
+	Question func(context.Context, string, string, []string) (string, error)
 }
 
 type Usage struct {

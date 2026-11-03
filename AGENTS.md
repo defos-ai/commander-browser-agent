@@ -18,9 +18,9 @@
   chooses agents and mission rules control transitions. Upload bytes through
   `ArtifactFileStore`; the controller accepts metadata. Do not claim exactly-once
   execution or confuse broker ACKs with result acceptance.
-- The default action catalog exposes `browse`, with model-setup questions.
-  Managed login, in-browser clarification,
-  checkpoints and text-only screenshots are subsequent steps. Do not restore
+- The default action catalog exposes `browse`, with model-setup and in-browser
+  non-secret clarification questions. Managed login, checkpoints and text-only
+  screenshots are subsequent steps. Do not restore
   legacy capture/accessibility actions or their review mission. Static HTTP
   checks/crawling remain in the separate
   web-agent repository. Creating an operation does not start tasks.
@@ -163,6 +163,18 @@
   Preserve explicitly empty catalogs; do not create a second manager inside an
   action. Return artifact bytes through action results for ArtifactFileStore
   upload; never write raw DOM, model transcripts or credentials to artifacts.
+- The typed `ask` command bridges to `action.Question` using execution-local keys
+  `browser_clarification_1` through `_4`. Commander owns operator waiting, fallback
+  eligibility and saved answers; do not ask the browser model to answer itself or
+  retry browser operations while a question is pending. Validate bounded nonblank
+  UTF-8 question/options before publication, retain at most four answers of at most
+  2,000 bytes with their question/options in memory for the current run, and keep
+  transcripts out of results, logs and artifacts. Answers cannot authorize scope,
+  tool or budget changes, secret entry or new external side effects.
+  Clarification waits pause the active browsing timer, are individually bounded to
+  three minutes, and never extend the task deadline. Preserve cancellation and
+  deadline causes. In Commander v0.3.0, canceling a waiter does not retract a saved
+  pending question; do not claim automatic question cleanup or action restoration.
 
 ## Demo and releases
 

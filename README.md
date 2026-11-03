@@ -8,8 +8,9 @@ agent's own model, and returns structured findings with extracted evidence.
 Findings and evidence are also uploaded as JSON artifacts. Browser state stays
 in an isolated Commander session for reuse and inspect/verify/close controls.
 Completion requires extracted evidence and findings that cite it.
-Model setup uses Commander's questions and managed secrets. Managed `login`,
-browsing clarification questions, checkpoints and `screenshot` are planned next.
+Model setup uses Commander's questions and managed secrets. During browsing, the
+agent can ask non-secret clarification questions and continue with the saved
+answers. Managed `login`, checkpoints and `screenshot` are planned next.
 Screenshots will use Lightpanda's text-only PNG renderer.
 
 Static HTML checks and crawling belong to the
@@ -124,6 +125,25 @@ reasoning/function-call tokens, so this allowance is neither a provider cost cap
 nor a total-generation/input-token quota. Step/token exhaustion returns a partial report; timeouts
 and cancellation fail the execution. An unconfirmed browser operation stops work
 and asks for session inspection before retrying.
+
+When the objective needs clarification, the model can ask up to four non-secret
+questions, each with up to four choices or a free-text answer. Commander gives
+the operator the waiting window first, then permits its eligible model to answer.
+The browser model waits for the saved answer; it does not answer its own question.
+Questions must never request passwords, credentials or authentication codes.
+Use Commander's managed-secret flow for sensitive values.
+
+Each clarification wait is bounded to three minutes and pauses the active browsing
+timer without extending the task deadline. Asking still consumes a browser step
+and model completion allowance. Answers are bounded to 2,000 UTF-8 bytes and stay
+in the current execution's model context with the question and its choices.
+Execution logs record static progress, and artifacts contain findings/evidence
+without a question-and-answer transcript.
+
+Cancellation stops the wait and further browser work; the browser remains reusable
+unless it was closed or lost. Commander v0.3.0 can retain an unanswered saved
+question after cancellation or timeout. Inspect or answer it through Commander;
+the agent does not retract, auto-answer or restart the interrupted browsing work.
 
 ## Connect to Commander
 

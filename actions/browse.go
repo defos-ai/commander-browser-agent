@@ -26,7 +26,7 @@ import (
 )
 
 const BrowseName = "browse"
-const BrowseDescription = "Navigate, interact with and extract structured findings from websites using the browser agent's own model and an isolated Lightpanda session"
+const BrowseDescription = "Navigate, interact with and extract structured findings from websites using the browser agent's own model, non-secret clarification questions and an isolated Lightpanda session"
 
 // BrowserRunner is the shared host-owned browser session runtime. Action
 // constructors accept the production dependency without creating another owner.
@@ -170,8 +170,8 @@ func (a *Browse) Run(ctx context.Context, raw json.RawMessage) (action.Result, e
 	if err != nil {
 		return action.Result{}, err
 	}
-	budget, cancel := context.WithTimeout(ctx, time.Duration(input.TimeoutSeconds)*time.Second)
-	defer cancel()
+	budget := newBrowseBudget(ctx, time.Duration(input.TimeoutSeconds)*time.Second)
+	defer budget.close()
 	if len(key) == 0 || len(key) > 4096 || strings.ContainsAny(string(key), "\r\n") {
 		return action.Result{}, errors.New("browser model credentials are invalid")
 	}
@@ -191,19 +191,38 @@ func (a *Browse) Run(ctx context.Context, raw json.RawMessage) (action.Result, e
 		Objective: redact(input.Objective), URL: input.URL, AllowedHosts: slices.Clone(input.AllowedHosts),
 		MaxSteps: input.MaxSteps, MaxCompletionTokens: input.MaxCompletionTokens,
 	}
-	hooks := intelligence.Hooks{Redact: redact, Log: func(ctx context.Context, message string) error {
-		return action.Log(ctx, redact(message))
-	}}
+	hooks := intelligence.Hooks{
+		Redact: redact,
+		Log:    func(ctx context.Context, message string) error { return action.Log(ctx, redact(message)) },
+		Question: func(ctx context.Context, key, text string, options []string) (string, error) {
+			budget.pause()
+			defer budget.resume()
+			waiting, stop := context.WithTimeout(ctx, 3*time.Minute)
+			defer stop()
+			const notice = "Browser clarification (non-secret). Do not enter passwords, credentials, authentication codes or API keys.\n\n"
+			question, err := action.Question(waiting, key, notice+redact(text), options...)
+			if err != nil {
+				return "", err
+			}
+			return question.Answer, nil
+		},
+	}
 	var findings intelligence.Result
-	snapshot, runErr := a.runner.Run(budget, browserruntime.Options{Engine: browserruntime.Lightpanda, Executable: configuration.runtime.Executable()}, func(ctx context.Context) error {
+	snapshot, runErr := a.runner.Run(budget.ctx, browserruntime.Options{Engine: browserruntime.Lightpanda, Executable: configuration.runtime.Executable()}, func(ctx context.Context) error {
 		var err error
 		findings, err = intelligence.Run(ctx, request, model, hooks)
 		return err
 	})
 	result := action.Result{Session: &snapshot}
 	if runErr != nil {
-		if budget.Err() != nil {
-			return result, budget.Err()
+		if err := budget.err(); err != nil {
+			return result, err
+		}
+		if errors.Is(runErr, context.DeadlineExceeded) {
+			return result, context.DeadlineExceeded
+		}
+		if errors.Is(runErr, context.Canceled) {
+			return result, context.Canceled
 		}
 		return result, errors.New(redact(runErr.Error()))
 	}
@@ -224,7 +243,7 @@ func (a *Browse) Run(ctx context.Context, raw json.RawMessage) (action.Result, e
 		{Name: "findings.json", MediaType: "application/json", Data: encoded},
 		{Name: "evidence.json", MediaType: "application/json", Data: evidence},
 	}}}
-	if err := budget.Err(); err != nil {
+	if err := budget.err(); err != nil {
 		return action.Result{Session: &snapshot}, err
 	}
 	return result, nil
