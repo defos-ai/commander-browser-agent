@@ -121,7 +121,7 @@ func (a *Browse) Discover(ctx context.Context, env environment.Environment, scop
 	return action.Ready, nil
 }
 
-func (a *Browse) Run(ctx context.Context, raw json.RawMessage) (action.Result, error) {
+func (a *Browse) Run(ctx context.Context, raw json.RawMessage) (result action.Result, runErr error) {
 	if err := ctx.Err(); err != nil {
 		return action.Result{}, err
 	}
@@ -150,8 +150,13 @@ func (a *Browse) Run(ctx context.Context, raw json.RawMessage) (action.Result, e
 	setupCtx, stopSetup := context.WithTimeout(ctx, 10*time.Minute)
 	var modelConfiguration intelligence.ModelConfig
 	var key []byte
+	var checkpoints *browsing.Checkpoints
 	prepare := func(ctx context.Context) error {
 		var err error
+		checkpoints, err = browsing.NewCheckpoints(ctx, BrowseName)
+		if err != nil {
+			return err
+		}
 		modelConfiguration, key, err = a.setup.Prepare(ctx, input.SessionScope, input.SessionID)
 		return err
 	}
@@ -171,6 +176,33 @@ func (a *Browse) Run(ctx context.Context, raw json.RawMessage) (action.Result, e
 	}
 	budget := browsing.NewBudget(ctx, time.Duration(input.TimeoutSeconds)*time.Second)
 	defer budget.Close()
+	var findings intelligence.Result
+	defer func() {
+		status := "failed"
+		if runErr == nil && len(result.Output) != 0 {
+			status = findings.Status
+		}
+		progress := intelligence.ProgressSnapshot(findings)
+		finish := func(ctx context.Context) error {
+			return checkpoints.Finish(ctx, status, &progress, false)
+		}
+		var err error
+		if runner, ok := a.runner.(browserSetupRunner); ok {
+			err = runner.WithSession(budget.Context(), finish)
+		} else {
+			err = finish(budget.Context())
+		}
+		if budgetErr := budget.Err(); budgetErr != nil {
+			err = budgetErr
+		}
+		if err != nil {
+			result = action.Result{Session: result.Session}
+			if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+				err = errors.New("cannot finalize browser progress; inspect the session before retrying")
+			}
+			runErr = errors.Join(runErr, err)
+		}
+	}()
 	if len(key) == 0 || len(key) > 4096 || strings.ContainsAny(string(key), "\r\n") {
 		return action.Result{}, errors.New("browser model credentials are invalid")
 	}
@@ -191,8 +223,9 @@ func (a *Browse) Run(ctx context.Context, raw json.RawMessage) (action.Result, e
 		MaxSteps: input.MaxSteps, MaxCompletionTokens: input.MaxCompletionTokens,
 	}
 	hooks := intelligence.Hooks{
-		Redact: redact,
-		Log:    func(ctx context.Context, message string) error { return action.Log(ctx, redact(message)) },
+		Redact:     redact,
+		Log:        func(ctx context.Context, message string) error { return action.Log(ctx, redact(message)) },
+		Checkpoint: checkpoints.Progress,
 		Question: func(ctx context.Context, key, text string, options []string) (string, error) {
 			budget.Pause()
 			defer budget.Resume()
@@ -206,18 +239,20 @@ func (a *Browse) Run(ctx context.Context, raw json.RawMessage) (action.Result, e
 			return question.Answer, nil
 		},
 	}
-	var findings intelligence.Result
 	snapshot, runErr := a.runner.Run(budget.Context(), browserruntime.Options{Engine: browserruntime.Lightpanda, Executable: configuration.runtime.Executable()}, func(ctx context.Context) error {
 		if sensitive.HasValues(ctx) {
 			if err := sensitive.Remember(ctx, key); err != nil {
 				return errors.New("cannot protect model credentials in this browser session; use a new session")
 			}
 		}
+		if err := checkpoints.Start(ctx, browsing.CheckpointLimits{MaxSteps: input.MaxSteps, TimeoutSeconds: input.TimeoutSeconds, MaxCompletionTokens: input.MaxCompletionTokens}, "navigate"); err != nil {
+			return err
+		}
 		var err error
 		findings, err = intelligence.Run(ctx, request, model, hooks)
 		return err
 	})
-	result := action.Result{Session: &snapshot}
+	result = action.Result{Session: &snapshot}
 	if runErr != nil {
 		if err := budget.Err(); err != nil {
 			return result, err

@@ -96,7 +96,7 @@ func (a *Login) Discover(ctx context.Context, env environment.Environment, scope
 	return action.Ready, nil
 }
 
-func (a *Login) Run(ctx context.Context, raw json.RawMessage) (action.Result, error) {
+func (a *Login) Run(ctx context.Context, raw json.RawMessage) (result action.Result, runErr error) {
 	if err := ctx.Err(); err != nil {
 		return action.Result{}, err
 	}
@@ -123,7 +123,13 @@ func (a *Login) Run(ctx context.Context, raw json.RawMessage) (action.Result, er
 		return action.Result{}, errors.New("login requires the matching framework browser session binding")
 	}
 	setup, stopSetup := context.WithTimeout(ctx, 10*time.Minute)
+	var checkpoints *browsing.Checkpoints
+	var err error
 	prepare := func(ctx context.Context) error {
+		checkpoints, err = browsing.NewCheckpoints(ctx, LoginName)
+		if err != nil {
+			return err
+		}
 		if input.CredentialProfile == "" {
 			question, err := action.Question(ctx, "browser_login_profile", "Which non-secret credential profile should this login use? Enter a lowercase alias such as work or personal, not a username, password or verification code.")
 			if err != nil {
@@ -136,7 +142,6 @@ func (a *Login) Run(ctx context.Context, raw json.RawMessage) (action.Result, er
 		}
 		return nil
 	}
-	var err error
 	if runner, ok := a.runner.(browserSetupRunner); ok {
 		err = runner.WithSession(setup, prepare)
 	} else {
@@ -155,11 +160,40 @@ func (a *Login) Run(ctx context.Context, raw json.RawMessage) (action.Result, er
 	}
 	budget := browsing.NewBudget(ctx, time.Duration(input.TimeoutSeconds)*time.Second)
 	defer budget.Close()
+	var outcome browserlogin.Result
+	defer func() {
+		status := "failed"
+		if runErr == nil && len(result.Output) != 0 {
+			status = outcome.Status
+		}
+		finish := func(ctx context.Context) error {
+			return checkpoints.Finish(ctx, status, nil, outcome.Submitted)
+		}
+		var finishErr error
+		if runner, ok := a.runner.(browserSetupRunner); ok {
+			finishErr = runner.WithSession(budget.Context(), finish)
+		} else {
+			finishErr = finish(budget.Context())
+		}
+		if err := budget.Err(); err != nil {
+			finishErr = err
+		}
+		if finishErr != nil {
+			result = action.Result{Session: result.Session}
+			if !errors.Is(finishErr, context.Canceled) && !errors.Is(finishErr, context.DeadlineExceeded) {
+				finishErr = errors.New("cannot finalize browser progress; inspect the session before retrying")
+			}
+			runErr = errors.Join(runErr, finishErr)
+		}
+	}()
 	if err := action.Log(budget.Context(), "Starting managed password login"); err != nil {
 		return action.Result{}, err
 	}
-	var outcome browserlogin.Result
-	snapshot, runErr := a.runner.Run(budget.Context(), browserruntime.Options{Engine: browserruntime.Lightpanda, Executable: configuration.Executable()}, func(ctx context.Context) error {
+	var snapshot sessions.Session
+	snapshot, runErr = a.runner.Run(budget.Context(), browserruntime.Options{Engine: browserruntime.Lightpanda, Executable: configuration.Executable()}, func(ctx context.Context) error {
+		if err := checkpoints.Start(ctx, browsing.CheckpointLimits{TimeoutSeconds: input.TimeoutSeconds}, "login"); err != nil {
+			return err
+		}
 		request := func(ctx context.Context, name string) ([]byte, error) {
 			budget.Pause()
 			defer budget.Resume()
@@ -182,7 +216,7 @@ func (a *Login) Run(ctx context.Context, raw json.RawMessage) (action.Result, er
 		})
 		return err
 	})
-	result := action.Result{Session: &snapshot}
+	result = action.Result{Session: &snapshot}
 	if err := budget.Err(); err != nil {
 		return result, err
 	}

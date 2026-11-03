@@ -79,15 +79,34 @@ type Model interface {
 }
 
 type Hooks struct {
-	Log      func(context.Context, string) error
-	Redact   func(string) string
-	Question func(context.Context, string, string, []string) (string, error)
+	Log        func(context.Context, string) error
+	Redact     func(string) string
+	Question   func(context.Context, string, string, []string) (string, error)
+	Checkpoint func(context.Context, Progress) error
 }
 
 type Usage struct {
 	Steps                    int `json:"steps"`
 	ModelCalls               int `json:"model_calls"`
 	CompletionTokensReserved int `json:"completion_tokens_reserved"`
+}
+
+// EvidenceReference identifies already-redacted evidence without retaining its
+// URL, title or text. SHA256 covers the canonical JSON encoding of Evidence.
+type EvidenceReference struct {
+	ID     string `json:"id"`
+	SHA256 string `json:"sha256"`
+}
+
+// Progress records a pending command and metadata for preceding operations.
+// The runtime bounds these fields to thirty steps, eight evidence references
+// and four clarifications. It contains no browser or model content.
+type Progress struct {
+	Command        string              `json:"command,omitempty"`
+	Usage          Usage               `json:"usage"`
+	Steps          []Step              `json:"steps"`
+	Evidence       []EvidenceReference `json:"evidence"`
+	Clarifications int                 `json:"clarifications"`
 }
 
 type Result struct {

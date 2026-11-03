@@ -23,8 +23,8 @@
   `ArtifactFileStore`; the controller accepts metadata. Do not claim exactly-once
   execution or confuse broker ACKs with result acceptance.
 - The default action catalog exposes `browse`, `login` and `screenshot`, with
-  model-setup and in-browser non-secret clarification questions. Checkpoints are
-  a subsequent step. Do not restore
+  model-setup and in-browser non-secret clarification questions, and execution
+  checkpoints for browsing and login. Do not restore
   legacy capture/accessibility actions or their review mission. Static HTTP
   checks/crawling remain in the separate
   web-agent repository. Creating an operation does not start tasks.
@@ -230,6 +230,12 @@
   trusted website's later scripts. Never transfer authenticated state to another
   browser session. Unsupported forms/challenges and uncertain verification retain
   a session reference with an honest status, not a success claim.
+- One agent can retain several authenticated sessions. Use distinct session
+  scopes/IDs and credential profiles for different accounts on the same origin;
+  each session keeps its own cookies. A profile selects managed credential names,
+  not an authenticated account or a different cookie jar. An already matching
+  verification check can skip credential submission, so changing the profile
+  alone does not switch the account in an existing session.
 - Register submitted values with session-owned private keyed fingerprints before
   any DOM entry. Clear owned plaintext buffers on every path. Retain old
   fingerprints across rotation/failed login/action cancellation, clone/isolate
@@ -270,6 +276,50 @@
   source text, URLs, DOM or secrets in the sidecar. `desktop`/`mobile` are text
   viewports (1280x720/390x844), not responsive-design/device emulation. The source
   excerpt truncation flag does not promise that all text fits in the image.
+
+## Browsing checkpoints
+
+- [internal/browsing/checkpoint.go](internal/browsing/checkpoint.go) uses the
+  execution-scoped v0.3.0 `action.LoadCheckpoint`/`SaveCheckpoint` exchange.
+  The production host supplies it. Direct public-action calls without that
+  provider remain usable but offer no durable checkpoints; actual provider
+  failures must stop work rather than silently disabling persistence.
+- Load the action's `browse_started` or `login_started` fence before setup
+  questions inside the session lifetime. An existing fence refuses automatic
+  replay before questions, secrets or browser work. Checkpoints belong to one
+  execution, not to a transferable browser snapshot or a session-global history.
+- Persist `browse_started` before initial page navigation and `login_started`
+  before deterministic login. Each `browse_step_01` through `_30` is saved after
+  model command validation and before executing that command, including question
+  publication. The fact records the pending command type, current reserved usage
+  and preceding completed steps; it does not prove whether the pending effect ran.
+  One start, thirty command fences and one final fact fit the framework's limit
+  of thirty-two immutable names. Never overwrite a named fact with new content.
+- Persist only version/action/engine, exact session reference and original
+  creation claim, configured limits, progress counters, fixed step outcomes and
+  evidence IDs with SHA256 of already-redacted canonical evidence JSON. Do not
+  persist objective text, URLs, DOM, full model commands/transcripts, question text or
+  answers, provider settings, cookies, credential names/values or artifact bytes.
+  Findings and evidence content remain in the final results and artifacts.
+- Every checkpoint wait is bounded to five seconds and preserves the execution
+  and session lifetime. The initial load belongs to setup; writes count against
+  active work time. A save error or cancellation may follow a committed write;
+  stop before further browser
+  commands and never treat a missing receipt as permission to repeat an effect.
+  Pending/failed facts require session inspection before explicit continuation.
+- Save `browse_finished` or `login_finished` only after browser work/cleanup and
+  output validation, while the execution and session remain active. Phase
+  `work_prepared` describes prepared work, while `work_unconfirmed` records a
+  failed or uncertain operation. Neither confirms artifact upload or controller
+  result acceptance: `result_delivery` remains `unconfirmed` at that point.
+  Failure to confirm final persistence suppresses output/artifacts and retains
+  the session reference. Cancellation can leave only the last pending fence.
+- Recovery is explicit: inspect the recorded session, then create a new execution
+  using its exact live binding and fresh observations. Do not restore old model
+  turns, questions, targets or execution allowances from checkpoints. Lost owner
+  or browser state requires a new session and, when needed, a fresh login. The
+  framework already prevents automatic reruns of uncertain command deliveries;
+  checkpoints do not add an exactly-once guarantee.
 
 ## Demo and releases
 
@@ -347,6 +397,10 @@ HTTP protocol, answer framework setup questions and deliver synthetic keys throu
 the framework secret exchange. Cover pending-question retries, saved answers,
 ignored model environment variables, managed credentials, cancellation and reuse
 without new questions.
+Checkpoint cases cover immutable persistence/retries, fences before browser
+effects, privacy, cancellation/close during waits and the thirty-step limit.
+Two-account cases verify independent same-origin logins under one agent and
+continued use of one session after closing the other.
 The production manager owns browser lifecycle; fixtures own HTTP pages only.
 CI compiles the race-enabled test binary in the Go bookworm image to match the
 runtime's glibc, then executes it as the runtime image's UID1000 with no external

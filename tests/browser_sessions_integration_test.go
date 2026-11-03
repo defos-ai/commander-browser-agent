@@ -27,6 +27,7 @@ import (
 	controllerevents "github.com/defos-ai/commander/framework/comms/clients/controller/events"
 	"github.com/defos-ai/commander/framework/comms/messages"
 	actionmodel "github.com/defos-ai/commander/framework/domain/actions"
+	"github.com/defos-ai/commander/framework/domain/executions"
 	"github.com/defos-ai/commander/framework/domain/sessions"
 	"github.com/defos-ai/commander/framework/id"
 	fsartifacts "github.com/defos-ai/commander/providers/fs/artifacts"
@@ -521,10 +522,13 @@ func (a *browserSessionTestAction) Run(ctx context.Context, raw json.RawMessage)
 }
 
 type browserSessionPeer struct {
-	t        *testing.T
-	bus      comms.Bus
-	observer comms.Subscription
-	pending  []messages.Message
+	t                 *testing.T
+	bus               comms.Bus
+	observer          comms.Subscription
+	pending           []messages.Message
+	checkpoints       map[checkpointPeerKey]executions.Execution
+	checkpointHistory []messages.Message
+	checkpointHook    func(messages.Message, controllerevents.CheckpointRequest) bool
 }
 
 func (p *browserSessionPeer) publishAction(binding sessions.Binding, authenticate, wait bool) messages.Message {
@@ -593,6 +597,7 @@ func (p *browserSessionPeer) control(binding sessions.Binding, method string) ag
 
 func (p *browserSessionPeer) accept(result messages.Message) {
 	p.t.Helper()
+	p.completeCheckpoints(result)
 	// The harness has validated the outcome above. Send explicit acceptance;
 	// acknowledging transport delivery alone does not settle framework results.
 	receipt, err := agentevents.NewResultAccepted(result)
@@ -606,11 +611,17 @@ func (p *browserSessionPeer) accept(result messages.Message) {
 
 func (p *browserSessionPeer) wait(match func(messages.Message) bool) messages.Message {
 	p.t.Helper()
-	for i, message := range p.pending {
+	for i := 0; i < len(p.pending); {
+		message := p.pending[i]
 		if match(message) {
 			p.pending = append(p.pending[:i], p.pending[i+1:]...)
 			return message
 		}
+		if p.handleCheckpoint(message) {
+			p.pending = append(p.pending[:i], p.pending[i+1:]...)
+			continue
+		}
+		i++
 	}
 	ctx, cancel := context.WithTimeout(p.t.Context(), 30*time.Second)
 	defer cancel()
@@ -623,8 +634,14 @@ func (p *browserSessionPeer) wait(match func(messages.Message) bool) messages.Me
 		if err := delivery.Ack(ctx); err != nil {
 			p.t.Fatal(err)
 		}
+		if message.Type == controllerevents.CheckpointRequested {
+			p.checkpointHistory = append(p.checkpointHistory, cloneCheckpointMessage(message))
+		}
 		if match(message) {
 			return message
+		}
+		if p.handleCheckpoint(message) {
+			continue
 		}
 		p.pending = append(p.pending, message)
 	}

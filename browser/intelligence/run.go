@@ -2,6 +2,8 @@ package intelligence
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -124,6 +126,23 @@ func Run(ctx context.Context, request Request, model Model, hooks Hooks) (result
 		if err := log("Running browser command: " + command.Action); err != nil {
 			return result, err
 		}
+		if hooks.Checkpoint != nil {
+			progress := ProgressSnapshot(result)
+			progress.Command, progress.Clarifications = command.Action, len(clarifications)
+			err := hooks.Checkpoint(ctx, progress)
+			if ctx.Err() != nil {
+				return result, ctx.Err()
+			}
+			if err != nil {
+				if errors.Is(err, context.DeadlineExceeded) {
+					return result, context.DeadlineExceeded
+				}
+				if errors.Is(err, context.Canceled) {
+					return result, context.Canceled
+				}
+				return result, errors.New("cannot persist browser progress; inspect session before retrying")
+			}
+		}
 		var operationErr error
 		switch command.Action {
 		case "navigate":
@@ -217,6 +236,27 @@ func Run(ctx context.Context, request Request, model Model, hooks Hooks) (result
 		return result, err
 	}
 	return result, nil
+}
+
+// ProgressSnapshot derives content-free metadata from a bounded, already-redacted
+// runtime result. It returns independently owned slices with no pending command.
+// Completed ask steps supply the final clarification count; the active loop
+// supplies its current count before each pending command separately.
+func ProgressSnapshot(result Result) Progress {
+	progress := Progress{Usage: result.Usage, Steps: slices.Clone(result.Steps), Evidence: make([]EvidenceReference, len(result.Evidence))}
+	for _, step := range result.Steps {
+		if step.Action == "ask" && step.Outcome == "completed" {
+			progress.Clarifications++
+		}
+	}
+	for i, evidence := range result.Evidence {
+		// Evidence contains strings only, so JSON encoding cannot fail.
+		encoded, _ := json.Marshal(evidence)
+		digest := sha256.Sum256(encoded)
+		clear(encoded)
+		progress.Evidence[i] = EvidenceReference{ID: evidence.ID, SHA256: fmt.Sprintf("%x", digest)}
+	}
+	return progress
 }
 
 func validCommand(command Command, evidence []Evidence) error {
