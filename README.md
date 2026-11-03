@@ -10,7 +10,8 @@ in an isolated Commander session for reuse and inspect/verify/close controls.
 Completion requires extracted evidence and findings that cite it.
 Model setup uses Commander's questions and managed secrets. During browsing, the
 agent can ask non-secret clarification questions and continue with the saved
-answers. Managed `login`, checkpoints and `screenshot` are planned next.
+answers. `login` uses managed username/password credentials and retains the same
+browser for later work. Checkpoints and `screenshot` are planned next.
 Screenshots will use Lightpanda's text-only PNG renderer.
 
 Static HTML checks and crawling belong to the
@@ -144,6 +145,65 @@ Cancellation stops the wait and further browser work; the browser remains reusab
 unless it was closed or lost. Commander v0.3.0 can retain an unanswered saved
 question after cancellation or timeout. Inspect or answer it through Commander;
 the agent does not retract, auto-answer or restart the interrupted browsing work.
+
+## Sign in
+
+`login` supports a standard visible username/password POST form in the main page.
+It uses trusted browser code rather than the browsing model, so model setup is not
+needed to sign in. For example:
+
+```json
+{
+  "url": "https://example.com/login",
+  "credential_profile": "work",
+  "verification_url": "https://example.com/account",
+  "expected_text": "Sign out",
+  "session_scope": "2e2ca5a5-c552-4ab4-90a7-62807dcb3f50"
+}
+```
+
+The non-secret profile is an account alias. Omitting it asks a Commander question;
+never enter a username, password or verification code as its answer. Credentials
+are always requested through `action.RequestSecret`. Their managed names are
+`browser-login-<profile>-<digest>-username` and the matching `-password` name, where
+`digest` is the full hexadecimal SHA256 of the canonical origin, a NUL separator,
+and the profile. Default ports are normalized. Names remain stable across browser
+replicas but are different for other origins or account profiles. Commander v0.3.0
+shares secrets by name; this convention is not an access-control policy.
+
+Both URLs must use the same exact origin (scheme, hostname and effective port),
+with HTTPS required except loopback HTTP. Credential handling blocks cross-origin
+requests and rechecks the selected form before filling and issuing one browser
+submission command.
+After login, normal cross-site browsing remains available. The website's own
+scripts can access submitted form values; use the intended, trusted login site.
+
+`verified` means the configured visible text was found at the verification URL.
+It is a site-specific check, not universal proof of an account's identity. If the
+check already matches, no credentials are requested or submitted. Other outcomes
+include `unverified`, `unsupported_form`, `requires_challenge` and
+`submission_uncertain`; inspect the retained session before retrying uncertain
+work. Login produces status metadata without page-text or credential artifacts.
+One command is not an exactly-once website guarantee: the pinned Lightpanda can
+internally repeat an HTTP POST after a dropped connection, below CDP interception.
+The agent stops on the uncertain outcome and does not issue another submission.
+
+Multi-step forms, verification codes, CAPTCHA and passkey flows need further
+support. In particular, code challenges do not request a reusable secret on
+Commander v0.3.0; transient secret requests are planned for Commander v0.4.0.
+
+Reuse the returned `session.id` and the same scope in `browse` to keep cookies and
+the retained page. Its first model-driven execution performs model setup as usual.
+Owned credential buffers are cleared after use. Session protection keeps private
+keyed fingerprints for redacting exact matches from subsequent browsing
+observations, questions and findings; Commander manages its own secret leases.
+These fingerprints remain with that session, including
+after a failed login, and are cleared on confirmed close. This is bounded value
+redaction, not a guarantee against arbitrary transformations by a website.
+
+Login defaults to a 120-second active allowance, configurable with
+`timeout_seconds` (5–180). Missing credential waits pause that allowance and are
+individually bounded to three minutes; the outer task deadline still applies.
 
 ## Connect to Commander
 

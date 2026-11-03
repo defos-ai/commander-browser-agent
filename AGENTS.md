@@ -18,8 +18,8 @@
   chooses agents and mission rules control transitions. Upload bytes through
   `ArtifactFileStore`; the controller accepts metadata. Do not claim exactly-once
   execution or confuse broker ACKs with result acceptance.
-- The default action catalog exposes `browse`, with model-setup and in-browser
-  non-secret clarification questions. Managed login, checkpoints and text-only
+- The default action catalog exposes `browse` and `login`, with model-setup and
+  in-browser non-secret clarification questions. Checkpoints and text-only
   screenshots are subsequent steps. Do not restore
   legacy capture/accessibility actions or their review mission. Static HTTP
   checks/crawling remain in the separate
@@ -179,6 +179,44 @@
   [internal/browsing/](internal/browsing/). The action owns one setup instance and
   delegates model/session selection to it; do not expose these helpers as actions
   or public package APIs. Preserve setup serialization and exact creation claims.
+
+## Managed password login
+
+- [actions/login.go](actions/login.go) uses the host's session runner and the
+  deterministic [browser/login/](browser/login/) executor; login never needs model
+  setup or gives credential values to a model. Require an exact-origin
+  `verification_url` and bounded non-secret `expected_text`. `verified` means that
+  configured check matched, including existing state without new submission; do
+  not infer universal authentication/account identity from HTTP 200 or a cookie.
+- Bind a lowercase non-secret credential profile to the canonical login origin
+  (scheme/hostname/effective port). HTTPS is required except loopback HTTP.
+  Derive stable, purpose-specific username/password names from origin and profile;
+  never accept arbitrary secret names from the model or action input. These names
+  are a convention in Commander's shared namespace, not an access-control policy.
+  Use only v0.3.0 `action.RequestSecret`, with empty RequiredSecrets, bounded waits
+  and cancellation. Code challenges return `requires_challenge`; do not emulate
+  v0.4.0 transient semantics with a reusable code secret.
+- Support only unambiguous visible main-frame username/password POST forms with
+  native submit controls. Validate form/action/method/target overrides before
+  requesting values and again before filling. Guard all requests to the exact
+  origin while handling credentials, issue one browser submission command, and
+  never automatically retry uncertain effects. Lightpanda 1.0.2 can internally
+  repeat a lost-response POST below CDP interception; test one owned CDP request
+  and an uncertain outcome, not exactly-once website delivery. Stop loading before
+  removing interception. Preserve the retained connection and independent session
+  controls.
+- The operator chose normal cross-site browsing after login. Do not add a
+  persistent origin lock or imply that initial request interception constrains a
+  trusted website's later scripts. Never transfer authenticated state to another
+  browser session. Unsupported forms/challenges and uncertain verification retain
+  a session reference with an honest status, not a success claim.
+- Register submitted values with session-owned private keyed fingerprints before
+  any DOM entry. Clear owned plaintext buffers on every path. Retain old
+  fingerprints across rotation/failed login/action cancellation, clone/isolate
+  state by session, redact before truncating observations, and clear only after
+  confirmed close. Never expose fingerprints in snapshots or store raw credential
+  text for future browsing. Exact/common value redaction is bounded; do not claim
+  universal protection against arbitrary website transformations.
 
 ## Demo and releases
 

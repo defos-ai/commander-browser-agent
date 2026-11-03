@@ -89,8 +89,15 @@ func startBrowseFramework(t *testing.T, key string) *browseFramework {
 	if err := json.Unmarshal(started.Payload, &snapshot); err != nil {
 		t.Fatal(err)
 	}
-	if len(snapshot.Actions) != 1 || snapshot.Actions[0].Name != "browse" || snapshot.Actions[0].Status != "ready" {
-		t.Fatal("browse was not ready before model setup")
+	names := map[string]bool{}
+	for _, registered := range snapshot.Actions {
+		if registered.Status != "ready" {
+			t.Fatalf("action %q was not ready before setup", registered.Name)
+		}
+		names[registered.Name] = true
+	}
+	if len(snapshot.Actions) != 2 || !names["browse"] || !names["login"] {
+		t.Fatal("browse and login were not registered before model setup")
 	}
 	for _, message := range peer.pending {
 		if message.Type == controllerevents.SecretSyncRequested || message.Type == controllerevents.QuestionRequested {

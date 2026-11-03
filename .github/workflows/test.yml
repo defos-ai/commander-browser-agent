@@ -77,12 +77,12 @@ jobs:
               go mod download
               CGO_ENABLED=1 go test -c -race -tags=browserintegration -o /out/browser-session-tests ./tests
             '
-      - name: Test reusable browser sessions
+      - name: Test browser workflows and sessions
         run: |
           docker run --rm --init --network none \
             --mount "type=bind,source=$RUNNER_TEMP/browser-session-tests,target=/browser-session-tests,readonly" \
             --entrypoint /bin/sh commander-browser-agent:local -ec '
-              /browser-session-tests -test.run "^Test(BrowserSessions|Browse)" -test.v -test.count=1 -test.timeout=3m
+              /browser-session-tests -test.run "^Test(BrowserSessions|Browse|Login)" -test.v -test.count=1 -test.timeout=3m
               browsers_running() {
                 for process_comm in /proc/[0-9]*/comm; do
                   if IFS= read -r process_name 2>/dev/null < "$process_comm"; then

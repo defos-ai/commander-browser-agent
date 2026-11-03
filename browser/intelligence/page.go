@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -19,6 +20,7 @@ import (
 	cdpruntime "github.com/chromedp/cdproto/runtime"
 	"github.com/chromedp/cdproto/target"
 	"github.com/chromedp/chromedp"
+	"github.com/defos-ai/commander-browser-agent/internal/sensitive"
 )
 
 var errPage = errors.New("browser operation could not be completed safely")
@@ -231,7 +233,7 @@ func (p *pageDriver) evaluate(ctx context.Context, body string, arguments any, r
 	if err != nil {
 		return errPage
 	}
-	script := "(function(args){" + safeDOM + body + "})(" + string(encoded) + ")"
+	script := "(function(args){const protectedLookahead=" + strconv.Itoa(sensitive.MaxValueBytes-1) + ";" + safeDOM + body + "})(" + string(encoded) + ")"
 	err = chromedp.Run(ctx, chromedp.ActionFunc(func(ctx context.Context) error {
 		value, exception, err := cdpruntime.Evaluate(script).WithContextID(p.world).WithReturnByValue(true).WithAwaitPromise(true).Do(ctx)
 		if err != nil || exception != nil || value == nil {
@@ -269,13 +271,13 @@ func (p *pageDriver) Observe(ctx context.Context) (Observation, error) {
 	}
 	p.nextID += 60
 	p.targets = make(map[int]string, len(observation.Targets))
-	observation.URL, observation.Title, observation.Text = address, boundedPageText(observation.Title, 256), boundedPageText(observation.Text, 10000)
+	observation.URL, observation.Title, observation.Text = address, protectedPageText(ctx, observation.Title, 256), protectedPageText(ctx, observation.Text, 10000)
 	if len(observation.Targets) > 60 {
 		observation.Targets = observation.Targets[:60]
 	}
 	for i := range observation.Targets {
 		item := &observation.Targets[i]
-		item.Label, item.URL = boundedPageText(item.Label, 160), safePageURL(item.URL)
+		item.Label, item.URL = protectedPageText(ctx, item.Label, 160), safePageURL(item.URL)
 		p.targets[item.ID] = item.Kind
 	}
 	return observation, nil
@@ -343,8 +345,28 @@ func (p *pageDriver) Extract(ctx context.Context, targetID int) (Evidence, error
 	if err := p.evaluate(bounded, extractDOM, targetID, &evidence); err != nil {
 		return Evidence{}, err
 	}
-	evidence.URL, evidence.Title, evidence.Text = address, boundedPageText(evidence.Title, 256), boundedPageText(evidence.Text, 4000)
+	evidence.URL, evidence.Title, evidence.Text = address, protectedPageText(ctx, evidence.Title, 256), protectedPageText(ctx, evidence.Text, 4000)
 	return evidence, nil
+}
+
+func protectedPageText(ctx context.Context, value string, limit int) string {
+	end := min(len(value), limit)
+	for end > 0 && !utf8.ValidString(value[:end]) {
+		end--
+	}
+	// The source contains lookahead beyond the excerpt. Redact before cutting,
+	// then retain only the common protected prefix: shrinking earlier matches
+	// must not expose an unprotected tail from the extra source window.
+	full := sensitive.Redact(ctx, value)
+	prefix := sensitive.Redact(ctx, value[:end])
+	common := 0
+	for common < len(full) && common < len(prefix) && full[common] == prefix[common] {
+		common++
+	}
+	for common > 0 && !utf8.ValidString(full[:common]) {
+		common--
+	}
+	return boundedPageText(strings.Join(strings.Fields(full[:common]), " "), limit)
 }
 
 func boundedPageText(value string, limit int) string {
@@ -386,12 +408,13 @@ function kind(el) {
   return '';
 }
 function textOf(root, limit) {
+	limit+=protectedLookahead;
   const parts=[], stack=[root]; let used=0, visited=0;
   while (stack.length && visited++<5000 && used<limit) {
     const node=stack.pop();
     if (node.nodeType===3) {
-      const text=(node.nodeValue||'').slice(0,limit-used).replace(/\s+/g,' ').trim();
-      if (text) { parts.push(text); used+=text.length+1; }
+      const text=(node.nodeValue||'').slice(0,limit-used);
+      if (text.trim()) { parts.push(text); used+=text.length+1; }
     } else if (node.nodeType===1 && visible(node) && !/^(SCRIPT|STYLE|NOSCRIPT|TEMPLATE|INPUT|TEXTAREA|SELECT|OPTION)$/.test(node.tagName) && !node.isContentEditable) {
       const children=node.childNodes;
       for (let i=Math.min(children.length,200)-1;i>=0 && stack.length<6000;i--) stack.push(children[i]);
@@ -414,7 +437,7 @@ while (stack.length && visited++<5000 && targets.length<60) {
   const type=kind(el);
   if (type) {
     const id=args+targets.length;
-    let label=(el.getAttribute('aria-label')||el.getAttribute('title')||el.getAttribute('placeholder')||'').slice(0,160);
+    let label=(el.getAttribute('aria-label')||el.getAttribute('title')||el.getAttribute('placeholder')||'').slice(0,160+protectedLookahead);
     if (!label && el.labels) for (const item of el.labels) { label=textOf(item,160); if (label) break; }
     if (!label) label=textOf(el,160);
     let url='';
@@ -425,7 +448,7 @@ while (stack.length && visited++<5000 && targets.length<60) {
   for (let i=Math.min(children.length,200)-1;i>=0 && stack.length<6000;i--) stack.push(children[i]);
 }
 globalThis.__commanderObserved=nodes;
-return {title:document.title.slice(0,256),text:textOf(document.body||document.documentElement,10000),targets};
+return {title:document.title.slice(0,256+protectedLookahead),text:textOf(document.body||document.documentElement,10000),targets};
 `
 
 const clickDOM = `
@@ -457,5 +480,5 @@ return true;
 
 const extractDOM = `
 const el=args===0 ? document.body||document.documentElement : selected(args);
-return {title:document.title.slice(0,256),text:textOf(el,4000)};
+return {title:document.title.slice(0,256+protectedLookahead),text:textOf(el,4000)};
 `

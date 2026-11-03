@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/defos-ai/commander-browser-agent/internal/sensitive"
 	"github.com/defos-ai/commander/framework/agent/action"
 	"github.com/defos-ai/commander/framework/domain/sessions"
 	"github.com/defos-ai/commander/framework/id"
@@ -40,6 +41,7 @@ type entry struct {
 	cleanupDone chan struct{}
 	cleaned     bool
 	cleanupErr  error
+	values      *sensitive.Values
 }
 
 var _ sessions.Provider = (*Manager)(nil)
@@ -82,7 +84,8 @@ func (m *Manager) prepareLocked(claim sessions.CreationClaim) (*entry, error) {
 	}
 	now := time.Now().UTC()
 	item := &entry{claim: claim, gate: make(chan struct{}, 1), stopping: make(chan struct{}),
-		view: sessions.Session{Reference: claim.Reference, Kind: "browser", Label: "Browser session", State: "starting", Revision: 1, CreatedAt: now, UpdatedAt: now}}
+		values: sensitive.New(),
+		view:   sessions.Session{Reference: claim.Reference, Kind: "browser", Label: "Browser session", State: "starting", Revision: 1, CreatedAt: now, UpdatedAt: now}}
 	m.items[claim.ID] = item
 	m.notifyLocked()
 	return item, nil
@@ -136,6 +139,7 @@ func (m *Manager) WithSession(ctx context.Context, work func(context.Context) er
 	m.mu.Unlock()
 
 	workCtx, cancel := context.WithCancelCause(ctx)
+	workCtx = sensitive.WithValues(workCtx, item.values)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -218,6 +222,7 @@ func (m *Manager) Run(ctx context.Context, options Options, work func(context.Co
 		return view, err
 	}
 	workCtx, cancel := context.WithCancel(ctx)
+	workCtx = sensitive.WithValues(workCtx, item.values)
 	stopBrowser := context.AfterFunc(browser.Context(), cancel)
 	stopLifetime := context.AfterFunc(item.lifetime, cancel)
 	defer func() { stopBrowser(); stopLifetime(); cancel() }()
@@ -461,6 +466,11 @@ func (m *Manager) cleanupLocked(item *entry, explicit bool) <-chan struct{} {
 		var err error
 		if browser != nil {
 			err = browser.Close()
+		}
+		if err == nil {
+			// Resource cleanup is confirmed. Clear outside the inventory mutex;
+			// late callbacks fail closed through the same retired tracker.
+			item.values.Clear()
 		}
 		m.mu.Lock()
 		defer m.mu.Unlock()

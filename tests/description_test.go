@@ -52,10 +52,12 @@ func TestStaticDescriptionsMatchRuntimeCatalog(t *testing.T) {
 
 func TestDefaultCatalogContainsNoRetiredActions(t *testing.T) {
 	first, second := described.NewActions(nil), described.NewActions(nil)
-	if len(first) != 1 || first[0].Action().Name != "browse" || !reflect.DeepEqual(described.ActionNames(), []string{"browse"}) {
-		t.Fatal("the default catalog must expose browse without retired actions")
+	if len(first) != 2 || first[0].Action().Name != "browse" || first[1].Action().Name != "login" || !reflect.DeepEqual(described.ActionNames(), []string{"browse", "login"}) {
+		t.Fatal("the default catalog must expose browse and login without retired actions")
 	}
-	if first[0] == second[0] {
-		t.Fatal("catalog calls share action discovery state")
+	for i := range first {
+		if first[i] == second[i] {
+			t.Fatal("catalog calls share action discovery state")
+		}
 	}
 }

@@ -7,10 +7,13 @@ import (
 
 // Responsibilities returns the default capabilities without starting an agent.
 func Responsibilities() []string {
-	return []string{"Browse websites with the agent's own model and report structured findings and evidence", "Maintain isolated Lightpanda browser sessions for Commander"}
+	return []string{"Browse websites with the agent's own model and report structured findings and evidence", "Sign in through supported password forms with managed credentials and retain browser state", "Maintain isolated Lightpanda browser sessions for Commander"}
 }
 
 // ActionDescriptions returns release metadata without schemas or discovery state.
 func ActionDescriptions() []actionmodel.Action {
-	return []actionmodel.Action{{Name: actions.BrowseName, Description: actions.BrowseDescription, SessionMode: "create"}}
+	return []actionmodel.Action{
+		{Name: actions.BrowseName, Description: actions.BrowseDescription, SessionMode: "create"},
+		{Name: actions.LoginName, Description: actions.LoginDescription, SessionMode: "create"},
+	}
 }

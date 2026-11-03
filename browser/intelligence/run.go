@@ -8,6 +8,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/defos-ai/commander-browser-agent/internal/sensitive"
 )
 
 // Run drives the retained page through typed operations. A browser operation is
@@ -20,8 +22,12 @@ func Run(ctx context.Context, request Request, model Model, hooks Hooks) (result
 		!utf8.ValidString(request.Objective) || utf8.RuneCountInString(request.Objective) > 4000 {
 		return result, errors.New("invalid browse runtime configuration or budgets")
 	}
-	if hooks.Redact == nil {
-		hooks.Redact = func(text string) string { return text }
+	callerRedact := hooks.Redact
+	hooks.Redact = func(text string) string {
+		if callerRedact != nil {
+			text = callerRedact(text)
+		}
+		return sensitive.Redact(ctx, text)
 	}
 	log := func(message string) error {
 		if hooks.Log == nil {
@@ -41,6 +47,10 @@ func Run(ctx context.Context, request Request, model Model, hooks Hooks) (result
 		request.AllowedHosts = append(request.AllowedHosts, host)
 	}
 	slices.Sort(request.AllowedHosts)
+	modelHosts := slices.Clone(request.AllowedHosts)
+	for i, host := range modelHosts {
+		modelHosts[i] = hooks.Redact(host)
+	}
 	defer func() {
 		// The last command may have navigated just before a budget stopped the
 		// loop. Report the current confirmed URL, rather than the previous turn.
@@ -83,7 +93,7 @@ func Run(ctx context.Context, request Request, model Model, hooks Hooks) (result
 		if err := log(fmt.Sprintf("Requesting browser decision %d", step+1)); err != nil {
 			return result, err
 		}
-		turn := Turn{Objective: hooks.Redact(request.Objective), AllowedHosts: request.AllowedHosts, Observation: observation,
+		turn := Turn{Objective: hooks.Redact(request.Objective), AllowedHosts: modelHosts, Observation: observation,
 			Evidence: modelEvidence(result.Evidence), RecentSteps: recent, Clarifications: modelClarifications(clarifications)}
 		command, err := model.Next(ctx, turn, allowance)
 		if err != nil {
