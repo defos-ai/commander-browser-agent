@@ -375,7 +375,7 @@ func startClarifyingBrowse(t *testing.T, model *fixtures.BrowseModel, key, addre
 	} {
 		answerBrowseQuestion(t, framework.peer, command, model, setup.key, setup.answer, key, setup.options, false)
 	}
-	deliverBrowseModelSecret(t, framework.peer, model, actions.ModelSecretName(model.URL), key)
+	deliverBrowseModelSecret(t, framework.peer, model, modelSetupSecretName(model.URL), key)
 	return framework, binding, command
 }
 

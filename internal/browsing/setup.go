@@ -1,4 +1,4 @@
-package actions
+package browsing
 
 import (
 	"context"
@@ -6,11 +6,19 @@ import (
 	"encoding/hex"
 	"errors"
 	"strings"
+	"sync"
 
 	"github.com/defos-ai/commander-browser-agent/browser/intelligence"
 	"github.com/defos-ai/commander/framework/agent/action"
 	"github.com/defos-ai/commander/framework/domain/sessions"
 )
+
+// Setup retains non-secret model choices for each full Commander creation claim.
+// Its zero value is ready for use and starts no browser or model connection.
+type Setup struct {
+	mu      sync.Mutex
+	entries map[string]*modelSetup
+}
 
 type modelSetup struct {
 	claim     sessions.CreationClaim
@@ -18,32 +26,37 @@ type modelSetup struct {
 	selection *intelligence.ModelConfig // Non-secret settings only; never API keys.
 }
 
-// ModelSecretName binds custom endpoint credentials to their exact validated URL.
+// modelSecretName binds custom endpoint credentials to their exact validated URL.
 // A key for a standard provider or another endpoint is never an implicit fallback.
-func ModelSecretName(address string) string {
+func modelSecretName(address string) string {
 	digest := sha256.Sum256([]byte(address))
 	return "browser-model-api-key-" + hex.EncodeToString(digest[:])
 }
 
-func (a *Browse) prepareModel(ctx context.Context, input BrowseInput) (intelligence.ModelConfig, []byte, error) {
+// Prepare resolves model choices and a current managed key for the bound session.
+// The caller owns the returned key bytes and must clear them after use.
+func (s *Setup) Prepare(ctx context.Context, scopeID, sessionID string) (intelligence.ModelConfig, []byte, error) {
 	var empty intelligence.ModelConfig
 	if err := ctx.Err(); err != nil {
 		return empty, nil, err
 	}
 	binding, ok := action.SessionFromContext(ctx)
-	if !ok || binding.Validate() != nil || input.SessionScope != binding.ScopeID ||
-		binding.Mode == sessions.Create && input.SessionID != "" ||
-		binding.Mode == sessions.Reuse && input.SessionID != binding.ID {
+	if !ok || binding.Validate() != nil || scopeID != binding.ScopeID ||
+		binding.Mode == sessions.Create && sessionID != "" ||
+		binding.Mode == sessions.Reuse && sessionID != binding.ID {
 		return empty, nil, errors.New("model setup requires the matching framework browser session binding")
 	}
-	a.setupMu.Lock()
-	setup := a.setups[binding.ID]
+	s.mu.Lock()
+	if s.entries == nil {
+		s.entries = make(map[string]*modelSetup)
+	}
+	setup := s.entries[binding.ID]
 	if setup == nil {
 		setup = &modelSetup{claim: binding.Claim(), gate: make(chan struct{}, 1)}
-		a.setups[binding.ID] = setup
+		s.entries[binding.ID] = setup
 	}
 	conflict := setup.claim != binding.Claim()
-	a.setupMu.Unlock()
+	s.mu.Unlock()
 	if conflict {
 		return empty, nil, sessions.ErrConflict
 	}
@@ -119,7 +132,7 @@ func selectBrowserModel(ctx context.Context) (intelligence.ModelConfig, error) {
 }
 
 func selectedModelKey(ctx context.Context, selection intelligence.ModelConfig) ([]byte, error) {
-	name := ModelSecretName(selection.URL)
+	name := modelSecretName(selection.URL)
 	if selection.Provider != "other" {
 		preset, ok := intelligence.Provider(selection.Provider)
 		if !ok || selection.URL != preset.URL || preset.SecretName == "" {

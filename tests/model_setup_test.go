@@ -84,9 +84,6 @@ func TestModelSetupAsksProviderThenExactModelThenManagedKey(t *testing.T) {
 
 func TestModelSetupCustomEndpointAlwaysAsksAndBindsItsManagedCredential(t *testing.T) {
 	const endpoint = "https://custom-model.example.test/v1/chat/completions"
-	if actions.ModelSecretName(endpoint) != modelSetupSecretName(endpoint) || actions.ModelSecretName(endpoint) == actions.ModelSecretName(endpoint+"/other") {
-		t.Fatal("custom credential name is not bound to exact endpoint")
-	}
 	env := newModelSetupEnvironment(t)
 	const key = "fixture-custom-managed-key-fbbd1610"
 	runner := &browseUnusedRunner{err: errors.New("fixture browser: " + key)}

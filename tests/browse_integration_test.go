@@ -141,7 +141,7 @@ func TestBrowseThroughFrameworkManagedModelAndLightpanda(t *testing.T) {
 			answerBrowseQuestion(t, peer, command, model, "browser_model_provider_more", "Other (OpenAI-compatible)", key, []string{"xAI", "DeepSeek", "Other (OpenAI-compatible)"}, false)
 			answerBrowseQuestion(t, peer, command, model, "browser_model_name", "fixture-model", key, nil, false)
 			answerBrowseQuestion(t, peer, command, model, "browser_model_url", model.URL, key, nil, false)
-			deliverBrowseModelSecret(t, peer, model, actions.ModelSecretName(model.URL), key)
+			deliverBrowseModelSecret(t, peer, model, modelSetupSecretName(model.URL), key)
 			output := receiveBrowse(t, peer, command, key, ignoredKey)
 			var findings actions.BrowseOutput
 			if err := json.Unmarshal(output.Output, &findings); err != nil {

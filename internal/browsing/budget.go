@@ -1,4 +1,4 @@
-package actions
+package browsing
 
 import (
 	"context"
@@ -7,10 +7,10 @@ import (
 	"time"
 )
 
-// browseBudget counts active work while keeping clarification waits subject to
+// Budget counts active work while keeping clarification waits subject to
 // their own timeout and the original task deadline. Its context keeps the
 // parent's fixed Deadline; the active timer cancels it with DeadlineExceeded.
-type browseBudget struct {
+type Budget struct {
 	ctx       context.Context
 	cancel    context.CancelCauseFunc
 	mu        sync.Mutex
@@ -20,14 +20,16 @@ type browseBudget struct {
 	epoch     uint64
 }
 
-func newBrowseBudget(parent context.Context, allowance time.Duration) *browseBudget {
+func NewBudget(parent context.Context, allowance time.Duration) *Budget {
 	ctx, cancel := context.WithCancelCause(parent)
-	b := &browseBudget{ctx: ctx, cancel: cancel, remaining: allowance}
-	b.resume()
+	b := &Budget{ctx: ctx, cancel: cancel, remaining: allowance}
+	b.Resume()
 	return b
 }
 
-func (b *browseBudget) pause() {
+func (b *Budget) Context() context.Context { return b.ctx }
+
+func (b *Budget) Pause() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.timer == nil {
@@ -42,7 +44,7 @@ func (b *browseBudget) pause() {
 	}
 }
 
-func (b *browseBudget) resume() {
+func (b *Budget) Resume() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.timer != nil || b.ctx.Err() != nil {
@@ -60,12 +62,12 @@ func (b *browseBudget) resume() {
 	})
 }
 
-func (b *browseBudget) close() {
-	b.pause()
+func (b *Budget) Close() {
+	b.Pause()
 	b.cancel(context.Canceled)
 }
 
-func (b *browseBudget) err() error {
+func (b *Budget) Err() error {
 	if b.ctx.Err() == nil {
 		return nil
 	}

@@ -115,7 +115,7 @@
   [ToolSession](https://github.com/lightpanda-io/browser/blob/c5f7bb29b127040c899d4e181b5709f76fc71a6f/src/ToolSession.zig),
   [Browser Use session](https://github.com/browser-use/browser-use/blob/2cc71890e65056b67fdb29d98bb407749c15bb08/browser_use/browser/session.py).
 - Model setup follows provider → exact model ID/version → provider key.
-  [actions/setup.go](actions/setup.go) uses `action.Question` for
+  [internal/browsing/setup.go](internal/browsing/setup.go) uses `action.Question` for
   non-secret choices, with stable keys and at most four options. Commander owns
   operator-first waiting and model eligibility; never have the unconfigured
   browser model answer its own setup. Custom endpoints are a further non-secret
@@ -131,7 +131,7 @@
   provider-specific managed-secret names matching Playground. Do not import
   Commander apps. Always use `action.RequestSecret` for the selected provider's
   canonical secret name. Other uses only the endpoint-bound managed name from
-  `ModelSecretName`. Never send a standard provider's key to a custom endpoint or
+  the setup helper. Never send a standard provider's key to a custom endpoint or
   reuse an unscoped generic key after an endpoint change. Provider wire profiles
   must follow their primary API references; compatibility is not established by
   copying provider names alone. Keep fake-provider regressions for each profile.
@@ -175,6 +175,10 @@
   three minutes, and never extend the task deadline. Preserve cancellation and
   deadline causes. In Commander v0.3.0, canceling a waiter does not retract a saved
   pending question; do not claim automatic question cleanup or action restoration.
+- Keep non-action setup and active-time budget helpers under
+  [internal/browsing/](internal/browsing/). The action owns one setup instance and
+  delegates model/session selection to it; do not expose these helpers as actions
+  or public package APIs. Preserve setup serialization and exact creation claims.
 
 ## Demo and releases
 

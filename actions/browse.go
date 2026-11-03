@@ -9,7 +9,6 @@ import (
 	"net/url"
 	"slices"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 	"unicode/utf8"
@@ -17,6 +16,7 @@ import (
 	browserruntime "github.com/defos-ai/commander-browser-agent/browser"
 	"github.com/defos-ai/commander-browser-agent/browser/intelligence"
 	"github.com/defos-ai/commander-browser-agent/browser/lightpanda"
+	"github.com/defos-ai/commander-browser-agent/internal/browsing"
 	"github.com/defos-ai/commander/framework/agent/action"
 	"github.com/defos-ai/commander/framework/agent/environment"
 	actionmodel "github.com/defos-ai/commander/framework/domain/actions"
@@ -60,8 +60,7 @@ type Browse struct {
 	configuration  atomic.Pointer[browseConfiguration]
 	validateInput  func(any) error
 	validateOutput func(any) error
-	setupMu        sync.Mutex
-	setups         map[string]*modelSetup
+	setup          browsing.Setup
 }
 
 type browseConfiguration struct {
@@ -84,7 +83,6 @@ func NewBrowse(runner BrowserRunner) *Browse {
 			InputSchema: json.RawMessage(browseInputSchema), OutputSchema: json.RawMessage(browseOutputSchema),
 		}),
 		runner: runner, validateInput: input.Validate, validateOutput: output.Validate,
-		setups: make(map[string]*modelSetup),
 	}
 }
 
@@ -153,7 +151,7 @@ func (a *Browse) Run(ctx context.Context, raw json.RawMessage) (action.Result, e
 	var key []byte
 	prepare := func(ctx context.Context) error {
 		var err error
-		modelConfiguration, key, err = a.prepareModel(ctx, input)
+		modelConfiguration, key, err = a.setup.Prepare(ctx, input.SessionScope, input.SessionID)
 		return err
 	}
 	var err error
@@ -170,8 +168,8 @@ func (a *Browse) Run(ctx context.Context, raw json.RawMessage) (action.Result, e
 	if err != nil {
 		return action.Result{}, err
 	}
-	budget := newBrowseBudget(ctx, time.Duration(input.TimeoutSeconds)*time.Second)
-	defer budget.close()
+	budget := browsing.NewBudget(ctx, time.Duration(input.TimeoutSeconds)*time.Second)
+	defer budget.Close()
 	if len(key) == 0 || len(key) > 4096 || strings.ContainsAny(string(key), "\r\n") {
 		return action.Result{}, errors.New("browser model credentials are invalid")
 	}
@@ -195,8 +193,8 @@ func (a *Browse) Run(ctx context.Context, raw json.RawMessage) (action.Result, e
 		Redact: redact,
 		Log:    func(ctx context.Context, message string) error { return action.Log(ctx, redact(message)) },
 		Question: func(ctx context.Context, key, text string, options []string) (string, error) {
-			budget.pause()
-			defer budget.resume()
+			budget.Pause()
+			defer budget.Resume()
 			waiting, stop := context.WithTimeout(ctx, 3*time.Minute)
 			defer stop()
 			const notice = "Browser clarification (non-secret). Do not enter passwords, credentials, authentication codes or API keys.\n\n"
@@ -208,14 +206,14 @@ func (a *Browse) Run(ctx context.Context, raw json.RawMessage) (action.Result, e
 		},
 	}
 	var findings intelligence.Result
-	snapshot, runErr := a.runner.Run(budget.ctx, browserruntime.Options{Engine: browserruntime.Lightpanda, Executable: configuration.runtime.Executable()}, func(ctx context.Context) error {
+	snapshot, runErr := a.runner.Run(budget.Context(), browserruntime.Options{Engine: browserruntime.Lightpanda, Executable: configuration.runtime.Executable()}, func(ctx context.Context) error {
 		var err error
 		findings, err = intelligence.Run(ctx, request, model, hooks)
 		return err
 	})
 	result := action.Result{Session: &snapshot}
 	if runErr != nil {
-		if err := budget.err(); err != nil {
+		if err := budget.Err(); err != nil {
 			return result, err
 		}
 		if errors.Is(runErr, context.DeadlineExceeded) {
@@ -243,7 +241,7 @@ func (a *Browse) Run(ctx context.Context, raw json.RawMessage) (action.Result, e
 		{Name: "findings.json", MediaType: "application/json", Data: encoded},
 		{Name: "evidence.json", MediaType: "application/json", Data: evidence},
 	}}}
-	if err := budget.err(); err != nil {
+	if err := budget.Err(); err != nil {
 		return action.Result{Session: &snapshot}, err
 	}
 	return result, nil
