@@ -44,11 +44,12 @@ type runtimeHarness struct {
 	history   []messages.Message
 	records   map[string]executions.Execution
 	questions map[string]operations.Question
+	replies   map[string]messages.Message
 }
 
 func newRuntime(t *testing.T) *runtimeHarness {
 	t.Helper()
-	h := &runtimeHarness{t: t, records: map[string]executions.Execution{}, questions: map[string]operations.Question{}}
+	h := &runtimeHarness{t: t, records: map[string]executions.Execution{}, questions: map[string]operations.Question{}, replies: map[string]messages.Message{}}
 	h.options = browserruntime.Options{Engine: browserruntime.Lightpanda, Executable: os.Getenv("LIGHTPANDA_PATH")}
 	if !filepath.IsAbs(h.options.Executable) {
 		t.Fatal("browserintegration requires absolute LIGHTPANDA_PATH")
@@ -81,7 +82,9 @@ func newRuntime(t *testing.T) *runtimeHarness {
 		case <-time.After(10 * time.Second):
 			t.Error("agent shutdown did not join browser resources")
 		}
-		_ = h.manager.Close()
+		if err := h.manager.Close(); err != nil {
+			t.Errorf("browser resource cleanup failed: %v", err)
+		}
 		_ = h.observer.Close()
 		_ = bus.Close()
 	})
@@ -127,6 +130,10 @@ func (h *runtimeHarness) Wait(match func(messages.Message) bool) messages.Messag
 	h.t.Helper()
 	for i := 0; i < len(h.pending); {
 		message := h.pending[i]
+		if h.replay(message) {
+			h.pending = append(h.pending[:i], h.pending[i+1:]...)
+			continue
+		}
 		matched := match(message)
 		if matched || message.Type == controllerevents.CheckpointRequested {
 			h.pending = append(h.pending[:i], h.pending[i+1:]...)
@@ -147,6 +154,9 @@ func (h *runtimeHarness) Wait(match func(messages.Message) bool) messages.Messag
 		runtimeCheck(h.t, delivery.Ack(ctx))
 		message.Payload = bytes.Clone(message.Payload)
 		h.history = append(h.history, message)
+		if h.replay(message) {
+			continue
+		}
 		if match(message) {
 			return message
 		}
@@ -158,11 +168,29 @@ func (h *runtimeHarness) Wait(match func(messages.Message) bool) messages.Messag
 	}
 }
 
+func (h *runtimeHarness) replay(request messages.Message) bool {
+	if request.Type != controllerevents.QuestionRequested && request.Type != controllerevents.SecretSyncRequested {
+		return false
+	}
+	response, known := h.replies[request.ID]
+	if known {
+		runtimeCheck(h.t, (agentevents.Client{Bus: h.bus}).Publish(h.t.Context(), response))
+	}
+	return known
+}
+
 func (h *runtimeHarness) Answer(request messages.Message, answer string, origin ...operations.AnswerOrigin) operations.Question {
 	h.t.Helper()
 	payload, err := controllerevents.DecodeQuestionRequest(request)
 	runtimeCheck(h.t, err)
 	question, found := h.questions[request.ID]
+	if found && question.Status == operations.QuestionAnswered {
+		if answer != "" && answer != question.Answer {
+			h.t.Fatal("a saved question cannot change its answered value")
+		}
+		h.replay(request)
+		return question
+	}
 	now := time.Now().UTC()
 	if !found {
 		question = operations.Question{ID: id.New(), Status: operations.QuestionPending, TaskID: request.Work.TaskID, CommandID: payload.CommandID, Key: payload.Key, Text: payload.Text, Options: payload.Options, AskedAt: now, FallbackAt: now.Add(time.Minute)}
@@ -180,6 +208,9 @@ func (h *runtimeHarness) Answer(request messages.Message, answer string, origin 
 	h.questions[request.ID] = question
 	response, err := agentevents.NewQuestionResponse(request, agentevents.QuestionResponse{CommandID: payload.CommandID, Key: payload.Key, Question: &question})
 	runtimeCheck(h.t, err)
+	if question.Status == operations.QuestionAnswered {
+		h.replies[request.ID] = response
+	}
 	runtimeCheck(h.t, (agentevents.Client{Bus: h.bus}).Publish(h.t.Context(), response))
 	return question
 }
@@ -200,6 +231,7 @@ func (h *runtimeHarness) Secret(name, value string) {
 	now := time.Now().UTC()
 	delivery, err := agentevents.NewSecretDelivery(request.Request, secrets.Metadata{ID: id.New(), Key: request.Request.Key, Version: 1, CreatedAt: now, UpdatedAt: now}, []byte(value))
 	runtimeCheck(h.t, err)
+	h.replies[message.ID] = delivery
 	runtimeCheck(h.t, (agentevents.Client{Bus: h.bus}).Publish(h.t.Context(), delivery))
 }
 
