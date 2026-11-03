@@ -6,6 +6,10 @@
   Keep README for users and implementation guidance here. Keep one root
   `.gitignore`, companion AGENTS files for every README, and credentials/runtime
   output untracked. Preserve uncommitted work; do not publish without authorization.
+- Keep the root README brief and written for people: capabilities, Commander
+  connection links, a minimal local start, runtime prerequisites and licensing.
+  Put implementation contracts, detailed configuration, operational commands,
+  limitations, testing and release instructions here instead of expanding README.
 - The module imports Commander framework and providers only. Do not import
   Commander apps or add a controller inside the agent. Agent source is
   [MIT](LICENSE); Commander framework and provider dependencies remain
@@ -46,6 +50,10 @@
 - [cli/factory.go](cli/factory.go) selects FS/RabbitMQ bus and FS/S3 artifact
   providers. Unsupported schemes fail explicitly. Agents never connect to MongoDB.
   The browser needs no managed-secret decryption key.
+- For direct development, run
+  `BUS_URL=/shared/bus STORAGE_URL=/shared/storage go run ./cmd` against the
+  controller's bus and artifact storage. FS providers require the same shared
+  directories in both processes. Use `go run ./cmd --help` for host settings.
 
 ## Browser runtime
 
@@ -59,9 +67,16 @@
   linux/arm64 binaries, fails unsupported architectures, and disables telemetry
   and core dumps. Keep standalone context and `GOWORK=off`, a real UID1000 user
   and writable home.
-- Fetch and verify the upstream AGPL-3.0-or-later license and embedded-font notices
-  from the pinned source commit during the build. Retain them with runtime
-  attribution in `/usr/share/doc/lightpanda`; do not vendor a third_party folder.
+- Follow the two-stage Go build/Debian runtime Dockerfile pattern. Download
+  Lightpanda with the build image's existing tools. Runtime workdir is
+  `/home/commander`, with private mode-0700 `state/`; CLI owns bus/storage defaults,
+  while Compose supplies its shared `/state` mounts and environment overrides.
+- Keep the upstream AGPL-3.0-or-later license, embedded-font notices and runtime
+  attribution in [third_party/lightpanda/](third_party/lightpanda/). Docker copies
+  these files to `/usr/share/doc/lightpanda` without fetching them during builds.
+  When updating Lightpanda, fetch and verify `LICENSE` and
+  `src/rust/render/fonts/LICENSE` from the pinned source commit, and update the
+  version and source links in `NOTICE` together with the binary checksums.
   This separate runtime dependency does not change the agent's MIT or Commander's
   AGPL-3.0-only licensing.
 - The screenshot action uses Lightpanda text-only PNGs. Identify the
@@ -75,6 +90,10 @@
   per agent unless the caller provides a Commander sessions provider. Constructors
   and `Prepare` open no browsers. `Run` requires the exact framework-owned session
   binding and creation claim from `action.SessionFromContext`.
+- Action input `session_scope` is a caller-chosen UUID for a logical browser slot.
+  Omit `session_id` to create through `browse` or `login`; pass the returned
+  `session.id` as `session_id` with the same scope to reuse the page and
+  authentication. Scope alone does not reuse a session. `screenshot` requires both.
 - Actions select `lightpanda` internally; do not require an engine input when only
   one engine is supported. The session runtime still rejects other engines. Keep
   its process, CDP connection and page for reuse. Every session has its own private
@@ -259,6 +278,12 @@
   and optional Playground using the same `COMMANDER_VERSION` (default `v0.3.0`).
   Commander host images explicitly use linux/amd64; the agent image supports
   linux/amd64 and linux/arm64. Never run demo Playground with `--all-in-one`.
+- Start the local demo with `docker compose up --build --wait`, then
+  `docker compose run --rm --no-deps playground`. Browser Admin is at
+  `http://localhost:4285`; add API `http://localhost:4284` and obtain its login with
+  `docker compose exec api commander-api credentials`. Enter model keys through
+  Playground's masked setup. Use `/exit` to leave Playground and
+  `docker compose down` to stop the stack.
 - Do not pass model settings or keys into the demo agent: use questions and
   managed secrets. Do not automatically pass host provider keys into Playground.
   It accepts masked key entry or one explicitly forwarded provider key and shares
