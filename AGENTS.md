@@ -75,10 +75,11 @@
   per agent unless the caller provides a Commander sessions provider. Constructors
   and `Prepare` open no browsers. `Run` requires the exact framework-owned session
   binding and creation claim from `action.SessionFromContext`.
-- Choose `lightpanda` explicitly; reject other engines. Keep its process, CDP
-  connection and page for reuse. Every session has its own private profile; never
-  transfer cookies or authentication between sessions or engines. Never reconnect
-  a lost session and describe it as restored.
+- Actions select `lightpanda` internally; do not require an engine input when only
+  one engine is supported. The session runtime still rejects other engines. Keep
+  its process, CDP connection and page for reuse. Every session has its own private
+  profile; never transfer cookies or authentication between sessions or engines.
+  Never reconnect a lost session and describe it as restored.
 - Browser lifetime is independent of an action's cancellation after startup.
   Preserve execution context values for questions, secrets, logs and checkpoints.
   Serialize work within a session while allowing independent inspect/verify/close
@@ -148,8 +149,12 @@
   and artifacts. Suppress raw provider/browser errors and protocol output.
 - Expose typed browser commands only, with one model command per turn and no
   model-supplied JavaScript, selectors, credentials or raw CDP. Keep safe bounded
-  observations, exact document-host scope, evidence references and static execution
-  logs. Reject malformed/multiple commands before side effects. Stop on uncertain
+  observations, evidence references and static execution logs. Document navigation
+  allows all HTTP(S) hostnames by default: omitted/empty `allowed_hosts` normalizes
+  to `["*"]`. Explicit hostname lists restrict documents to those exact hosts and
+  must include the starting host. The wildcard must stand alone; partial wildcards
+  are unsupported. Keep URL credential/scheme checks in both modes.
+  Reject malformed/multiple commands before side effects. Stop on uncertain
   browser operations instead of automatically retrying them. Bound wall time,
   steps, completion allowances, observations, responses and evidence. Do not claim
   a provider cost/generation-token limit or transparent recovery from lost state.

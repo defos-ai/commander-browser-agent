@@ -39,15 +39,14 @@ type browserSetupRunner interface {
 }
 
 type BrowseInput struct {
-	Objective           string                `json:"objective"`
-	URL                 string                `json:"url"`
-	Engine              browserruntime.Engine `json:"engine"`
-	SessionScope        string                `json:"session_scope"`
-	SessionID           string                `json:"session_id,omitempty"`
-	AllowedHosts        []string              `json:"allowed_hosts,omitempty"`
-	MaxSteps            int                   `json:"max_steps,omitempty"`
-	TimeoutSeconds      int                   `json:"timeout_seconds,omitempty"`
-	MaxCompletionTokens int                   `json:"max_completion_tokens,omitempty"`
+	Objective           string   `json:"objective"`
+	URL                 string   `json:"url"`
+	SessionScope        string   `json:"session_scope"`
+	SessionID           string   `json:"session_id,omitempty"`
+	AllowedHosts        []string `json:"allowed_hosts,omitempty"`
+	MaxSteps            int      `json:"max_steps,omitempty"`
+	TimeoutSeconds      int      `json:"timeout_seconds,omitempty"`
+	MaxCompletionTokens int      `json:"max_completion_tokens,omitempty"`
 }
 
 type BrowseOutput struct {
@@ -196,7 +195,7 @@ func (a *Browse) Run(ctx context.Context, raw json.RawMessage) (action.Result, e
 		return action.Log(ctx, redact(message))
 	}}
 	var findings intelligence.Result
-	snapshot, runErr := a.runner.Run(budget, browserruntime.Options{Engine: input.Engine, Executable: configuration.runtime.Executable()}, func(ctx context.Context) error {
+	snapshot, runErr := a.runner.Run(budget, browserruntime.Options{Engine: browserruntime.Lightpanda, Executable: configuration.runtime.Executable()}, func(ctx context.Context) error {
 		var err error
 		findings, err = intelligence.Run(ctx, request, model, hooks)
 		return err
@@ -208,7 +207,7 @@ func (a *Browse) Run(ctx context.Context, raw json.RawMessage) (action.Result, e
 		}
 		return result, errors.New(redact(runErr.Error()))
 	}
-	output := BrowseOutput{Engine: input.Engine, Result: redactBrowseResult(findings, redact)}
+	output := BrowseOutput{Engine: browserruntime.Lightpanda, Result: redactBrowseResult(findings, redact)}
 	encoded, err := json.Marshal(output)
 	if err != nil || len(encoded) > 1024*1024 {
 		return result, errors.New("browser findings exceed the result limit")
@@ -235,9 +234,6 @@ func (input *BrowseInput) validate() error {
 	if !utf8.ValidString(input.Objective) || strings.TrimSpace(input.Objective) == "" || utf8.RuneCountInString(input.Objective) > 4000 {
 		return errors.New("objective must contain between 1 and 4000 nonblank characters")
 	}
-	if input.Engine != browserruntime.Lightpanda {
-		return errors.New("select the lightpanda engine explicitly")
-	}
 	if !id.Valid(input.SessionScope) || input.SessionID != "" && !id.Valid(input.SessionID) {
 		return errors.New("browse requires canonical session_scope and session_id values")
 	}
@@ -252,7 +248,10 @@ func (input *BrowseInput) validate() error {
 		return errors.New("url query contains invalid percent encoding")
 	}
 	if len(input.AllowedHosts) == 0 {
-		input.AllowedHosts = []string{strings.ToLower(target.Hostname())}
+		input.AllowedHosts = []string{"*"}
+	}
+	if len(input.AllowedHosts) == 1 && input.AllowedHosts[0] == "*" {
+		return nil
 	}
 	if len(input.AllowedHosts) > 8 {
 		return errors.New("allowed_hosts must contain at most eight exact hostnames")
@@ -261,7 +260,7 @@ func (input *BrowseInput) validate() error {
 	for i, host := range input.AllowedHosts {
 		host = strings.ToLower(host)
 		if !validBrowseHost(host) || seen[host] {
-			return errors.New("allowed_hosts must contain unique exact hostnames without ports, schemes or credentials")
+			return errors.New("allowed_hosts must be [\"*\"] or unique exact hostnames without ports, schemes or credentials")
 		}
 		seen[host], input.AllowedHosts[i] = true, host
 	}
@@ -381,14 +380,13 @@ const browseInputSchema = `{
   "properties":{
     "objective":{"type":"string","minLength":1,"maxLength":4000},
     "url":{"type":"string","minLength":1,"maxLength":4096},
-    "engine":{"type":"string","enum":["lightpanda"]},
     "session_scope":{"type":"string","pattern":"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"},
     "session_id":{"type":"string","pattern":"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"},
-    "allowed_hosts":{"type":"array","maxItems":8,"uniqueItems":true,"items":{"type":"string","minLength":1,"maxLength":253}},
+    "allowed_hosts":{"type":"array","maxItems":8,"uniqueItems":true,"default":["*"],"description":"Omitted or empty allows all hostnames, equivalent to [\"*\"]. Otherwise list exact permitted hostnames, including the starting URL hostname. The wildcard must stand alone.","items":{"type":"string","minLength":1,"maxLength":253}},
     "max_steps":{"type":"integer","minimum":1,"maximum":30,"default":12},
     "timeout_seconds":{"type":"integer","minimum":5,"maximum":180,"default":120},
     "max_completion_tokens":{"type":"integer","minimum":1024,"maximum":32768,"default":8192}
-  }, "required":["objective","url","engine","session_scope"]
+  }, "required":["objective","url","session_scope"]
 }`
 
 const browseOutputSchema = `{

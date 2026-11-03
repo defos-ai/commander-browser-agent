@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -27,6 +28,10 @@ import (
 func TestBrowseBlocksForeignRedirectAndReleasesNavigationGuard(t *testing.T) {
 	options := browserSessionOptions(t)
 	site, foreignURL, hits, redirects := fixtures.NewBrowseScopeSite(t)
+	startingURL, err := url.Parse(site.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
 	const key = "fixture-scope-model-key-02da2809"
 	modelServer := fixtures.NewBrowseModel(t, key, func(turn intelligence.Turn) intelligence.Command {
 		if strings.Contains(turn.Observation.Text, "foreign-document-canary") {
@@ -52,7 +57,7 @@ func TestBrowseBlocksForeignRedirectAndReleasesNavigationGuard(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, _ = manager.Run(action.WithSession(t.Context(), &binding), options, func(ctx context.Context) error {
-		_, err := intelligence.Run(ctx, intelligence.Request{Objective: "Follow the redirect within the permitted website.", URL: site.URL, MaxSteps: 2, MaxCompletionTokens: 2048}, model, intelligence.Hooks{})
+		_, err := intelligence.Run(ctx, intelligence.Request{Objective: "Follow the redirect within the permitted website.", URL: site.URL, AllowedHosts: []string{startingURL.Hostname()}, MaxSteps: 2, MaxCompletionTokens: 2048}, model, intelligence.Hooks{})
 		return err
 	})
 	if modelServer.Calls() == 0 || redirects.Load() == 0 {
@@ -151,6 +156,9 @@ func TestBrowseThroughFrameworkManagedModelAndLightpanda(t *testing.T) {
 			if output.Session == nil {
 				t.Fatal("browse omitted its reusable session")
 			}
+			if output.Session.Kind != "lightpanda" {
+				t.Fatalf("browse did not select a Lightpanda session internally: kind=%q", output.Session.Kind)
+			}
 			assertBrowserSession(t, *output.Session, binding.Reference, "connected")
 			checkBrowseArtifacts(t, framework.files, output, key, ignoredKey)
 
@@ -193,9 +201,12 @@ func TestBrowseThroughFrameworkManagedModelAndLightpanda(t *testing.T) {
 	}
 }
 
-func publishBrowse(t *testing.T, bus comms.Bus, binding sessions.Binding, targetURL string, maxSteps int) messages.Message {
+func publishBrowse(t *testing.T, bus comms.Bus, binding sessions.Binding, targetURL string, maxSteps int, allowedHosts ...[]string) messages.Message {
 	t.Helper()
-	input := map[string]any{"objective": "Find the solar lamp price using the catalog search.", "url": targetURL, "engine": "lightpanda", "session_scope": binding.ScopeID, "max_steps": maxSteps}
+	input := map[string]any{"objective": "Find the solar lamp price using the catalog search.", "url": targetURL, "session_scope": binding.ScopeID, "max_steps": maxSteps}
+	if len(allowedHosts) > 0 {
+		input["allowed_hosts"] = allowedHosts[0]
+	}
 	if binding.Mode == sessions.Reuse {
 		input["session_id"] = binding.ID
 	}

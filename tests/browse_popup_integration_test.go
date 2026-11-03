@@ -4,6 +4,7 @@ package browser_test
 
 import (
 	"context"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -19,6 +20,10 @@ func TestBrowseBlocksPopupDocumentsBeforeAndAfterGuardCleanup(t *testing.T) {
 		t.Run(strings.TrimPrefix(path, "/"), func(t *testing.T) {
 			options := browserSessionOptions(t)
 			site, foreignHits, separateTargetHits := fixtures.NewBrowsePopupSite(t)
+			startingURL, err := url.Parse(site.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
 			const key = "fixture-popup-model-key-61d603"
 			var selected atomic.Bool
 			modelServer := fixtures.NewBrowseModel(t, key, func(turn intelligence.Turn) intelligence.Command {
@@ -49,7 +54,7 @@ func TestBrowseBlocksPopupDocumentsBeforeAndAfterGuardCleanup(t *testing.T) {
 			var result intelligence.Result
 			retained, err := manager.Run(action.WithSession(t.Context(), &binding), options, func(ctx context.Context) error {
 				var runErr error
-				result, runErr = intelligence.Run(ctx, intelligence.Request{Objective: "Open the fixture popup within website scope.", URL: site.URL + path, MaxSteps: 1, MaxCompletionTokens: 1024}, model, intelligence.Hooks{})
+				result, runErr = intelligence.Run(ctx, intelligence.Request{Objective: "Open the fixture popup within website scope.", URL: site.URL + path, AllowedHosts: []string{startingURL.Hostname()}, MaxSteps: 1, MaxCompletionTokens: 1024}, model, intelligence.Hooks{})
 				return runErr
 			})
 			if err != nil {

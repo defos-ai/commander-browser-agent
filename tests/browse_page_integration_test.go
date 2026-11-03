@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -66,6 +67,10 @@ func TestBrowseFollowsSameHostLinkAndExtractsAfterNavigation(t *testing.T) {
 func TestBrowseCancellationDuringModelRequestReleasesGuardAndSession(t *testing.T) {
 	options := browserSessionOptions(t)
 	site, foreignURL, foreignHits, _ := fixtures.NewBrowseScopeSite(t)
+	startingURL, err := url.Parse(site.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
 	const key = "fixture-cancellation-model-key-4e532fd1"
 	entered, release := make(chan struct{}), make(chan struct{})
 	defer close(release)
@@ -90,7 +95,7 @@ func TestBrowseCancellationDuringModelRequestReleasesGuardAndSession(t *testing.
 	done := make(chan outcome, 1)
 	go func() {
 		snapshot, err := manager.Run(action.WithSession(work, &binding), options, func(ctx context.Context) error {
-			_, err := intelligence.Run(ctx, intelligence.Request{Objective: "Inspect the current page.", URL: site.URL, MaxSteps: 5, MaxCompletionTokens: 5120}, model, intelligence.Hooks{})
+			_, err := intelligence.Run(ctx, intelligence.Request{Objective: "Inspect the current page.", URL: site.URL, AllowedHosts: []string{startingURL.Hostname()}, MaxSteps: 5, MaxCompletionTokens: 5120}, model, intelligence.Hooks{})
 			return err
 		})
 		done <- outcome{snapshot: snapshot, err: err}

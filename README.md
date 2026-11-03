@@ -89,15 +89,28 @@ For example, a controller can dispatch `browse` with:
 {
   "objective": "Find the support contact and summarize the available options.",
   "url": "https://example.com/",
-  "engine": "lightpanda",
   "session_scope": "2e2ca5a5-c552-4ab4-90a7-62807dcb3f50"
 }
 ```
 
-The controller supplies the session binding. Reuse adds its `session_id` within
-the same scope. Navigation stays on the starting URL's exact hostname unless
-`allowed_hosts` explicitly lists additional hosts; ports may differ, while
-subdomains and `www` variants are separate hosts. Model operations use observed
+The agent always uses Lightpanda; no engine input is needed. The controller
+supplies the session binding from these action fields:
+
+- `session_scope` is a caller-chosen UUID identifying a logical browser slot.
+  Keep it across related tasks. It is required by Commander's session contract.
+- `session_id` identifies the concrete browser session returned as `session.id`.
+  Omit it to create a session; include it with the same scope to reuse that browser,
+  page and cookies. Keeping the scope alone does not automatically reuse a session.
+
+For example, a follow-up `browse` can continue on a filtered catalog page using
+the returned session ID instead of opening a fresh browser.
+
+Navigation allows all HTTP(S) hostnames by default. Omitting `allowed_hosts`,
+passing `[]` or passing `["*"]` all select that behavior. To restrict navigation,
+pass exact hostnames, including the starting URL's hostname, such as
+`["example.com", "support.example.com"]`. Ports may differ, while subdomains and
+`www` variants are separate hosts. The `*` wildcard must stand alone; partial
+wildcards such as `*.example.com` are not supported. Model operations use observed
 element IDs. Password and other credential fields are excluded from this action.
 URL query strings/fragments and form values are omitted from observations.
 
@@ -133,7 +146,7 @@ Windows hosts can use the Docker image or WSL. The image disables Lightpanda
 telemetry and crash core dumps by default.
 
 Session-aware actions share browser state through Commander sessions. Each
-session belongs to one running agent and explicitly selects `lightpanda`.
+session belongs to one running agent and uses Lightpanda.
 Authentication stays within that session. Commander
 can inspect, verify or close it; a confirmed close interrupts active work and
 removes the browser profile. Agent shutdown retains the reference as lost;

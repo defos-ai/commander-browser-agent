@@ -52,9 +52,16 @@ func newPage(ctx context.Context, startingURL string, allowedHosts []string) (*p
 	}
 	hosts := make(map[string]bool)
 	if len(allowedHosts) == 0 {
-		allowedHosts = []string{u.Hostname()}
+		allowedHosts = []string{"*"}
 	}
 	for _, host := range allowedHosts {
+		if host == "*" {
+			if len(allowedHosts) != 1 {
+				return nil, errPage
+			}
+			hosts[host] = true
+			continue
+		}
 		if host == "" || strings.TrimSpace(host) != host || strings.ContainsAny(host, "/?#@*\\") {
 			return nil, errPage
 		}
@@ -63,7 +70,7 @@ func newPage(ctx context.Context, startingURL string, allowedHosts []string) (*p
 		}
 		hosts[strings.ToLower(host)] = true
 	}
-	if !hosts[strings.ToLower(u.Hostname())] {
+	if !hosts["*"] && !hosts[strings.ToLower(u.Hostname())] {
 		return nil, errPage
 	}
 	guard, cancel := context.WithCancel(context.WithoutCancel(ctx))
@@ -118,7 +125,7 @@ func safePageURL(raw string) string {
 
 func (p *pageDriver) allowed(raw string) bool {
 	u, err := pageURL(raw)
-	return err == nil && p.hosts[strings.ToLower(u.Hostname())]
+	return err == nil && (p.hosts["*"] || p.hosts[strings.ToLower(u.Hostname())])
 }
 
 func (p *pageDriver) requests() {
@@ -130,7 +137,7 @@ func (p *pageDriver) requests() {
 			ctx, cancel := context.WithTimeout(p.ctx, 2*time.Second)
 			ctx = cdp.WithExecutor(ctx, chromedp.FromContext(p.ctx).Target)
 			u, err := pageURL(request.Request.URL)
-			permitted := !p.closed.Load() && err == nil && (p.hosts[strings.ToLower(u.Hostname())] || request.ResourceType != network.ResourceTypeDocument && (request.Request.Method == "GET" || request.Request.Method == "HEAD"))
+			permitted := !p.closed.Load() && err == nil && (p.hosts["*"] || p.hosts[strings.ToLower(u.Hostname())] || request.ResourceType != network.ResourceTypeDocument && (request.Request.Method == "GET" || request.Request.Method == "HEAD"))
 			if permitted {
 				err = fetch.ContinueRequest(request.RequestID).Do(ctx)
 			} else {
@@ -425,7 +432,7 @@ const clickDOM = `
 const el=selected(args.id);
 function permitted(raw) {
   const u=new URL(raw,document.baseURI);
-  return (u.protocol==='http:' || u.protocol==='https:') && !u.username && !u.password && args.hosts[u.hostname.toLowerCase()];
+  return (u.protocol==='http:' || u.protocol==='https:') && !u.username && !u.password && (args.hosts['*'] || args.hosts[u.hostname.toLowerCase()]);
 }
 if (el.tagName==='A' && !permitted(el.href)) throw new Error('Unavailable navigation');
 const baseTarget=document.querySelector('base[target]')?.target||'';

@@ -65,16 +65,19 @@ func TestBrowseRejectsInvalidInputBeforeRequestingCredentials(t *testing.T) {
 		name   string
 		change func(map[string]any)
 	}{
-		{name: "implicit engine", change: func(input map[string]any) { delete(input, "engine") }},
-		{name: "unsupported engine", change: func(input map[string]any) { input["engine"] = "chromium" }},
+		{name: "caller supplied Lightpanda engine", change: func(input map[string]any) { input["engine"] = "lightpanda" }},
+		{name: "caller supplied other engine", change: func(input map[string]any) { input["engine"] = "chromium" }},
 		{name: "invalid session scope", change: func(input map[string]any) { input["session_scope"] = "not-an-id" }},
 		{name: "invalid session identity", change: func(input map[string]any) { input["session_id"] = "not-an-id" }},
 		{name: "unknown field", change: func(input map[string]any) { input["api_key"] = "private-input-sentinel" }},
 		{name: "blank objective", change: func(input map[string]any) { input["objective"] = "  " }},
 		{name: "long objective", change: func(input map[string]any) { input["objective"] = strings.Repeat("x", 4001) }},
 		{name: "URL credentials", change: func(input map[string]any) { input["url"] = "https://user:private-input-sentinel@example.test/" }},
+		{name: "non HTTP URL", change: func(input map[string]any) { input["url"] = "ftp://example.test/" }},
 		{name: "invalid query escaping", change: func(input map[string]any) { input["url"] = "https://example.test/?query=%zz" }},
 		{name: "scope does not include URL", change: func(input map[string]any) { input["allowed_hosts"] = []string{"other.example.test"} }},
+		{name: "wildcard mixed with exact host", change: func(input map[string]any) { input["allowed_hosts"] = []string{"*", "example.test"} }},
+		{name: "subdomain wildcard", change: func(input map[string]any) { input["allowed_hosts"] = []string{"*.example.test"} }},
 		{name: "host includes a port", change: func(input map[string]any) { input["allowed_hosts"] = []string{"example.test:443"} }},
 		{name: "step minimum", change: func(input map[string]any) { input["max_steps"] = 0 }},
 		{name: "step maximum", change: func(input map[string]any) { input["max_steps"] = 31 }},
@@ -89,13 +92,14 @@ func TestBrowseRejectsInvalidInputBeforeRequestingCredentials(t *testing.T) {
 			discoverBrowse(t, executor, browseDiscoveryEnvironment(t))
 			secrets := &browseSecretProbe{}
 			questions := &modelSetupQuestions{}
-			input := validBrowseInput()
+			binding := newModelSetupBinding()
+			input := modelSetupInput(binding)
 			test.change(input)
 			raw, err := json.Marshal(input)
 			if err != nil {
 				t.Fatal(err)
 			}
-			_, err = executor.Run(action.WithQuestions(action.WithSecrets(t.Context(), secrets), questions), raw)
+			_, err = executor.Run(action.WithQuestions(action.WithSession(action.WithSecrets(t.Context(), secrets), &binding), questions), raw)
 			if err == nil || secrets.requests != 0 || len(questions.calls) != 0 || runner.calls != 0 {
 				t.Fatalf("invalid input crossed the credential/browser boundary: error=%v secret_requests=%d browser_calls=%d", err, secrets.requests, runner.calls)
 			}
@@ -200,7 +204,7 @@ func discoverBrowse(t *testing.T, executor *actions.Browse, env environment.Envi
 }
 
 func validBrowseInput() map[string]any {
-	return map[string]any{"objective": "Extract the study names", "url": "https://example.test/", "engine": "lightpanda", "session_scope": id.New()}
+	return map[string]any{"objective": "Extract the study names", "url": "https://example.test/", "session_scope": id.New()}
 }
 
 type browseUnusedRunner struct {
