@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
@@ -172,22 +173,26 @@ func (unitCheckpoint) SaveCheckpoint(context.Context, string, json.RawMessage) e
 }
 
 type unitSetup struct {
-	t        *testing.T
-	key      string
-	answers  map[string]string
-	events   []string
-	returned [][]byte
-	runs     int
+	t          *testing.T
+	key        string
+	executable string
+	answers    map[string]string
+	events     []string
+	returned   [][]byte
+	runs       int
 }
 
 func (p *unitSetup) LookupEnv(name string) (string, bool) {
 	if name != "LIGHTPANDA_PATH" {
 		p.t.Error("agent read model configuration from the environment")
 	}
-	return "/fixture/lightpanda", true
+	if p.executable == "" {
+		p.executable = filepath.Join(p.t.TempDir(), "lightpanda")
+	}
+	return p.executable, true
 }
-func (*unitSetup) FindExecutable(context.Context, string, *environment.DiscoveryScope) (string, error) {
-	return "/fixture/lightpanda", nil
+func (p *unitSetup) FindExecutable(context.Context, string, *environment.DiscoveryScope) (string, error) {
+	return p.executable, nil
 }
 
 type unitEnvironment struct{ *unitSetup }
