@@ -13,7 +13,7 @@ x-runtime: &runtime
 
 services:
   api-credentials:
-    image: ghcr.io/defos-ai/commander-api:${COMMANDER_VERSION:-v0.3.0}
+    image: ghcr.io/defos-ai/commander-api:${COMMANDER_VERSION:-v0.4.0}
     platform: linux/amd64
     user: "0:1000"
     network_mode: none
@@ -52,7 +52,7 @@ services:
       - api-credentials:/run/commander-api
 
   mcp-credentials:
-    image: ghcr.io/defos-ai/commander-mcp:${COMMANDER_VERSION:-v0.3.0}
+    image: ghcr.io/defos-ai/commander-mcp:${COMMANDER_VERSION:-v0.4.0}
     platform: linux/amd64
     user: "0:1000"
     read_only: true
@@ -84,7 +84,7 @@ services:
       - mcp-credentials:/run/commander
 
   volume-init:
-    image: ghcr.io/defos-ai/commander-controller:${COMMANDER_VERSION:-v0.3.0}
+    image: ghcr.io/defos-ai/commander-controller:${COMMANDER_VERSION:-v0.4.0}
     platform: linux/amd64
     user: "0:0"
     network_mode: none
@@ -101,7 +101,7 @@ services:
 
   controller:
     <<: *runtime
-    image: ghcr.io/defos-ai/commander-controller:${COMMANDER_VERSION:-v0.3.0}
+    image: ghcr.io/defos-ai/commander-controller:${COMMANDER_VERSION:-v0.4.0}
     platform: linux/amd64
     environment:
       <<: *environment
@@ -133,7 +133,7 @@ services:
     <<: *runtime
     # Keep MCP at PID 1 for its credentials lookup command.
     init: false
-    image: ghcr.io/defos-ai/commander-mcp:${COMMANDER_VERSION:-v0.3.0}
+    image: ghcr.io/defos-ai/commander-mcp:${COMMANDER_VERSION:-v0.4.0}
     platform: linux/amd64
     entrypoint:
       - /bin/sh
@@ -173,7 +173,7 @@ services:
     <<: *runtime
     # The credentials command reads the running API's environment at PID 1.
     init: false
-    image: ghcr.io/defos-ai/commander-api:${COMMANDER_VERSION:-v0.3.0}
+    image: ghcr.io/defos-ai/commander-api:${COMMANDER_VERSION:-v0.4.0}
     platform: linux/amd64
     entrypoint: ["/bin/sh", "-ec"]
     command:
@@ -211,7 +211,7 @@ services:
 
   ui:
     <<: *runtime
-    image: ghcr.io/defos-ai/commander-admin:${COMMANDER_VERSION:-v0.3.0}
+    image: ghcr.io/defos-ai/commander-admin:${COMMANDER_VERSION:-v0.4.0}
     platform: linux/amd64
     read_only: true
     environment:
@@ -229,7 +229,7 @@ services:
 
   playground:
     profiles: [playground]
-    image: ghcr.io/defos-ai/commander-playground:${COMMANDER_VERSION:-v0.3.0}
+    image: ghcr.io/defos-ai/commander-playground:${COMMANDER_VERSION:-v0.4.0}
     platform: linux/amd64
     init: true
     stdin_open: true

@@ -199,7 +199,7 @@ func (a *Login) Run(ctx context.Context, raw json.RawMessage) (result action.Res
 			defer budget.Resume()
 			waiting, stop := context.WithTimeout(ctx, 3*time.Minute)
 			defer stop()
-			return action.RequestSecret(waiting, name)
+			return action.RequestReusableSecret(waiting, name)
 		}
 		var err error
 		outcome, err = browserlogin.Run(ctx, browserlogin.Request{URL: input.URL, VerificationURL: input.VerificationURL, ExpectedText: input.ExpectedText}, func(ctx context.Context) (browserlogin.Credentials, error) {

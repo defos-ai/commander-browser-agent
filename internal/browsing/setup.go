@@ -140,7 +140,7 @@ func selectedModelKey(ctx context.Context, selection intelligence.ModelConfig) (
 		}
 		name = preset.SecretName
 	}
-	return action.RequestSecret(ctx, name)
+	return action.RequestReusableSecret(ctx, name)
 }
 
 func providerID(value string) (string, bool) {

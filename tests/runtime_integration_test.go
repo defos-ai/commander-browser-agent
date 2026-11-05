@@ -112,13 +112,13 @@ func (h *runtimeHarness) Binding() sessions.Binding {
 func (h *runtimeHarness) Call(name string, input map[string]any, binding sessions.Binding) messages.Message {
 	h.t.Helper()
 	input["session_scope"] = binding.ScopeID
-	work := messages.WorkContext{OperationID: binding.Creation.OperationID, TaskID: id.TaskID()}
+	taskID := id.TaskID()
 	if binding.Mode == sessions.Create {
-		work.TaskID = binding.Creation.TaskID
+		taskID = binding.Creation.TaskID
 	} else {
 		input["session_id"] = binding.ID
 	}
-	command, err := agentcommands.NewRunAction(binding.OwnerAgentID, agentcommands.ActionCall{ActionName: name, Input: runtimeJSON(h.t, input), Work: work, Session: &binding})
+	command, err := agentcommands.NewRunAction(binding.OwnerAgentID, agentcommands.ActionCall{ActionName: name, Input: runtimeJSON(h.t, input), OperationID: binding.Creation.OperationID, TaskID: taskID, Session: &binding})
 	runtimeCheck(h.t, err)
 	h.records[command.ID] = executions.Execution{Command: command, StartedAt: time.Now().UTC()}
 	runtimeCheck(h.t, (agentcommands.Client{Bus: h.bus}).Publish(h.t.Context(), command))
@@ -193,7 +193,7 @@ func (h *runtimeHarness) Answer(request messages.Message, answer string, origin 
 	}
 	now := time.Now().UTC()
 	if !found {
-		question = operations.Question{ID: id.New(), Status: operations.QuestionPending, TaskID: request.Work.TaskID, CommandID: payload.CommandID, Key: payload.Key, Text: payload.Text, Options: payload.Options, AskedAt: now, FallbackAt: now.Add(time.Minute)}
+		question = operations.Question{ID: id.New(), Status: operations.QuestionPending, TaskID: request.TaskID, CommandID: payload.CommandID, Key: payload.Key, Text: payload.Text, Options: payload.Options, AskedAt: now, FallbackAt: now.Add(time.Minute)}
 	}
 	if answer != "" {
 		by := operations.AnswerOperator
@@ -225,6 +225,7 @@ func (h *runtimeHarness) Secret(name, value string) {
 	}
 	request, err := controllerevents.DecodeSecretSyncRequested(message)
 	runtimeCheck(h.t, err)
+	defer clear(request.Default)
 	if request.Request.Key.Name != name {
 		h.t.Fatal("action requested a credential outside its selected purpose")
 	}
@@ -294,7 +295,7 @@ func (h *runtimeHarness) Persist(message messages.Message) agentevents.Checkpoin
 	request, err := controllerevents.DecodeCheckpointRequest(message)
 	runtimeCheck(h.t, err)
 	record, found := h.records[request.CommandID]
-	if !found || record.Command.AgentID != message.AgentID || record.Command.Work != message.Work {
+	if !found || record.Command.AgentID != message.AgentID || record.Command.OperationID != message.OperationID || record.Command.TaskID != message.TaskID {
 		h.t.Fatal("checkpoint did not belong to its dispatched execution")
 	}
 	response := agentevents.CheckpointResponse{CommandID: request.CommandID, Name: request.Name}

@@ -149,7 +149,7 @@
   URL query/fragment and redirects.
 - [Provider presets](browser/intelligence/provider.go) define fixed endpoints and
   provider-specific managed-secret names matching Playground. Do not import
-  Commander apps. Always use `action.RequestSecret` for the selected provider's
+  Commander apps. Always use `action.RequestReusableSecret` for the selected provider's
   canonical secret name. Other uses only the endpoint-bound managed name from
   the setup helper. Never send a standard provider's key to a custom endpoint or
   reuse an unscoped generic key after an endpoint change. Provider wire profiles
@@ -160,7 +160,14 @@
   Never cache plaintext keys in setup or discovery state. Session reuse skips
   questions and resolves credentials again. Setup is bounded to ten minutes,
   separately from active browsing, and cannot extend the outer task deadline.
-  Stay on Commander v0.3.0: do not invent v0.4.0 RequestSecret default arguments.
+  Commander v0.4.0 supports reusable `SecretRequestOptions.Default` bytes as
+  create-if-missing seeds; existing values, including expired ones, take
+  precedence. It has no lookup-only or lazy-default action API. Keep first-use
+  model questions until Commander can report an authoritative missing setting
+  before asking them; a timeout does not establish absence. Shared model setup
+  across agent instances needs that hook before question answers can seed
+  reusable settings without repeating questions. Do not seed placeholder values,
+  race questions against secret delivery, or add direct secret-store access.
 - Enable framework managed secrets in the host. Request missing keys on demand;
   RequiredSecrets must stay empty so setup can run first. Clear owned key bytes
   after closing the model client.
@@ -193,7 +200,7 @@
   tool or budget changes, secret entry or new external side effects.
   Clarification waits pause the active browsing timer, are individually bounded to
   three minutes, and never extend the task deadline. Preserve cancellation and
-  deadline causes. In Commander v0.3.0, canceling a waiter does not retract a saved
+  deadline causes. In Commander v0.4.0, canceling a waiter does not retract a saved
   pending question; do not claim automatic question cleanup or action restoration.
 - Keep non-action setup and active-time budget helpers under
   [internal/browsing/](internal/browsing/). The action owns one setup instance and
@@ -213,9 +220,10 @@
   Derive stable, purpose-specific username/password names from origin and profile;
   never accept arbitrary secret names from the model or action input. These names
   are a convention in Commander's shared namespace, not an access-control policy.
-  Use only v0.3.0 `action.RequestSecret`, with empty RequiredSecrets, bounded waits
-  and cancellation. Code challenges return `requires_challenge`; do not emulate
-  v0.4.0 transient semantics with a reusable code secret.
+  Use v0.4.0 `action.RequestReusableSecret`, with empty RequiredSecrets, bounded
+  waits and cancellation. Code challenges currently return `requires_challenge`;
+  a future challenge executor must use `action.RequestTransientSecret` with no
+  default and retain the same origin, privacy and uncertain-submission safeguards.
 - Support only unambiguous visible main-frame username/password POST forms with
   native submit controls. Validate form/action/method/target overrides before
   requesting values and again before filling. Guard all requests to the exact
@@ -280,7 +288,7 @@
 ## Browsing checkpoints
 
 - [internal/browsing/checkpoint.go](internal/browsing/checkpoint.go) uses the
-  execution-scoped v0.3.0 `action.LoadCheckpoint`/`SaveCheckpoint` exchange.
+  execution-scoped `action.LoadCheckpoint`/`SaveCheckpoint` exchange.
   The production host supplies it. Direct public-action calls without that
   provider remain usable but offer no durable checkpoints; actual provider
   failures must stop work rather than silently disabling persistence.
@@ -325,7 +333,7 @@
 
 - [compose.yaml](compose.yaml) follows the example agent's isolated FS demo:
   UID1000-owned state, one controller, loopback MCP/API/Admin ports 4283/4284/4285,
-  and optional Playground using the same `COMMANDER_VERSION` (default `v0.3.0`).
+  and optional Playground using the same `COMMANDER_VERSION` (default `v0.4.0`).
   Commander host images explicitly use linux/amd64; the agent image supports
   linux/amd64 and linux/arm64. Never run demo Playground with `--all-in-one`.
 - Start the local demo with `docker compose up --build --wait`, then
@@ -350,7 +358,7 @@
   Grant the new repository write access before publishing. Do not let the old
   monorepo workflow keep publishing the same version/stable tags.
 - The next standalone release is `v0.2.1`. Published Commander framework/providers
-  are pinned to `v0.3.0`, with no local `replace`. Agent release versions are
+  are pinned to `v0.4.0`, with no local `replace`. Agent release versions are
   independent of Commander versions. An ignored development workspace may map
   dependencies to local checkouts.
 - Manifest generation uses `framework/agent/manifest.Render` and its embedded
