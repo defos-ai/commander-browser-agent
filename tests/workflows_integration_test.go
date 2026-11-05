@@ -102,6 +102,8 @@ func TestBrowserAgentWorkflowAndAccountIsolation(t *testing.T) {
 		assertNoPrivate(t, fact, append(protected, questionText, answerText, site.URL, "42 samples")...)
 	}
 	checkProtectedScreenshots(t, h, bindings[0], []string{site.Accounts[0].Username, site.Accounts[0].Password, keys[0]})
+	// A durable result receipt cannot retract retries already queued in transit.
+	h.pending = append([]messages.Message{*h.records[command.ID].Result}, h.pending...)
 	other := fakes.NewModel(t, keys[1], func(turn intelligence.Turn) intelligence.Command {
 		if !strings.Contains(turn.Observation.Text, site.Accounts[1].Label) || strings.Contains(turn.Observation.Text, site.Accounts[0].Label) {
 			t.Error("account B inherited account A's browser state")

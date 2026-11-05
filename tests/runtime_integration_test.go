@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -169,7 +170,17 @@ func (h *runtimeHarness) Wait(match func(messages.Message) bool) messages.Messag
 }
 
 func (h *runtimeHarness) replay(request messages.Message) bool {
-	if request.Type != controllerevents.QuestionRequested && request.Type != controllerevents.SecretSyncRequested {
+	switch request.Type {
+	case controllerevents.QuestionRequested, controllerevents.SecretSyncRequested:
+	case controllerevents.ActionSucceeded, controllerevents.CommandFailed:
+		record, found := h.records[request.CorrelationID]
+		if !found || record.Result == nil {
+			return false
+		}
+		if !reflect.DeepEqual(*record.Result, request) {
+			h.t.Fatal("outcome retry conflicts with its accepted execution")
+		}
+	default:
 		return false
 	}
 	response, known := h.replies[request.ID]
@@ -263,8 +274,11 @@ func (h *runtimeHarness) Setup(command messages.Message, model *fakes.Model, key
 	h.t.Helper()
 	for _, setup := range []struct{ name, answer string }{{"browser_model_provider", "other"}, {"browser_model_name", "fixture-model"}, {"browser_model_url", model.URL}} {
 		request := h.Wait(func(m messages.Message) bool {
-			return m.Type == controllerevents.QuestionRequested || m.Type == controllerevents.CommandFailed || m.Type == controllerevents.ActionSucceeded
+			return m.CorrelationID == command.ID && (m.Type == controllerevents.QuestionRequested || m.Type == controllerevents.CommandFailed || m.Type == controllerevents.ActionSucceeded)
 		})
+		if request.Type != controllerevents.QuestionRequested {
+			h.t.Fatalf("model setup ended with %s before %s", request.Type, setup.name)
+		}
 		payload, err := controllerevents.DecodeQuestionRequest(request)
 		runtimeCheck(h.t, err)
 		if payload.Key != setup.name || payload.CommandID != command.ID || model.Calls() != 0 {
@@ -292,11 +306,19 @@ func (h *runtimeHarness) Result(command messages.Message) agent.ActionOutput {
 
 func (h *runtimeHarness) Accept(result messages.Message) {
 	record := h.records[result.CorrelationID]
+	if record.Result != nil {
+		if !h.replay(result) {
+			h.t.Fatal("accepted outcome lost its original receipt")
+		}
+		return
+	}
 	now := time.Now().UTC()
 	record.Result, record.CompletedAt = &result, &now
-	h.records[result.CorrelationID] = record
+	runtimeCheck(h.t, record.Validate())
 	receipt, err := agentevents.NewResultAccepted(result)
 	runtimeCheck(h.t, err)
+	h.records[result.CorrelationID] = record
+	h.replies[result.ID] = receipt
 	runtimeCheck(h.t, (agentevents.Client{Bus: h.bus}).Publish(h.t.Context(), receipt))
 }
 
