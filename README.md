@@ -4,7 +4,7 @@ A [Lightpanda](https://lightpanda.io/) browser agent for
 [DEFOS Commander](https://github.com/defos-ai/commander).
 
 - `browse` — navigate and interact with websites; return findings and evidence.
-- `login` — sign in with managed username/password credentials and reuse the session.
+- `login` — sign in with managed credentials and one-time codes; reuse the session.
 - `screenshot` — capture the current session as a text-only PNG.
 
 See [Commander quick start](https://github.com/defos-ai/commander#quick-start)

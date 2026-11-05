@@ -163,7 +163,7 @@ func (d *driver) close() error {
 func (d *driver) clearFields(ctx context.Context) {
 	bounded, cancel := context.WithTimeout(ctx, time.Second)
 	defer cancel()
-	_ = d.call(bounded, `const f=globalThis.__commanderLogin; if(f) { f.username.value=''; f.password.value=''; } return true;`, nil, nil)
+	_ = d.call(bounded, `for(const f of [globalThis.__commanderLogin,globalThis.__commanderLoginChallenge]) { if(f) for(const key of ['username','password','code']) {if(f[key]) f[key].value='';} } return true;`, nil, nil)
 }
 
 func (d *driver) navigate(ctx context.Context, address string) error {
@@ -272,6 +272,21 @@ func (d *driver) submit(ctx context.Context, credentials Credentials) (formState
 	arguments := map[string]string{"origin": d.origin, "username": string(credentials.Username), "password": string(credentials.Password)}
 	d.submitting.Store(true)
 	if d.call(bounded, submitLoginDOM, arguments, &state) != nil {
+		return state, errBrowser
+	}
+	return state, nil
+}
+
+func (d *driver) submitChallenge(ctx context.Context, code []byte) (formState, error) {
+	bounded, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+	if _, err := d.prepareWorld(bounded); err != nil {
+		return formState{}, errBrowser
+	}
+	var state formState
+	arguments := map[string]string{"origin": d.origin, "code": string(code)}
+	d.submitting.Store(true)
+	if d.call(bounded, submitChallengeDOM, arguments, &state) != nil {
 		return state, errBrowser
 	}
 	return state, nil

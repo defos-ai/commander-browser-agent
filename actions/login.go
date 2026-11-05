@@ -21,7 +21,7 @@ import (
 )
 
 const LoginName = "login"
-const LoginDescription = "Sign in through a standard username/password form using managed credentials, verify a same-site success condition and retain the Lightpanda session for reuse"
+const LoginDescription = "Sign in through supported username/password and one-time-code forms using managed secrets, verify a same-site success condition and retain the Lightpanda session for reuse"
 
 type LoginInput struct {
 	URL               string `json:"url"`
@@ -158,6 +158,10 @@ func (a *Login) Run(ctx context.Context, raw json.RawMessage) (result action.Res
 	if err != nil {
 		return action.Result{}, err
 	}
+	codeName, err := browsing.LoginCodeSecretName(input.URL, input.CredentialProfile)
+	if err != nil {
+		return action.Result{}, err
+	}
 	budget := browsing.NewBudget(ctx, time.Duration(input.TimeoutSeconds)*time.Second)
 	defer budget.Close()
 	var outcome browserlogin.Result
@@ -186,7 +190,7 @@ func (a *Login) Run(ctx context.Context, raw json.RawMessage) (result action.Res
 			runErr = errors.Join(runErr, finishErr)
 		}
 	}()
-	if err := action.Log(budget.Context(), "Starting managed password login"); err != nil {
+	if err := action.Log(budget.Context(), "Starting managed login"); err != nil {
 		return action.Result{}, err
 	}
 	var snapshot sessions.Session
@@ -194,20 +198,38 @@ func (a *Login) Run(ctx context.Context, raw json.RawMessage) (result action.Res
 		if err := checkpoints.Start(ctx, browsing.CheckpointLimits{TimeoutSeconds: input.TimeoutSeconds}, "login"); err != nil {
 			return err
 		}
-		request := func(ctx context.Context, name string) ([]byte, error) {
+		request := func(ctx context.Context, name string, secretType action.SecretType) ([]byte, error) {
 			budget.Pause()
 			defer budget.Resume()
 			waiting, stop := context.WithTimeout(ctx, 3*time.Minute)
 			defer stop()
+			if secretType == action.SecretTransient {
+				if err := action.Log(waiting, "Waiting for a one-time login code"); err != nil {
+					return nil, err
+				}
+				value, err := action.RequestTransientSecret(waiting, name)
+				// Request TTL/withdrawal can end before the action's wait. Keep a
+				// live session available for explicit continuation in that case.
+				if err != nil && waiting.Err() == nil {
+					clear(value)
+					return nil, action.ErrSecretUnavailable
+				}
+				return value, err
+			}
 			return action.RequestReusableSecret(waiting, name)
 		}
 		var err error
-		outcome, err = browserlogin.Run(ctx, browserlogin.Request{URL: input.URL, VerificationURL: input.VerificationURL, ExpectedText: input.ExpectedText}, func(ctx context.Context) (browserlogin.Credentials, error) {
-			username, err := request(ctx, usernameName)
+		outcome, err = browserlogin.Run(ctx, browserlogin.Request{
+			URL: input.URL, VerificationURL: input.VerificationURL, ExpectedText: input.ExpectedText,
+			OneTimeCode: func(ctx context.Context) ([]byte, error) {
+				return request(ctx, codeName, action.SecretTransient)
+			},
+		}, func(ctx context.Context) (browserlogin.Credentials, error) {
+			username, err := request(ctx, usernameName, action.SecretReusable)
 			if err != nil {
 				return browserlogin.Credentials{}, err
 			}
-			password, err := request(ctx, passwordName)
+			password, err := request(ctx, passwordName, action.SecretReusable)
 			if err != nil {
 				clear(username)
 				return browserlogin.Credentials{}, err
@@ -227,13 +249,13 @@ func (a *Login) Run(ctx context.Context, raw json.RawMessage) (result action.Res
 		if errors.Is(runErr, context.DeadlineExceeded) {
 			return result, context.DeadlineExceeded
 		}
-		return result, errors.New("managed password login could not be completed; inspect the session before retrying")
+		return result, errors.New("managed login could not be completed; inspect the session before retrying")
 	}
 	encoded, err := json.Marshal(LoginOutput{Engine: browserruntime.Lightpanda, Result: outcome})
 	if err != nil || validateBrowseJSON(a.validateOutput, encoded) != nil {
 		return result, errors.New("login result does not match its schema")
 	}
-	if err := action.Log(budget.Context(), "Managed password login finished; inspect its verification status"); err != nil {
+	if err := action.Log(budget.Context(), "Managed login finished; inspect its verification status"); err != nil {
 		return result, err
 	}
 	if err := budget.Err(); err != nil {

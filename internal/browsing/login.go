@@ -92,3 +92,13 @@ func LoginSecretNames(address, profile string) (username, password string, err e
 	base := "browser-login-" + profile + "-" + hex.EncodeToString(digest[:])
 	return base + "-username", base + "-password", nil
 }
+
+// LoginCodeSecretName labels a transient request, never a stored code.
+// Commander binds each request to its own execution and delivery identity.
+func LoginCodeSecretName(address, profile string) (string, error) {
+	username, _, err := LoginSecretNames(address, profile)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSuffix(username, "-username") + "-otp", nil
+}

@@ -236,6 +236,29 @@ func (h *runtimeHarness) Secret(name, value string) {
 	runtimeCheck(h.t, (agentevents.Client{Bus: h.bus}).Publish(h.t.Context(), delivery))
 }
 
+func (h *runtimeHarness) Transient(message messages.Message, value, code string) messages.Message {
+	h.t.Helper()
+	request, err := controllerevents.DecodeSecretSyncRequested(message)
+	runtimeCheck(h.t, err)
+	defer clear(request.Default)
+	record, found := h.records[request.Request.CommandID]
+	if !found || request.Default != nil || request.Request.Type != secrets.SecretTransient ||
+		request.Request.OperationID != record.Command.OperationID || request.Request.TaskID != record.Command.TaskID ||
+		request.Request.AgentID != record.Command.AgentID || request.Request.ExpiresAt.Sub(request.Request.RequestedAt) > 3*time.Minute {
+		h.t.Fatal("code request lost its execution identity, type or bounded lifetime")
+	}
+	var bytesValue []byte
+	if code == "" {
+		bytesValue = []byte(value)
+		defer clear(bytesValue)
+	}
+	delivery, err := agentevents.NewTransientSecretResponse(request.Request, bytesValue, code)
+	runtimeCheck(h.t, err)
+	h.replies[message.ID] = delivery
+	runtimeCheck(h.t, (agentevents.Client{Bus: h.bus}).Publish(h.t.Context(), delivery))
+	return delivery
+}
+
 func (h *runtimeHarness) Setup(command messages.Message, model *fakes.Model, key string) {
 	h.t.Helper()
 	for _, setup := range []struct{ name, answer string }{{"browser_model_provider", "other"}, {"browser_model_name", "fixture-model"}, {"browser_model_url", model.URL}} {

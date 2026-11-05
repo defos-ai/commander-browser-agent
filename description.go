@@ -7,7 +7,7 @@ import (
 
 // Responsibilities returns the default capabilities without starting an agent.
 func Responsibilities() []string {
-	return []string{"Browse websites with the agent's own model and report structured findings and evidence", "Sign in through supported password forms with managed credentials and retain browser state", "Capture protected text-only PNG snapshots of reusable browser sessions", "Maintain isolated Lightpanda browser sessions for Commander"}
+	return []string{"Browse websites with the agent's own model and report structured findings and evidence", "Sign in through supported password and one-time-code forms with managed secrets and retain browser state", "Capture protected text-only PNG snapshots of reusable browser sessions", "Maintain isolated Lightpanda browser sessions for Commander"}
 }
 
 // ActionDescriptions returns release metadata without schemas or discovery state.

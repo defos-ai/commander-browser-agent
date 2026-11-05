@@ -207,11 +207,11 @@
   delegates model/session selection to it; do not expose these helpers as actions
   or public package APIs. Preserve setup serialization and exact creation claims.
 
-## Managed password login
+## Managed login
 
 - [actions/login.go](actions/login.go) uses the host's session runner and the
   deterministic [browser/login/](browser/login/) executor; login never needs model
-  setup or gives credential values to a model. Require an exact-origin
+  setup or gives credentials or one-time codes to a model. Require an exact-origin
   `verification_url` and bounded non-secret `expected_text`. `verified` means that
   configured check matched, including existing state without new submission; do
   not infer universal authentication/account identity from HTTP 200 or a cookie.
@@ -221,14 +221,34 @@
   never accept arbitrary secret names from the model or action input. These names
   are a convention in Commander's shared namespace, not an access-control policy.
   Use v0.4.0 `action.RequestReusableSecret`, with empty RequiredSecrets, bounded
-  waits and cancellation. Code challenges currently return `requires_challenge`;
-  a future challenge executor must use `action.RequestTransientSecret` with no
-  default and retain the same origin, privacy and uncertain-submission safeguards.
+  waits and cancellation. Derive the transient code request's `-otp` name from
+  that same origin/profile convention; Commander binds each request to its own
+  execution and delivery, so a later request cannot reuse an earlier code.
+- A supported one-time-code form has one visible editable text/tel/number input
+  explicitly marked as a code, one native submit control and a same-origin POST
+  destination. Reject extra editable fields, visible passwords, multiple forms,
+  submit overrides, frames, shadow forms and CAPTCHA. Unsupported challenges
+  remain `requires_challenge`, including push/security-key flows and split inputs.
+  Inspect a retained same-origin challenge before verification navigation and
+  handle a password response's challenge before navigating away. A visible
+  challenge always takes precedence over a matching verification marker.
+- Request at most one code with `action.RequestTransientSecret`, without a
+  default, after inspecting the form. Pause active work time during the bounded
+  wait while preserving session/action/task cancellation and deadlines. A
+  request-specific expiry or withdrawal with a live caller returns
+  `requires_challenge`; it does not restart the request. Register the bounded code
+  for session redaction before filling and clear owned code and credential bytes
+  promptly. Revalidate the saved document URL, form/control identities and form
+  destination/configuration before entry and again after input/change events.
+  Submit a code at most once per execution. A rejected or still-visible code form
+  returns `requires_challenge`; uncertain submission returns `submission_uncertain`.
+  Explicit continuation uses a new execution and fresh transient delivery.
 - Support only unambiguous visible main-frame username/password POST forms with
   native submit controls. Validate form/action/method/target overrides before
   requesting values and again before filling. Guard all requests to the exact
-  origin while handling credentials, issue one browser submission command, and
-  never automatically retry uncertain effects. Lightpanda 1.0.2 can internally
+  origin while handling credentials/codes, issue at most one password submission
+  and one code submission command, and never automatically retry uncertain
+  effects. Lightpanda 1.0.2 can internally
   repeat a lost-response POST below CDP interception; test one owned CDP request
   and an uncertain outcome, not exactly-once website delivery. Stop loading before
   removing interception. Preserve the retained connection and independent session
@@ -246,8 +266,8 @@
   alone does not switch the account in an existing session.
 - Register submitted values with session-owned private keyed fingerprints before
   any DOM entry. Clear owned plaintext buffers on every path. Retain old
-  fingerprints across rotation/failed login/action cancellation, clone/isolate
-  state by session, redact before truncating observations, and clear only after
+  fingerprints across rotation/failed login/code challenges/action cancellation,
+  clone/isolate state by session, redact before truncating observations, and clear only after
   confirmed close. Never expose fingerprints in snapshots or store raw credential
   text for future browsing. Exact/common value redaction is bounded; do not claim
   universal protection against arbitrary website transformations.
@@ -297,7 +317,8 @@
   replay before questions, secrets or browser work. Checkpoints belong to one
   execution, not to a transferable browser snapshot or a session-global history.
 - Persist `browse_started` before initial page navigation and `login_started`
-  before deterministic login. Each `browse_step_01` through `_30` is saved after
+  before deterministic login, covering both password and code work. Each
+  `browse_step_01` through `_30` is saved after
   model command validation and before executing that command, including question
   publication. The fact records the pending command type, current reserved usage
   and preceding completed steps; it does not prove whether the pending effect ran.
@@ -412,6 +433,10 @@ navigation uncertainty, challenge/credential-wait cancellation, execution budget
 and grounded completion. Screenshot checks compare decoded pixels, source state
 and renderer cleanup. Focused tests cover catalog/ownership, managed setup/reuse,
 saved-checkpoint rejection and each supported provider's wire/secret boundaries.
+OTP workflows cover transient delivery, password-to-code and retained-page
+continuation, expiry/rejection without automatic retry, stale-response isolation,
+form mutation, uncertain submission, pending close and subsequent model/screenshot
+redaction.
 The production manager owns browser lifecycle; fixtures own HTTP pages only.
 CI compiles the race-enabled test binary in the Go bookworm image to match the
 runtime's glibc, then executes it as the runtime image's UID1000 with no external
