@@ -275,7 +275,7 @@ func (m *Manager) browser(ctx context.Context, item *entry, mode sessions.Mode, 
 		m.mu.Unlock()
 		return browser, nil
 	}
-	if mode != sessions.Create || item.engine != "" {
+	if mode != sessions.Open || item.engine != "" {
 		m.mu.Unlock()
 		return nil, errors.New("browser session has not been started")
 	}
@@ -342,12 +342,7 @@ func (m *Manager) Control(ctx context.Context, request sessions.Control) (sessio
 	if request.Method == "abandon" {
 		return sessions.Session{}, errors.New("abandonment is controller-owned")
 	}
-	if request.Creation != nil {
-		if err := (sessions.CreationClaim{Reference: request.Reference, Creation: *request.Creation}).Validate(); err != nil {
-			return sessions.Session{}, err
-		}
-	}
-	if request.Method == "close" && (request.Creation == nil || request.RequestID == "") {
+	if request.Method == "close" && (!request.HasCreation() || request.RequestID == "") {
 		return sessions.Session{}, errors.New("close requires its creation claim and request ID")
 	}
 	m.mu.Lock()
@@ -360,7 +355,7 @@ func (m *Manager) Control(ctx context.Context, request sessions.Control) (sessio
 		// A delayed close can precede its creation delivery even after another
 		// identity uses this scope. Retain its tombstone independently.
 		now := time.Now().UTC()
-		item = &entry{claim: sessions.CreationClaim{Reference: request.Reference, Creation: *request.Creation},
+		item = &entry{claim: request.Claim(),
 			gate: make(chan struct{}, 1), stopping: make(chan struct{}), cleanupDone: make(chan struct{}),
 			closing: true, explicit: true, cleaned: true,
 			view: sessions.Session{Reference: request.Reference, Kind: "browser", Label: "Browser session", State: "closed", Revision: 1, CreatedAt: now, UpdatedAt: now}}
@@ -373,7 +368,7 @@ func (m *Manager) Control(ctx context.Context, request sessions.Control) (sessio
 		m.mu.Unlock()
 		return sessions.Session{}, sessions.ErrUnknownSession
 	}
-	if item.claim.Reference != request.Reference || request.Creation != nil && item.claim.Creation != *request.Creation {
+	if item.claim.Reference != request.Reference || request.HasCreation() && item.claim != request.Claim() {
 		m.mu.Unlock()
 		return sessions.Session{}, sessions.ErrConflict
 	}

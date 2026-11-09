@@ -107,19 +107,19 @@ func newRuntime(t *testing.T) *runtimeHarness {
 
 func (h *runtimeHarness) Binding() sessions.Binding {
 	task := id.TaskID()
-	return sessions.Binding{Reference: sessions.Reference{ID: id.New(), OwnerAgentID: h.host.ID(), ScopeID: id.New()}, Mode: sessions.Create, Creation: sessions.ExecutionRef{OperationID: id.OperationID(), TaskID: task, CommandID: task}}
+	return sessions.Binding{Reference: sessions.Reference{ID: task, OwnerAgentID: h.host.ID(), ScopeID: task}, Mode: sessions.Open, OperationID: id.OperationID(), TaskID: task, CommandID: task}
 }
 
 func (h *runtimeHarness) Call(name string, input map[string]any, binding sessions.Binding) messages.Message {
 	h.t.Helper()
-	input["session_scope"] = binding.ScopeID
 	taskID := id.TaskID()
-	if binding.Mode == sessions.Create {
-		taskID = binding.Creation.TaskID
-	} else {
-		input["session_id"] = binding.ID
+	if _, dispatched := h.records[binding.CommandID]; !dispatched && name != "screenshot" {
+		taskID = binding.TaskID
 	}
-	command, err := agentcommands.NewRunAction(binding.OwnerAgentID, agentcommands.ActionCall{ActionName: name, Input: runtimeJSON(h.t, input), OperationID: binding.Creation.OperationID, TaskID: taskID, Session: &binding})
+	if name == "screenshot" {
+		binding.Mode = sessions.Use
+	}
+	command, err := agentcommands.NewRunAction(binding.OwnerAgentID, agentcommands.ActionCall{ActionName: name, Input: runtimeJSON(h.t, input), OperationID: binding.OperationID, TaskID: taskID, Session: &binding})
 	runtimeCheck(h.t, err)
 	h.records[command.ID] = executions.Execution{Command: command, StartedAt: time.Now().UTC()}
 	runtimeCheck(h.t, (agentcommands.Client{Bus: h.bus}).Publish(h.t.Context(), command))
@@ -323,8 +323,7 @@ func (h *runtimeHarness) Accept(result messages.Message) {
 }
 
 func (h *runtimeHarness) Control(binding sessions.Binding, method string) agent.AgentSnapshot {
-	creation := binding.Creation
-	command, err := messages.NewMessage(agentcommands.ControlSession, binding.OwnerAgentID, sessions.Control{Reference: binding.Reference, Creation: &creation, Method: method, RequestID: id.New()})
+	command, err := messages.NewMessage(agentcommands.ControlSession, binding.OwnerAgentID, sessions.Control{Reference: binding.Reference, CommandID: binding.CommandID, OperationID: binding.OperationID, TaskID: binding.TaskID, Method: method, RequestID: id.New()})
 	runtimeCheck(h.t, err)
 	runtimeCheck(h.t, (agentcommands.Client{Bus: h.bus}).Publish(h.t.Context(), command))
 	message := h.Wait(func(m messages.Message) bool { return m.CorrelationID == command.ID })

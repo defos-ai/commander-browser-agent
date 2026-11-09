@@ -46,7 +46,7 @@ func TestLoginTransientCodeWorkflowAndProtection(t *testing.T) {
 	if site.CodePosts.Load() != 1 {
 		t.Fatal("duplicate code delivery repeated the website submission")
 	}
-	binding.Mode = sessions.Reuse
+	binding.Mode = sessions.Open
 	assertOTPResult(t, h.Result(h.Call("login", otpInput(site), binding)), binding, "verified", false)
 	const key = "fixture-otp-model-key-9a12bc"
 	protected := []string{site.Accounts[0].Username, site.Accounts[0].Password, site.Code, key}
@@ -230,6 +230,6 @@ func seedCodePage(t *testing.T, h *runtimeHarness, site *fixtures.BrowserSite, p
 	})
 	runtimeCheck(t, err)
 	t.Cleanup(stop)
-	binding.Mode = sessions.Reuse
+	binding.Mode = sessions.Open
 	return binding, stop
 }

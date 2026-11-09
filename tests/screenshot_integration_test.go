@@ -124,7 +124,7 @@ func TestScreenshotRendererCancellationAndClose(t *testing.T) {
 			}
 			done := make(chan outcome, 1)
 			go func() {
-				result, err := executor.Run(ctx, runtimeJSON(t, map[string]any{"session_scope": binding.ScopeID, "session_id": binding.ID}))
+				result, err := executor.Run(ctx, runtimeJSON(t, map[string]any{}))
 				done <- outcome{result, err}
 			}()
 			select {

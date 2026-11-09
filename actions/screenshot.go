@@ -14,16 +14,12 @@ import (
 	"github.com/defos-ai/commander/framework/agent/environment"
 	actionmodel "github.com/defos-ai/commander/framework/domain/actions"
 	"github.com/defos-ai/commander/framework/domain/artifacts"
-	"github.com/defos-ai/commander/framework/domain/sessions"
-	"github.com/defos-ai/commander/framework/id"
 )
 
 const ScreenshotName = "screenshot"
-const ScreenshotDescription = "Capture a protected text-only PNG snapshot of an existing Lightpanda browser session"
+const ScreenshotDescription = "Capture a protected text-only PNG snapshot of the existing Lightpanda session bound by Commander. Continue a session-aware task or supply a trusted Commander binding; no session IDs belong in action input."
 
 type ScreenshotInput struct {
-	SessionScope   string `json:"session_scope"`
-	SessionID      string `json:"session_id"`
 	Viewport       string `json:"viewport,omitempty"`
 	TimeoutSeconds int    `json:"timeout_seconds,omitempty"`
 }
@@ -112,9 +108,8 @@ func (a *Screenshot) Run(ctx context.Context, raw json.RawMessage) (action.Resul
 		return action.Result{}, errors.New("screenshot input does not match its schema")
 	}
 	input := ScreenshotInput{Viewport: "desktop", TimeoutSeconds: 30}
-	if action.DecodeInput(raw, &input) != nil || !id.Valid(input.SessionScope) || !id.Valid(input.SessionID) ||
-		input.TimeoutSeconds < 5 || input.TimeoutSeconds > 60 {
-		return action.Result{}, errors.New("screenshot requires a valid existing session and bounded timeout")
+	if action.DecodeInput(raw, &input) != nil || input.TimeoutSeconds < 5 || input.TimeoutSeconds > 60 {
+		return action.Result{}, errors.New("screenshot requires a bounded timeout")
 	}
 	width, height := 1280, 720
 	switch input.Viewport {
@@ -124,9 +119,8 @@ func (a *Screenshot) Run(ctx context.Context, raw json.RawMessage) (action.Resul
 	default:
 		return action.Result{}, errors.New("screenshot viewport must be desktop or mobile")
 	}
-	binding, ok := action.SessionFromContext(ctx)
-	if !ok || binding.Validate() != nil || binding.Mode != sessions.Use || binding.ID != input.SessionID || binding.ScopeID != input.SessionScope {
-		return action.Result{}, errors.New("screenshot requires the matching framework-owned existing session binding")
+	if _, err := action.UseSession(ctx); err != nil {
+		return action.Result{}, err
 	}
 	budget, cancel := context.WithTimeout(ctx, time.Duration(input.TimeoutSeconds)*time.Second)
 	defer cancel()
@@ -174,11 +168,9 @@ func (a *Screenshot) Run(ctx context.Context, raw json.RawMessage) (action.Resul
 
 const screenshotInputSchema = `{
   "type":"object","additionalProperties":false,"properties":{
-    "session_scope":{"type":"string","pattern":"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"},
-    "session_id":{"type":"string","pattern":"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"},
     "viewport":{"type":"string","enum":["desktop","mobile"],"default":"desktop","description":"Size of the protected text rendering: desktop 1280x720 or mobile 390x844. These are viewport sizes, not device emulation."},
     "timeout_seconds":{"type":"integer","minimum":5,"maximum":60,"default":30}
-  },"required":["session_scope","session_id"]
+  }
 }`
 
 const screenshotOutputSchema = `{

@@ -13,8 +13,8 @@ func Responsibilities() []string {
 // ActionDescriptions returns release metadata without schemas or discovery state.
 func ActionDescriptions() []actionmodel.Action {
 	return []actionmodel.Action{
-		{Name: actions.BrowseName, Description: actions.BrowseDescription, SessionMode: "create"},
-		{Name: actions.LoginName, Description: actions.LoginDescription, SessionMode: "create"},
+		{Name: actions.BrowseName, Description: actions.BrowseDescription, SessionMode: "open"},
+		{Name: actions.LoginName, Description: actions.LoginDescription, SessionMode: "open"},
 		{Name: actions.ScreenshotName, Description: actions.ScreenshotDescription, SessionMode: "use"},
 	}
 }

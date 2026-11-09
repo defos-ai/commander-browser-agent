@@ -23,11 +23,10 @@ import (
 	actionmodel "github.com/defos-ai/commander/framework/domain/actions"
 	"github.com/defos-ai/commander/framework/domain/artifacts"
 	"github.com/defos-ai/commander/framework/domain/sessions"
-	"github.com/defos-ai/commander/framework/id"
 )
 
 const BrowseName = "browse"
-const BrowseDescription = "Navigate, interact with and extract structured findings from websites using the browser agent's own model, non-secret clarification questions and an isolated Lightpanda session"
+const BrowseDescription = "Open or reuse a Commander-bound Lightpanda session to navigate, interact with and extract structured findings using the browser agent's own model and non-secret clarification questions. Commander assigns new sessions and carries them through task continuations; no session IDs belong in action input."
 
 // BrowserRunner is the shared host-owned browser session runtime. Action
 // constructors accept the production dependency without creating another owner.
@@ -42,8 +41,6 @@ type browserSetupRunner interface {
 type BrowseInput struct {
 	Objective           string   `json:"objective"`
 	URL                 string   `json:"url"`
-	SessionScope        string   `json:"session_scope"`
-	SessionID           string   `json:"session_id,omitempty"`
 	AllowedHosts        []string `json:"allowed_hosts,omitempty"`
 	MaxSteps            int      `json:"max_steps,omitempty"`
 	TimeoutSeconds      int      `json:"timeout_seconds,omitempty"`
@@ -80,7 +77,7 @@ func NewBrowse(runner BrowserRunner) *Browse {
 	}
 	return &Browse{
 		Base: action.NewBase(actionmodel.Action{
-			Name: BrowseName, Description: BrowseDescription, SessionMode: "create",
+			Name: BrowseName, Description: BrowseDescription, SessionMode: "open",
 			InputSchema: json.RawMessage(browseInputSchema), OutputSchema: json.RawMessage(browseOutputSchema),
 		}),
 		runner: runner, validateInput: input.Validate, validateOutput: output.Validate,
@@ -145,6 +142,9 @@ func (a *Browse) Run(ctx context.Context, raw json.RawMessage) (result action.Re
 	if err := input.validate(); err != nil {
 		return action.Result{}, err
 	}
+	if _, err := action.OpenSession(ctx); err != nil {
+		return action.Result{}, err
+	}
 	// Operator-first setup has its own bound. It must not consume the active
 	// browsing allowance, and it never extends the controller's task deadline.
 	setupCtx, stopSetup := context.WithTimeout(ctx, 10*time.Minute)
@@ -157,7 +157,7 @@ func (a *Browse) Run(ctx context.Context, raw json.RawMessage) (result action.Re
 		if err != nil {
 			return err
 		}
-		modelConfiguration, key, err = a.setup.Prepare(ctx, input.SessionScope, input.SessionID)
+		modelConfiguration, key, err = a.setup.Prepare(ctx)
 		return err
 	}
 	var err error
@@ -291,9 +291,6 @@ func (a *Browse) Run(ctx context.Context, raw json.RawMessage) (result action.Re
 func (input *BrowseInput) validate() error {
 	if !utf8.ValidString(input.Objective) || strings.TrimSpace(input.Objective) == "" || utf8.RuneCountInString(input.Objective) > 4000 {
 		return errors.New("objective must contain between 1 and 4000 nonblank characters")
-	}
-	if !id.Valid(input.SessionScope) || input.SessionID != "" && !id.Valid(input.SessionID) {
-		return errors.New("browse requires canonical session_scope and session_id values")
 	}
 	if input.MaxSteps < 1 || input.MaxSteps > 30 || input.TimeoutSeconds < 5 || input.TimeoutSeconds > 180 || input.MaxCompletionTokens < 1024 || input.MaxCompletionTokens > 32768 {
 		return errors.New("browse execution budgets are outside their supported limits")
@@ -438,13 +435,11 @@ const browseInputSchema = `{
   "properties":{
     "objective":{"type":"string","minLength":1,"maxLength":4000},
     "url":{"type":"string","minLength":1,"maxLength":4096},
-    "session_scope":{"type":"string","pattern":"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"},
-    "session_id":{"type":"string","pattern":"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"},
     "allowed_hosts":{"type":"array","maxItems":8,"uniqueItems":true,"default":["*"],"description":"Omitted or empty allows all hostnames, equivalent to [\"*\"]. Otherwise list exact permitted hostnames, including the starting URL hostname. The wildcard must stand alone.","items":{"type":"string","minLength":1,"maxLength":253}},
     "max_steps":{"type":"integer","minimum":1,"maximum":30,"default":12},
     "timeout_seconds":{"type":"integer","minimum":5,"maximum":180,"default":120},
     "max_completion_tokens":{"type":"integer","minimum":1024,"maximum":32768,"default":8192}
-  }, "required":["objective","url","session_scope"]
+  }, "required":["objective","url"]
 }`
 
 const browseOutputSchema = `{

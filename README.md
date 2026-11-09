@@ -1,7 +1,7 @@
 # Commander browser agent
 
 A [Lightpanda](https://lightpanda.io/) browser agent for
-[DEFOS Commander](https://github.com/defos-ai/commander).
+[DEFOS Commander v0.4.1](https://github.com/defos-ai/commander).
 
 - `browse` — navigate and interact with websites; return findings and evidence.
 - `login` — sign in with managed credentials and one-time codes; reuse the session.

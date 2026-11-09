@@ -129,7 +129,7 @@ func (c *Checkpoints) Finish(ctx context.Context, status string, progress *intel
 }
 
 func (c *Checkpoints) fact(phase string) checkpointFact {
-	return checkpointFact{Version: 1, Action: c.action, Engine: "lightpanda", Session: c.claim,
+	return checkpointFact{Version: 2, Action: c.action, Engine: "lightpanda", Session: c.claim,
 		Phase: phase, Limits: c.limits, Recovery: "inspect_session_before_explicit_continuation", ResultDelivery: "unconfirmed"}
 }
 

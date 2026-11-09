@@ -35,16 +35,14 @@ func modelSecretName(address string) string {
 
 // Prepare resolves model choices and a current managed key for the bound session.
 // The caller owns the returned key bytes and must clear them after use.
-func (s *Setup) Prepare(ctx context.Context, scopeID, sessionID string) (intelligence.ModelConfig, []byte, error) {
+func (s *Setup) Prepare(ctx context.Context) (intelligence.ModelConfig, []byte, error) {
 	var empty intelligence.ModelConfig
 	if err := ctx.Err(); err != nil {
 		return empty, nil, err
 	}
-	binding, ok := action.SessionFromContext(ctx)
-	if !ok || binding.Validate() != nil || scopeID != binding.ScopeID ||
-		binding.Mode == sessions.Create && sessionID != "" ||
-		binding.Mode == sessions.Reuse && sessionID != binding.ID {
-		return empty, nil, errors.New("model setup requires the matching framework browser session binding")
+	binding, err := action.OpenSession(ctx)
+	if err != nil {
+		return empty, nil, err
 	}
 	s.mu.Lock()
 	if s.entries == nil {

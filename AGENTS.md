@@ -90,10 +90,24 @@
   per agent unless the caller provides a Commander sessions provider. Constructors
   and `Prepare` open no browsers. `Run` requires the exact framework-owned session
   binding and creation claim from `action.SessionFromContext`.
-- Action input `session_scope` is a caller-chosen UUID for a logical browser slot.
-  Omit `session_id` to create through `browse` or `login`; pass the returned
-  `session.id` as `session_id` with the same scope to reuse the page and
-  authentication. Scope alone does not reuse a session. `screenshot` requires both.
+- `browse` and `login` declare `session_mode: open` and use
+  `action.OpenSession(ctx)`; `screenshot` declares `use` and uses
+  `action.UseSession(ctx)`. Business inputs contain no `session_scope` or
+  `session_id`; old routing fields are rejected. Commander allocates a new root
+  open session from its accepted command/task identity, with no mission session
+  policy or pre-existing runtime session required.
+- A direct session-aware parent continuation inherits that exact session and
+  original creation claim. Child `open` actions reuse it; child `use` actions also
+  require a connected resource. A stateless parent breaks this chain. Independent
+  root opens create independent sessions; never infer reuse from the latest or
+  idle session. Trusted Go callers may supply `ActionCall.Session` through
+  Commander's dispatch preparation for explicit standalone reuse. Public operation
+  assignment has no session selector in business input. Removed mission
+  `policies.session` must not be restored.
+- Creation claims use flat `CommandID`, `OperationID` and `TaskID`. Command ID is
+  required; operation/task IDs are an optional pair and may differ from the
+  creation command. Retain and compare the full original claim. Controls use
+  `HasCreation()`/`Claim()` and close requires the creation identity and request ID.
 - Actions select `lightpanda` internally; do not require an engine input when only
   one engine is supported. The session runtime still rejects other engines. Keep
   its process, CDP connection and page for reuse. Every session has its own private
@@ -160,7 +174,7 @@
   Never cache plaintext keys in setup or discovery state. Session reuse skips
   questions and resolves credentials again. Setup is bounded to ten minutes,
   separately from active browsing, and cannot extend the outer task deadline.
-  Commander v0.4.0 supports reusable `SecretRequestOptions.Default` bytes as
+  Commander v0.4.1 supports reusable `SecretRequestOptions.Default` bytes as
   create-if-missing seeds; existing values, including expired ones, take
   precedence. It has no lookup-only or lazy-default action API. Keep first-use
   model questions until Commander can report an authoritative missing setting
@@ -200,7 +214,7 @@
   tool or budget changes, secret entry or new external side effects.
   Clarification waits pause the active browsing timer, are individually bounded to
   three minutes, and never extend the task deadline. Preserve cancellation and
-  deadline causes. In Commander v0.4.0, canceling a waiter does not retract a saved
+  deadline causes. In Commander v0.4.1, canceling a waiter does not retract a saved
   pending question; do not claim automatic question cleanup or action restoration.
 - Keep non-action setup and active-time budget helpers under
   [internal/browsing/](internal/browsing/). The action owns one setup instance and
@@ -220,7 +234,7 @@
   Derive stable, purpose-specific username/password names from origin and profile;
   never accept arbitrary secret names from the model or action input. These names
   are a convention in Commander's shared namespace, not an access-control policy.
-  Use v0.4.0 `action.RequestReusableSecret`, with empty RequiredSecrets, bounded
+  Use v0.4.1 `action.RequestReusableSecret`, with empty RequiredSecrets, bounded
   waits and cancellation. Derive the transient code request's `-otp` name from
   that same origin/profile convention; Commander binds each request to its own
   execution and delivery, so a later request cannot reuse an earlier code.
@@ -275,7 +289,7 @@
 ## Protected text screenshots
 
 - [actions/screenshot.go](actions/screenshot.go) is use-only: require the exact
-  framework `use` binding, existing session ID and scope. Do not navigate, create
+  framework `use` binding with its existing session reference. Do not navigate, create
   an automation session, ask model questions or request credentials for capture.
   Keep the host's production runner and preserve explicit empty action catalogs.
 - [browser/screenshot/](browser/screenshot/) reads the retained main page using a
@@ -330,6 +344,8 @@
   persist objective text, URLs, DOM, full model commands/transcripts, question text or
   answers, provider settings, cookies, credential names/values or artifact bytes.
   Findings and evidence content remain in the final results and artifacts.
+  Fact version 2 records Commander's flat creation claim. A saved start fence of
+  any version still blocks replay; old facts are never rewritten or restored.
 - Every checkpoint wait is bounded to five seconds and preserves the execution
   and session lifetime. The initial load belongs to setup; writes count against
   active work time. A save error or cancellation may follow a committed write;
@@ -354,7 +370,7 @@
 
 - [compose.yaml](compose.yaml) follows the example agent's isolated FS demo:
   UID1000-owned state, one controller, loopback MCP/API/Admin ports 4283/4284/4285,
-  and optional Playground using the same `COMMANDER_VERSION` (default `v0.4.0`).
+  and optional Playground using the same `COMMANDER_VERSION` (default `v0.4.1`).
   Commander host images explicitly use linux/amd64; the agent image supports
   linux/amd64 and linux/arm64. Never run demo Playground with `--all-in-one`.
 - Start the local demo with `docker compose up --build --wait`, then
@@ -379,7 +395,7 @@
   Grant the new repository write access before publishing. Do not let the old
   monorepo workflow keep publishing the same version/stable tags.
 - The next standalone release is `v0.2.1`. Published Commander framework/providers
-  are pinned to `v0.4.0`, with no local `replace`. Agent release versions are
+  are pinned to `v0.4.1`, with no local `replace`. Agent release versions are
   independent of Commander versions. An ignored development workspace may map
   dependencies to local checkouts.
 - Manifest generation uses `framework/agent/manifest.Render` and its embedded
@@ -433,6 +449,9 @@ navigation uncertainty, challenge/credential-wait cancellation, execution budget
 and grounded completion. Screenshot checks compare decoded pixels, source state
 and renderer cleanup. Focused tests cover catalog/ownership, managed setup/reuse,
 saved-checkpoint rejection and each supported provider's wire/secret boundaries.
+Session regressions cover routing-free root allocation, exact direct-parent
+continuation binding, standalone flat claims, fresh browse cookie continuity,
+and rejection of unbound/foreign/closed dispatches before browser or model work.
 OTP workflows cover transient delivery, password-to-code and retained-page
 continuation, expiry/rejection without automatic retry, stale-response isolation,
 form mutation, uncertain submission, pending close and subsequent model/screenshot

@@ -17,19 +17,16 @@ import (
 	"github.com/defos-ai/commander/framework/agent/environment"
 	actionmodel "github.com/defos-ai/commander/framework/domain/actions"
 	"github.com/defos-ai/commander/framework/domain/sessions"
-	"github.com/defos-ai/commander/framework/id"
 )
 
 const LoginName = "login"
-const LoginDescription = "Sign in through supported username/password and one-time-code forms using managed secrets, verify a same-site success condition and retain the Lightpanda session for reuse"
+const LoginDescription = "Open or reuse a Commander-bound Lightpanda session to sign in through supported username/password and one-time-code forms using managed secrets, verify a same-site success condition and retain the session for task continuations. No session IDs belong in action input."
 
 type LoginInput struct {
 	URL               string `json:"url"`
 	VerificationURL   string `json:"verification_url"`
 	ExpectedText      string `json:"expected_text"`
 	CredentialProfile string `json:"credential_profile,omitempty"`
-	SessionScope      string `json:"session_scope"`
-	SessionID         string `json:"session_id,omitempty"`
 	TimeoutSeconds    int    `json:"timeout_seconds,omitempty"`
 }
 
@@ -56,7 +53,7 @@ func NewLogin(runner BrowserRunner) *Login {
 		panic("invalid built-in login output schema: " + err.Error())
 	}
 	return &Login{
-		Base: action.NewBase(actionmodel.Action{Name: LoginName, Description: LoginDescription, SessionMode: "create",
+		Base: action.NewBase(actionmodel.Action{Name: LoginName, Description: LoginDescription, SessionMode: "open",
 			InputSchema: json.RawMessage(loginInputSchema), OutputSchema: json.RawMessage(loginOutputSchema)}),
 		runner: runner, validateInput: input.Validate, validateOutput: output.Validate,
 	}
@@ -117,10 +114,8 @@ func (a *Login) Run(ctx context.Context, raw json.RawMessage) (result action.Res
 	if err := input.validate(); err != nil {
 		return action.Result{}, err
 	}
-	binding, ok := action.SessionFromContext(ctx)
-	if !ok || binding.Validate() != nil || (binding.Mode != sessions.Create && binding.Mode != sessions.Reuse) || binding.ScopeID != input.SessionScope ||
-		binding.Mode == sessions.Create && input.SessionID != "" || binding.Mode == sessions.Reuse && input.SessionID != binding.ID {
-		return action.Result{}, errors.New("login requires the matching framework browser session binding")
+	if _, err := action.OpenSession(ctx); err != nil {
+		return action.Result{}, err
 	}
 	setup, stopSetup := context.WithTimeout(ctx, 10*time.Minute)
 	var checkpoints *browsing.Checkpoints
@@ -280,9 +275,6 @@ func (input LoginInput) validate() error {
 	if input.CredentialProfile != "" && !browsing.ValidLoginProfile(input.CredentialProfile) {
 		return errors.New("credential_profile must be a lowercase non-secret alias of at most 32 characters")
 	}
-	if !id.Valid(input.SessionScope) || input.SessionID != "" && !id.Valid(input.SessionID) {
-		return errors.New("login requires canonical session_scope and session_id values")
-	}
 	if input.TimeoutSeconds < 5 || input.TimeoutSeconds > 180 {
 		return errors.New("login timeout_seconds must be between 5 and 180")
 	}
@@ -295,10 +287,8 @@ const loginInputSchema = `{
     "verification_url":{"type":"string","minLength":1,"maxLength":4096},
     "expected_text":{"type":"string","minLength":1,"maxLength":256,"description":"Non-secret visible marker on the verification page used to check sign-in."},
     "credential_profile":{"type":"string","pattern":"^[a-z][a-z0-9_-]{0,31}$"},
-    "session_scope":{"type":"string","pattern":"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"},
-    "session_id":{"type":"string","pattern":"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"},
     "timeout_seconds":{"type":"integer","minimum":5,"maximum":180,"default":120}
-  },"required":["url","verification_url","expected_text","session_scope"]
+  },"required":["url","verification_url","expected_text"]
 }`
 
 const loginOutputSchema = `{

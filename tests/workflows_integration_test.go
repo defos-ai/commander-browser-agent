@@ -4,6 +4,7 @@ package browser_test
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
@@ -11,15 +12,104 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/chromedp/cdproto/cdp"
+	"github.com/chromedp/cdproto/network"
+	"github.com/chromedp/chromedp"
 	"github.com/defos-ai/commander-browser-agent/actions"
 	"github.com/defos-ai/commander-browser-agent/browser/intelligence"
 	"github.com/defos-ai/commander-browser-agent/tests/fakes"
 	"github.com/defos-ai/commander-browser-agent/tests/fixtures"
+	"github.com/defos-ai/commander/framework/agent/action"
+	agentcommands "github.com/defos-ai/commander/framework/comms/clients/agent/commands"
 	controllerevents "github.com/defos-ai/commander/framework/comms/clients/controller/events"
 	"github.com/defos-ai/commander/framework/comms/messages"
+	"github.com/defos-ai/commander/framework/domain/executions"
 	"github.com/defos-ai/commander/framework/domain/sessions"
 )
+
+func TestBrowserAgentCreatesReusesAndClosesSession(t *testing.T) {
+	h, site := newRuntime(t), fixtures.NewBrowser(t)
+	binding := h.Binding()
+	const key, cookie = "fixture-session-model-key-712a", "fixture-cookie-c91fe3"
+	model := fakes.NewModel(t, key, groundedFinish, cookie)
+	input := map[string]any{"objective": "Read the study.", "url": site.URL + "/details"}
+	command := h.Call("browse", input, binding)
+	h.Setup(command, model, key)
+	first := h.Result(command)
+	if first.Session == nil || first.Session.Reference != binding.Reference || first.Session.State != "connected" {
+		t.Fatal("browse did not create and retain its assigned browser session")
+	}
+	var targetID string
+	_, err := h.manager.Run(action.WithSession(t.Context(), &binding), h.options, func(ctx context.Context) error {
+		targetID = string(chromedp.FromContext(ctx).Target.TargetID)
+		return network.SetCookie("session_probe", cookie).WithURL(site.URL).WithHTTPOnly(true).Do(cdp.WithExecutor(ctx, chromedp.FromContext(ctx).Target))
+	})
+	runtimeCheck(t, err)
+	questions := len(h.questions)
+	secondCommand := h.Call("browse", input, binding)
+	second := h.Result(secondCommand)
+	if secondCommand.TaskID == command.TaskID || second.Session == nil || second.Session.Reference != binding.Reference || len(h.questions) != questions || model.Calls() != 4 {
+		t.Fatal("later open replaced session identity, repeated setup or replayed model work")
+	}
+	_, err = h.manager.Run(action.WithSession(t.Context(), &binding), h.options, func(ctx context.Context) error {
+		cookies, err := network.GetCookies().WithURLs([]string{site.URL}).Do(cdp.WithExecutor(ctx, chromedp.FromContext(ctx).Target))
+		found := false
+		for _, value := range cookies {
+			found = found || value.Name == "session_probe" && value.Value == cookie && value.HTTPOnly
+		}
+		if err == nil && (!found || string(chromedp.FromContext(ctx).Target.TargetID) != targetID) {
+			t.Error("later open changed its page target or lost its synthetic private cookie")
+		}
+		return err
+	})
+	runtimeCheck(t, err)
+	closed := h.Control(binding, "close")
+	if len(closed.Sessions) != 1 || closed.Sessions[0].State != "closed" {
+		t.Fatal("close did not retain its terminal session reference")
+	}
+	command = h.Call("browse", input, binding)
+	failed := h.Wait(func(m messages.Message) bool {
+		return m.CorrelationID == command.ID && (m.Type == controllerevents.CommandFailed || m.Type == controllerevents.ActionSucceeded)
+	})
+	if failed.Type != controllerevents.CommandFailed || model.Calls() != 4 || site.Posts.Load() != 0 {
+		t.Fatal("closed-session open resumed work or synthetic continuity submitted credentials")
+	}
+	h.Accept(failed)
+}
+
+func TestBrowserAgentRejectsUnboundForeignAndClosedSessions(t *testing.T) {
+	h := newRuntime(t)
+	for _, scenario := range []string{"unbound", "foreign", "closed"} {
+		binding := h.Binding()
+		assigned := &binding
+		if scenario == "unbound" {
+			assigned = nil
+		} else if scenario == "foreign" {
+			binding.OwnerAgentID = "browser-agent-89abcdef"
+		} else {
+			runtimeCheck(t, h.manager.Prepare(t.Context(), binding.Claim()))
+			h.Control(binding, "close")
+		}
+		command, err := agentcommands.NewRunAction(h.host.ID(), agentcommands.ActionCall{ActionName: "browse", Input: runtimeJSON(t, map[string]any{"objective": "Read the page", "url": "https://example.test/"}), OperationID: binding.OperationID, TaskID: binding.TaskID, Session: assigned})
+		runtimeCheck(t, err)
+		h.records[command.ID] = executions.Execution{Command: command, StartedAt: time.Now().UTC()}
+		runtimeCheck(t, (agentcommands.Client{Bus: h.bus}).Publish(t.Context(), command))
+		result := h.Wait(func(m messages.Message) bool {
+			return m.CorrelationID == command.ID && (m.Type == controllerevents.CommandFailed || m.Type == controllerevents.ActionSucceeded)
+		})
+		if result.Type != controllerevents.CommandFailed {
+			t.Fatal("host accepted an unbound, foreign or closed browser identity")
+		}
+		h.Accept(result)
+	}
+	for _, event := range h.history {
+		if event.Type == controllerevents.QuestionRequested || event.Type == controllerevents.SecretSyncRequested {
+			t.Fatal("rejected session reached model setup or managed credentials")
+		}
+	}
+}
 
 func TestBrowserAgentWorkflowAndAccountIsolation(t *testing.T) {
 	h, site := newRuntime(t), fixtures.NewBrowser(t)
@@ -286,7 +376,7 @@ func loginAccount(t *testing.T, h *runtimeHarness, binding sessions.Binding, sit
 	for _, fact := range h.Facts(command) {
 		assertNoPrivate(t, fact, account.Username, account.Password, site.URL, account.Label)
 	}
-	binding.Mode = sessions.Reuse
+	binding.Mode = sessions.Open
 	return binding
 }
 
