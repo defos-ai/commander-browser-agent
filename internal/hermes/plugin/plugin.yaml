@@ -1,0 +1,7 @@
+name: commander-browser
+version: 0.1.0
+description: Commander admission for native browser execution
+author: Commander
+license: MIT
+capabilities:
+  - tools.override

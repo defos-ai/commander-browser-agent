@@ -1,0 +1,12 @@
+Hermes Agent v0.23.1
+Copyright (c) 2025 Nous Research
+License: MIT (see LICENSE).
+Upstream source: https://github.com/NousResearch/hermes-agent/tree/3b421578588243f920886e6fe79a6faa87ea026e
+Source archive: https://github.com/NousResearch/hermes-agent/archive/3b421578588243f920886e6fe79a6faa87ea026e.tar.gz
+Archive SHA256: 2525046f165880c22f177f2214c8da3e26c58cb0aeab5bd09aad940556538897
+
+The container includes the unmodified source and frozen core dependencies from
+its uv.lock, including browser-harness 0.1.13. Dependency license notices remain
+in their installed Python distribution metadata. CPython's license remains in
+/usr/local/lib/python3.14/LICENSE.txt. Runtime packaging does not activate a
+Hermes action backend.

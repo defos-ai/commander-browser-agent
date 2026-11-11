@@ -83,6 +83,21 @@
   renderer in output/artifact metadata; desktop/mobile refer to viewport sizes,
   not pixel-accurate page design or full mobile-device emulation. Do not restore
   the old capture/accessibility actions to supply this capability.
+- The image also stages unmodified Hermes v0.23.1 at commit
+  `3b421578588243f920886e6fe79a6faa87ea026e` under `/opt/hermes`, with CPython
+  3.14.10 and the frozen core lockfile (browser-harness 0.1.13). This packaging
+  does not activate a Hermes action backend. Keep model configuration and keys
+  out of image settings. No runtime dependency downloads or lazy installs.
+  [docker/fetch-hermes.sh](docker/fetch-hermes.sh) pins the archive and both uv
+  binaries; preserve the license and attribution in [third_party/hermes/](third_party/hermes/).
+  The offline readiness command is `/opt/hermes/.venv/bin/python -I
+  /usr/local/lib/commander-browser/hermes/check.py`. It checks the packaged
+  identity and imports using a temporary private home, without starting an
+  agent, browser or model request. Native Go release binaries do not embed this
+  Python runtime; discovery and host integration are separate migration work.
+- Local validation must stay within a combined 3 CPUs and 3,000,000,000 bytes
+  of RAM, with swap disabled. Use a resource-limited Docker-container Buildx
+  builder and stop it before running a container with the full allowance.
 
 ## Reusable browser sessions
 
@@ -136,6 +151,29 @@
 
 ## Intelligence and model access
 
+- The approved migration uses Hermes's native Python browser tools for reasoning
+  and automation, with a thin [private host bridge](internal/hermes/). This
+  deliberately broadens the old typed-command policy: Python has filesystem,
+  network and raw CDP capabilities. The worker is not an OS sandbox. Dedicated
+  homes and exact tool routing do not isolate hostile Python from other resources
+  accessible to the same OS user; deployment isolation remains a cutover gate.
+  Do not add a second reasoning loop, fork upstream, parse terminal traces, or
+  restore the discarded evaluation files.
+- Keep the current Go actions active until the new integration passes its
+  Commander-bound session, managed-secret, screenshot and checkpoint workflows.
+  The private bridge is migration infrastructure, not an additional action or an
+  activated fallback. Use public plugin overrides with explicit grants; refuse
+  startup if required wrappers or the advertised catalog do not match. Admission
+  checks belong inside the wrapper handler before native dispatch, since
+  middleware exceptions can fail open. A native Python call is a batch: its
+  checkpoint cannot confirm each operation or prevent every internal retry.
+- Private worker messages use bounded, correlated frames over inherited pipes;
+  raw stdout/stderr and returned Hermes transcripts never become protocol data.
+  Questions and results must be bounded and redact known values. This protocol
+  redaction alone does not fix provider-key echoes in Hermes's replayed model
+  context. Prove that separate boundary before cutover. Native browser children
+  may escape the worker process group; uncertain forced cleanup must retain lost
+  ownership and private state, never report a confirmed close or restoration.
 - [browser/intelligence/](browser/intelligence/) implements an in-process Go loop
   on the existing session context. Do not launch the native Lightpanda agent or
   attach another CDP connection for automation. Screenshot rendering has the
@@ -188,7 +226,7 @@
   Managed browser sessions must not inherit provider keys. Send the key only in the
   model authentication header and redact known values from observations, output
   and artifacts. Suppress raw provider/browser errors and protocol output.
-- Expose typed browser commands only, with one model command per turn and no
+- The current Go loop exposes typed browser commands only, with one model command per turn and no
   model-supplied JavaScript, selectors, credentials or raw CDP. Keep safe bounded
   observations, evidence references and static execution logs. Document navigation
   allows all HTTP(S) hostnames by default: omitted/empty `allowed_hosts` normalizes
@@ -460,6 +498,12 @@ The production manager owns browser lifecycle; fixtures own HTTP pages only.
 CI compiles the race-enabled test binary in the Go bookworm image to match the
 runtime's glibc, then executes it as the runtime image's UID1000 with no external
 network. Use `--init` for this test container to reap browser descendants.
+The `hermesintegration` tag adds permanent private-bridge scenarios using the
+packaged Python/Hermes paths and a fake HTTP model: native navigation, host
+admission, clarification, cookie reuse across runs, cancellation and confirmed
+close. CI combines both integration tags with a five-minute test-binary bound.
+The bridge currently supports OpenAI Chat Completions only; other provider
+profiles and Commander action activation remain separate migration work.
 
 Future API workflow tests that invoke global cleanup must use a dedicated stack,
 with Docker lifecycle owned by setup/CI outside Go tests. Keep fixtures under

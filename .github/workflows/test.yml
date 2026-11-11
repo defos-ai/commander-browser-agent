@@ -57,7 +57,7 @@ jobs:
           tags: commander-browser-agent:local
           cache-from: type=gha,scope=agent
           cache-to: type=gha,scope=agent,mode=max
-      - name: Check packaged Lightpanda
+      - name: Check packaged browser runtimes
         run: |
           docker run --rm --network none --entrypoint /bin/sh commander-browser-agent:local -ec '
             test "$(id -u)" = 1000
@@ -65,6 +65,10 @@ jobs:
             test -s /usr/share/doc/lightpanda/LICENSE
             test -s /usr/share/doc/lightpanda/FONT-LICENSE
             test -s /usr/share/doc/lightpanda/NOTICE
+            test -s /usr/share/doc/hermes/LICENSE
+            test -s /usr/share/doc/hermes/NOTICE
+            test -s /usr/local/lib/python3.14/LICENSE.txt
+            /opt/hermes/.venv/bin/python -I /usr/local/lib/commander-browser/hermes/check.py
           '
       - name: Build agent workflow tests
         run: |
@@ -75,18 +79,18 @@ jobs:
             --env GOMODCACHE=/tmp/go-mod --env GOCACHE=/tmp/go-build \
             golang:1.26.7-bookworm sh -ec '
               go mod download
-              CGO_ENABLED=1 go test -c -race -tags=browserintegration -o /out/browser-session-tests ./tests
+              CGO_ENABLED=1 go test -c -race -tags=browserintegration,hermesintegration -o /out/browser-session-tests ./tests
             '
       - name: Test browser workflows and sessions
         run: |
           docker run --rm --init --network none \
             --mount "type=bind,source=$RUNNER_TEMP/browser-session-tests,target=/browser-session-tests,readonly" \
             --entrypoint /bin/sh commander-browser-agent:local -ec '
-              /browser-session-tests -test.v -test.count=1 -test.timeout=3m
+              /browser-session-tests -test.v -test.count=1 -test.timeout=5m
               browsers_running() {
                 for process_comm in /proc/[0-9]*/comm; do
                   if IFS= read -r process_name 2>/dev/null < "$process_comm"; then
-                    case "$process_name" in lightpanda*) return 0 ;; esac
+                    case "$process_name" in lightpanda*|python*) return 0 ;; esac
                   fi
                 done
                 return 1
@@ -99,7 +103,7 @@ jobs:
                 echo "Browser processes remain after session cleanup" >&2
                 exit 1
               fi
-              for session_profile in /tmp/commander-browser-session-*; do
+              for session_profile in /tmp/commander-browser-session-* /tmp/commander-hermes-*; do
                 if [ -e "$session_profile" ]; then
                   echo "Browser profile remains after session cleanup" >&2
                   exit 1
