@@ -30,6 +30,7 @@ import (
 	controllerevents "github.com/defos-ai/commander/framework/comms/clients/controller/events"
 	"github.com/defos-ai/commander/framework/comms/messages"
 	actionmodel "github.com/defos-ai/commander/framework/domain/actions"
+	"github.com/defos-ai/commander/framework/domain/executions"
 	"github.com/defos-ai/commander/framework/domain/operations"
 	"github.com/defos-ai/commander/framework/domain/secrets"
 	"github.com/defos-ai/commander/framework/domain/sessions"
@@ -40,13 +41,14 @@ import (
 )
 
 type hermesSessionScenario struct {
-	request     hermes.Request
-	login       *hermesLoginFixture
-	managed     bool
-	prepareOnly bool
-	cancel      <-chan struct{}
-	scope       chan context.Context
-	result      chan error
+	request      hermes.Request
+	login        *hermesLoginFixture
+	managed      bool
+	prepareOnly  bool
+	checkpointed bool
+	cancel       <-chan struct{}
+	scope        chan context.Context
+	result       chan error
 }
 
 type hermesSessionOutput struct {
@@ -74,12 +76,13 @@ type hermesSessionHost struct {
 	expectUncertainCleanup bool
 	setup                  browsing.Setup
 	modelKeyMetadata       map[string]secrets.Metadata
+	checkpoints            map[string]executions.Execution
 }
 
 func newHermesSessionHost(t *testing.T, cases map[string]hermesSessionScenario) *hermesSessionHost {
 	t.Helper()
 	profilesBefore := hermesSessionProfiles(t)
-	h := &hermesSessionHost{t: t, claims: map[string]sessions.CreationClaim{}, accepted: map[string]messages.Message{}}
+	h := &hermesSessionHost{t: t, claims: map[string]sessions.CreationClaim{}, accepted: map[string]messages.Message{}, checkpoints: map[string]executions.Execution{}}
 	owner, err := id.AgentID("browser-agent")
 	hermesSessionCheck(t, err)
 	h.manager, err = browserruntime.New(owner)
@@ -107,6 +110,9 @@ func newHermesSessionHost(t *testing.T, cases map[string]hermesSessionScenario) 
 				scenario, ok := cases[input.Scenario]
 				if !ok {
 					return hermesSessionOutput{}, errors.New("unknown native fixture scenario")
+				}
+				if scenario.checkpointed {
+					return h.runCheckpointed(ctx, binding, scenario)
 				}
 				config := hermesConfig()
 				var result hermes.Result
@@ -272,17 +278,30 @@ func (h *hermesSessionHost) dispatch(task operations.Task, binding *sessions.Bin
 	h.t.Helper()
 	command, err := agentcommands.NewRunAction(h.host.ID(), agentcommands.ActionCall{ActionName: task.ActionName, Input: task.Input, OperationID: task.OperationID, TaskID: task.ID, Session: binding})
 	hermesSessionCheck(h.t, err)
+	h.checkpoints[command.ID] = executions.Execution{Command: command, StartedAt: time.Now().UTC()}
 	hermesSessionCheck(h.t, (agentcommands.Client{Bus: h.bus}).Publish(h.t.Context(), command))
 	return command
 }
 
 func (h *hermesSessionHost) wait(match func(messages.Message) bool) messages.Message {
 	h.t.Helper()
-	for index, message := range h.pending {
+	for index := 0; index < len(h.pending); {
+		message := h.pending[index]
 		if match(message) {
 			h.pending = append(h.pending[:index], h.pending[index+1:]...)
 			return message
 		}
+		if receipt, known := h.accepted[message.ID]; known {
+			h.pending = append(h.pending[:index], h.pending[index+1:]...)
+			hermesSessionCheck(h.t, (agentevents.Client{Bus: h.bus}).Publish(h.t.Context(), receipt))
+			continue
+		}
+		if message.Type == controllerevents.CheckpointRequested {
+			h.pending = append(h.pending[:index], h.pending[index+1:]...)
+			h.replyCheckpoint(message, h.persistCheckpoint(message))
+			continue
+		}
+		index++
 	}
 	ctx, cancel := context.WithTimeout(h.t.Context(), 35*time.Second)
 	defer cancel()
@@ -299,6 +318,10 @@ func (h *hermesSessionHost) wait(match func(messages.Message) bool) messages.Mes
 		}
 		if match(message) {
 			return message
+		}
+		if message.Type == controllerevents.CheckpointRequested {
+			h.replyCheckpoint(message, h.persistCheckpoint(message))
+			continue
 		}
 		h.pending = append(h.pending, message)
 	}

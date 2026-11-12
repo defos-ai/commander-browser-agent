@@ -175,12 +175,17 @@ func TestHermesManagedLoginOTPThenNativeBrowse(t *testing.T) {
 		return fakes.HermesResponse{Text: "Signed-in fixture confirmed."}
 	}, protected...)
 	h := newHermesSessionHost(t, map[string]hermesSessionScenario{
-		"login":  {login: nativeLoginFixture(site, 0, "/otp-login", "/otp-account")},
+		"login":  {login: nativeLoginFixture(site, 0, "/otp-login", "/otp-account"), checkpointed: true},
 		"browse": {request: hermesRequest(model, []byte(key))},
 	})
 	root := h.task(nil, sessions.Open, "login")
 	binding := h.binding(root)
 	command := h.dispatch(root, &binding)
+	started := h.checkpoint(controllerevents.CheckpointSave, "login_started")
+	if site.Posts.Load() != 0 || site.CodePosts.Load() != 0 || model.Calls() != 0 || h.snapshot(binding.Reference).State != "starting" {
+		t.Fatal("deterministic native login crossed its unconfirmed start fence")
+	}
+	h.replyCheckpoint(started, h.persistCheckpoint(started))
 	h.loginCredentials(command, site, 0)
 	request := h.loginCodeRequest(command, site)
 	if site.Posts.Load() != 1 || site.CodePosts.Load() != 0 || model.Calls() != 0 {
@@ -197,6 +202,10 @@ func TestHermesManagedLoginOTPThenNativeBrowse(t *testing.T) {
 		t.Fatal("native OTP login did not finish")
 	}
 	requireNativeLogin(t, output, "verified", true)
+	if len(h.checkpoints[command.ID].Checkpoints) != 2 {
+		t.Fatal("native managed login omitted its start or final recovery fact")
+	}
+	assertHermesCheckpointFacts(t, h, command, binding, append(protected, key, site.URL)...)
 	if output.Claim != binding.Claim() || output.Session.State != "connected" || site.CodePosts.Load() != 1 {
 		t.Fatal("OTP login lost its original session or repeated submission")
 	}

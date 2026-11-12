@@ -450,6 +450,35 @@
 
 ## Browsing checkpoints
 
+- [internal/browsing/hermes_checkpoint.go](internal/browsing/hermes_checkpoint.go)
+  stages native execution facts separately from typed Go progress. Load through
+  `Manager.WithSession` before model setup, secrets or worker startup; save the
+  start fence before `RunHermes`, including deterministic login bootstrap. Keep
+  `browse_started`/`login_started` as replay gates so any saved version blocks
+  automatic replay. Default actions remain on the Go backend until cutover.
+- Native version-3 facts contain the original full creation claim, fixed runtime
+  and limits, shared fence ordinals, native batch sequences and fixed counters.
+  Bind the helper to the current framework execution as well as the original
+  claim; a child continuation needs a fresh helper. Never persist code, browser
+  observations, question/answer text, objectives, provider settings or secrets.
+  Native limits describe iterations and per-response allowances, not cost or
+  operations inside Python. Model-request counts appear only in final facts
+  after the runtime reports them. Do not invent typed evidence or token accounting.
+- The synchronous native admission and question callbacks share thirty immutable
+  `browse_step_01` through `_30` facts. Require each receipt before forwarding
+  approval or publishing a question. Progress callbacks record reported batch
+  start/return counters in memory and consume no facts. Four questions plus
+  thirty separate batches would exceed Commander's thirty-two-fact cap and must
+  not be admitted. A fenced batch is not proof of dispatch; a returned Python
+  batch cannot attest individual website effects or prevent upstream retries.
+- A native persistence failure, refusal or identity mismatch halts that helper;
+  renamed retries and later finalization cannot hide it. Finish only after native
+  quiescence, model transport cleanup and prepared-output validation, within the
+  live session. Failed final persistence suppresses output. Incomplete goals with
+  returned batches may still have prepared partial work; pending batches and
+  uncertain outcomes remain `work_unconfirmed`. Result delivery always remains
+  `unconfirmed`. Missing checkpoint providers allow direct calls with in-memory
+  bounds and identity checks, without durable recovery promises.
 - [internal/browsing/checkpoint.go](internal/browsing/checkpoint.go) uses the
   execution-scoped `action.LoadCheckpoint`/`SaveCheckpoint` exchange.
   The production host supplies it. Direct public-action calls without that
@@ -473,7 +502,7 @@
   persist objective text, URLs, DOM, full model commands/transcripts, question text or
   answers, provider settings, cookies, credential names/values or artifact bytes.
   Findings and evidence content remain in the final results and artifacts.
-  Fact version 2 records Commander's flat creation claim. A saved start fence of
+  Go fact version 2 records Commander's flat creation claim. A saved start fence of
   any version still blocks replay; old facts are never rewritten or restored.
 - Every checkpoint wait is bounded to five seconds and preserves the execution
   and session lifetime. The initial load belongs to setup; writes count against
@@ -602,7 +631,12 @@ pending-session close, and event overflow before filtering. Login values must
 remain absent from model requests and public Commander messages.
 Native screenshots also compare decoded pixels after secret redaction, verify
 source state and cookie continuity, and exercise allocated-renderer interruption.
-CI combines both integration tags with a seven-minute test-binary bound.
+Native checkpoint scenarios hold and retry actual persistence receipts before
+start, clarification, batch dispatch and final output; reject old fences, failed
+loads and saves; and verify cancellation, late receipts and explicit continuation.
+Focused tests exercise the combined thirty-fence limit and exact execution/claim
+checks without starting a runtime.
+CI combines both integration tags with an eight-minute test-binary bound.
 Clean-close Hermes scenarios check that their private profiles are removed;
 intentional uncertain-loss scenarios require retained lost state and profiles.
 The container must have no surviving Python or Lightpanda processes before it
