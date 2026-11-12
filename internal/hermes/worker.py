@@ -81,6 +81,7 @@ class Worker:
         self.browser_pin = None
         self.browser_attempted = False
         self.lost = False
+        self.native = None
 
     def send(self, kind, identifier, payload):
         raw = json.dumps({"version": 1, "kind": kind, "id": identifier, "payload": payload},
@@ -148,6 +149,8 @@ class Worker:
         discover_plugins()
         self.agent_type = AIAgent
         self.verify_handlers()
+        from native import NativeBrowser
+        self.native = NativeBrowser(self)
 
     def register_handler(self, name, handler):
         self.handlers[name] = handler
@@ -205,6 +208,25 @@ class Worker:
                 "native_pid": native.pid, "native_birth": native.create_time(),
                 "endpoint": server.cdp_url}
 
+    def browser_route(self):
+        # browser-harness 0.1.13 has no public Python route getter. This is a
+        # version-pinned daemon IPC metadata exchange through admin's _ipc alias,
+        # not a new CDP connection or a mutation of the upstream implementation.
+        from browser_harness.admin import ipc
+        connection, token = ipc.connect(self.session_name, timeout=1.0)
+        try:
+            connection.settimeout(1.0)
+            response = ipc.request(connection, token, {"meta": "connection_status"})
+        finally:
+            connection.close()
+        if not isinstance(response, dict) or "error" in response:
+            raise Refused("browser_route_unavailable")
+        route = {"target": response.get("target_id"), "automation_session": response.get("session_id")}
+        if any(not isinstance(value, str) or not value or len(value.encode()) > 256
+               for value in route.values()):
+            raise Refused("browser_route_unavailable")
+        return route  # Never retain the daemon's optional URL/title/page metadata.
+
     def pin_browser(self):
         from browser_harness.admin import daemon_browser_ready
         from browser_harness.helpers import cdp, current_tab
@@ -212,16 +234,17 @@ class Worker:
         identity = self.browser_identity()
         if not daemon_browser_ready(self.session_name):
             raise Refused("browser_connection_unavailable")
+        route = self.browser_route()
         target = current_tab().get("targetId")
-        if not isinstance(target, str) or not target:
+        if not isinstance(target, str) or not target or target != route["target"]:
             raise Refused("browser_connection_unavailable")
         session = cdp("Target.attachToTarget", targetId=target, flatten=True,
                       _response_timeout=1.0).get("sessionId")
         if not isinstance(session, str) or not session:
             raise Refused("browser_connection_unavailable")
-        if self.browser_identity() != identity:
+        if self.browser_identity() != identity or self.browser_route() != route:
             raise Refused("browser_identity_changed")
-        self.browser_pin = {**identity, "target": target, "session": session}
+        self.browser_pin = {**identity, **route, "session": session}
         # This documented override short-circuits get_session_info on subsequent
         # native calls. Together with require-existing it prevents provisioning a
         # replacement Lightpanda process or harness daemon for this session.
@@ -241,20 +264,21 @@ class Worker:
             return "starting"
         try:
             from browser_harness.admin import daemon_browser_ready
-            from browser_harness.helpers import cdp, current_tab
+            from browser_harness.helpers import cdp
             from tools.browser_session_lifecycle import update_session_activity
 
             pin = self.browser_pin
+            route = {name: pin[name] for name in ("target", "automation_session")}
             identity = self.browser_identity()
             if any(identity[name] != pin[name] for name in identity) or not daemon_browser_ready(self.session_name):
                 raise Refused("browser_identity_changed")
-            if current_tab().get("targetId") != pin["target"]:
-                raise Refused("browser_target_changed")
+            if self.browser_route() != route:
+                raise Refused("browser_route_changed")
             reply = cdp("Runtime.evaluate", session_id=pin["session"], expression="true",
                         returnByValue=True, awaitPromise=False, _response_timeout=1.0)
             if reply.get("exceptionDetails") or reply.get("result", {}).get("value") is not True:
                 raise Refused("browser_connection_unavailable")
-            if self.browser_identity() != identity:
+            if self.browser_identity() != identity or self.browser_route() != route:
                 raise Refused("browser_identity_changed")
             update_session_activity("bu-named-" + self.session_name)
             return "connected"
@@ -608,10 +632,12 @@ class Worker:
             self.tainted = True
 
     def close(self):
-        self.closing = True
         with self.lock:
+            self.closing = True
             run = self.active
         self.cancel()
+        if self.native is not None and not self.native.close():
+            self.tainted = True
         if run is not None and run.thread is not None:
             run.thread.join(5)
             if run.thread.is_alive():
@@ -735,10 +761,17 @@ class Worker:
                 raise Refused("invalid_frame")
             self.send("health", identifier, {"state": self.health()})
             return True
+        if kind == "browser":
+            if self.native is None:
+                self.send("browser", identifier, {"ok": False, "state": "lost"})
+            else:
+                self.native.accept(identifier, payload)
+            return True
         if kind != "run":
             raise Refused("invalid_frame")
         with self.lock:
-            if self.active is not None or self.closing or self.tainted or self.lost:
+            if (self.active is not None or self.closing or self.tainted or self.lost or
+                    self.native is not None and self.native.busy()):
                 raise Refused("worker_unavailable")
             run = Run(identifier, self.request(payload))
             self.active = run
@@ -772,6 +805,7 @@ def main():
             if len(line) > MAX_FRAME or not line.endswith(b"\n"):
                 raise Refused("invalid_frame")
             frame = json.loads(line)
+            line = b""
             try:
                 if not worker.accept(frame):
                     return 0

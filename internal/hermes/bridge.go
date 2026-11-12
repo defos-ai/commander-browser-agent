@@ -67,24 +67,26 @@ type Worker struct {
 	output *os.File
 	values *sensitive.Values // Direct callers retain non-plaintext protection across runs.
 
-	lifetime   context.Context
-	cancel     context.CancelCauseFunc
-	writeGate  chan struct{}
-	gate       chan struct{}
-	mu         sync.Mutex
-	ready      bool
-	closing    bool
-	fault      bool
-	runID      string
-	run        chan frame
-	closeID    string
-	ack        bool
-	clean      bool
-	waitErr    error
-	closeErr   error
-	health     map[string]chan health
-	model      *modelTransport
-	modelReady chan struct{}
+	lifetime     context.Context
+	cancel       context.CancelCauseFunc
+	writeGate    chan struct{}
+	gate         chan struct{}
+	mu           sync.Mutex
+	ready        bool
+	closing      bool
+	fault        bool
+	runID        string
+	run          chan frame
+	closeID      string
+	ack          bool
+	clean        bool
+	waitErr      error
+	closeErr     error
+	health       map[string]chan health
+	model        *modelTransport
+	modelReady   chan struct{}
+	browser      *Browser
+	browserCalls map[string]chan browserReply
 
 	readyDone chan error
 	procDone  chan struct{}
@@ -165,7 +167,7 @@ func Start(ctx context.Context, config Config) (*Worker, error) {
 	lifetime, cancel := context.WithCancelCause(context.Background())
 	w := &Worker{config: config, work: work, cmd: command, input: input, output: output, values: sensitive.New(),
 		lifetime: lifetime, cancel: cancel, gate: make(chan struct{}, 1), readyDone: make(chan error, 1),
-		writeGate: make(chan struct{}, 1), health: make(map[string]chan health),
+		writeGate: make(chan struct{}, 1), health: make(map[string]chan health), browserCalls: make(map[string]chan browserReply),
 		procDone: make(chan struct{}), readDone: make(chan struct{}), closedAck: make(chan struct{}), closeDone: make(chan struct{})}
 	go w.readFrames()
 	go w.waitProcess()
@@ -301,6 +303,25 @@ func (w *Worker) route(message frame) bool {
 				target <- status
 			}
 			if status.State == "lost" {
+				w.fail(ErrLost)
+			}
+			return true
+		}
+		w.mu.Unlock()
+		w.fail(ErrProtocol)
+		return false
+	}
+	if message.Kind == "browser" {
+		response, expected := w.browserCalls[message.ID]
+		var reply browserReply
+		if expected && len(message.Payload) <= maxBrowserMessage && strictJSON(message.Payload, &reply) == nil &&
+			(reply.State == "" || reply.State == "connected" || reply.State == "lost") {
+			delete(w.browserCalls, message.ID)
+			w.mu.Unlock()
+			if response != nil {
+				response <- reply
+			}
+			if reply.State == "lost" {
 				w.fail(ErrLost)
 			}
 			return true

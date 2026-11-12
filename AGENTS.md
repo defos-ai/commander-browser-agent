@@ -314,6 +314,25 @@
 
 ## Managed login
 
+- [browser/login/hermes.go](browser/login/hermes.go) stages the same deterministic
+  login executor on the retained Hermes session without model setup or an agent
+  invocation. [internal/hermes/browser.go](internal/hermes/browser.go) grants
+  callback-scoped, serialized host access to the original harness connection
+  through its CDP helpers. Pin the original automation attachment using the
+  version-specific daemon `connection_status` IPC metadata; the auxiliary
+  attachment remains for health checks. Lightpanda emits network events on the
+  original attachment. Reject a changed daemon route instead of adopting it.
+  Do not open another automation WebSocket,
+  record credential operations as native agent tools, or patch upstream. This
+  remains private migration infrastructure; the default actions still use Go.
+- The private native lease pins its original attachment, bounds RPCs and drains
+  filtered events concurrently with intercepted requests. Only request routing,
+  resource/frame identity, response status and completion/failure IDs cross this
+  event boundary; never return headers, cookies or POST data. Reject a total
+  unfiltered daemon batch of 128 events before filtering because the pinned
+  daemon silently evicts at 500. An unconfirmed destructive drain or incomplete
+  join loses the resource. End the lease only after stopping loading, removing
+  interception and joining the event pump and request workers.
 - [actions/login.go](actions/login.go) uses the host's session runner and the
   deterministic [browser/login/](browser/login/) executor; login never needs model
   setup or gives credentials or one-time codes to a model. Require an exact-origin
@@ -353,7 +372,11 @@
   requesting values and again before filling. Guard all requests to the exact
   origin while handling credentials/codes, issue at most one password submission
   and one code submission command, and never automatically retry uncertain
-  effects. Lightpanda 1.0.2 can internally
+  effects. Require a positive main-frame POST response or redirect receipt before
+  navigating away for verification; missing response evidence stays uncertain.
+  This receipt confirms a response, not authentication or exactly-once delivery.
+  Native navigation must confirm its returned frame/loader before accepting
+  document readiness. Lightpanda 1.0.2 can internally
   repeat a lost-response POST below CDP interception; test one owned CDP request
   and an uncertain outcome, not exactly-once website delivery. Stop loading before
   removing interception. Preserve the retained connection and independent session
@@ -557,7 +580,12 @@ admission, clarification, cookie reuse across runs, cancellation and confirmed
 close. Commander dispatch scenarios also cover root allocation, direct-parent
 reuse, independent cookie jars, exact-claim rejection, private callback lifetime,
 inventory controls, clean cancellation with reuse and lost-target refusal.
-CI combines both integration tags with a five-minute test-binary bound.
+Native managed-login scenarios also cover password/OTP delivery without model
+setup, authenticated reuse by native reasoning, independent accounts on one
+origin, stale/expired transient deliveries, form mutation, dropped responses,
+pending-session close, and event overflow before filtering. Login values must
+remain absent from model requests and public Commander messages.
+CI combines both integration tags with a six-minute test-binary bound.
 Clean-close Hermes scenarios check that their private profiles are removed;
 intentional uncertain-loss scenarios require retained lost state and profiles.
 The container must have no surviving Python or Lightpanda processes before it

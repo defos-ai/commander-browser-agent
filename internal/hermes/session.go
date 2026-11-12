@@ -47,17 +47,27 @@ func WithWorker(ctx context.Context, worker *Worker, work func(context.Context) 
 // Run uses the private grant supplied by the manager's current callback. It
 // exposes no worker handle, and rejects detached or expired session contexts.
 func Run(ctx context.Context, request Request, handler Handler) (Result, error) {
+	var result Result
+	err := withGrantedWorker(ctx, func(active context.Context, worker *Worker) error {
+		var err error
+		result, err = worker.Run(active, request, handler)
+		return err
+	})
+	return result, err
+}
+
+func withGrantedWorker(ctx context.Context, work func(context.Context, *Worker) error) error {
 	if err := contextError(ctx); err != nil {
-		return Result{}, err
+		return err
 	}
 	grant, ok := ctx.Value(workerContextKey{}).(*workerGrant)
 	if !ok || grant == nil || ctx.Done() == nil {
-		return Result{}, ErrClosed
+		return ErrClosed
 	}
 	grant.mu.Lock()
 	if !grant.active || grant.ctx.Err() != nil {
 		grant.mu.Unlock()
-		return Result{}, errors.Join(ErrClosed, contextError(grant.ctx))
+		return errors.Join(ErrClosed, contextError(grant.ctx))
 	}
 	grant.uses.Add(1)
 	worker := grant.worker
@@ -67,5 +77,5 @@ func Run(ctx context.Context, request Request, handler Handler) (Result, error) 
 	defer stop(context.Canceled)
 	watch := context.AfterFunc(grant.ctx, func() { stop(context.Cause(grant.ctx)) })
 	defer watch()
-	return worker.Run(active, request, handler)
+	return work(active, worker)
 }

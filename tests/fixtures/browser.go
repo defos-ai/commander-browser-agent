@@ -1,4 +1,4 @@
-//go:build browserintegration
+//go:build browserintegration || hermesintegration
 
 package fixtures
 
@@ -21,6 +21,7 @@ type BrowserSite struct {
 	Code                      string
 	Posts, Redirects, Foreign atomic.Int32
 	CodePosts                 atomic.Int32
+	CodeInputs                atomic.Int32
 	changeCode, codeChanged   chan struct{}
 }
 
@@ -110,13 +111,30 @@ func NewBrowser(t *testing.T) *BrowserSite {
 	mux.HandleFunc("GET /otp-drop-code", func(w http.ResponseWriter, _ *http.Request) { codeForm(w, "/otp-drop") })
 	mux.HandleFunc("GET /otp-mutable-code", func(w http.ResponseWriter, _ *http.Request) {
 		codeForm(w, "/otp-verify")
-		_, _ = io.WriteString(w, `<script>fetch('/otp-policy').then(r=>r.text()).then(url=>{document.querySelector('form').action=url;fetch('/otp-changed');});</script>`)
+		_, _ = io.WriteString(w, `<script>
+document.querySelector('input').addEventListener('input',()=>fetch('/otp-input'));
+let policyAttempts=0;
+function pollPolicy() {
+  if(++policyAttempts>20) return;
+  fetch('/otp-policy').then(r=>r.text()).then(url=>{
+    if(url) {document.querySelector('form').action=url;fetch('/otp-changed');}
+    else setTimeout(pollPolicy,500);
+  }).catch(()=>setTimeout(pollPolicy,500));
+}
+pollPolicy();
+</script>`)
 	})
-	mux.HandleFunc("GET /otp-policy", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /otp-input", func(w http.ResponseWriter, _ *http.Request) {
+		site.CodeInputs.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	})
+	mux.HandleFunc("GET /otp-policy", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
 		select {
 		case <-site.changeCode:
 			_, _ = io.WriteString(w, foreignURL+"/private")
-		case <-r.Context().Done():
+		default:
+			w.WriteHeader(http.StatusNoContent)
 		}
 	})
 	mux.HandleFunc("GET /otp-changed", func(w http.ResponseWriter, _ *http.Request) {

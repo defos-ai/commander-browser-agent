@@ -36,17 +36,29 @@ var errBrowser = errors.New("login browser operation could not be completed safe
 // Run owns and clears returned credential/code bytes. It submits at most one
 // password form and one code form, without retrying rejected or uncertain effects.
 func Run(ctx context.Context, request Request, credentials func(context.Context) (Credentials, error)) (result Result, runErr error) {
-	result = Result{Status: "unverified", Reason: "not_attempted"}
+	return run(ctx, request, credentials, newDriver)
+}
+
+func validateRequest(ctx context.Context, request Request, credentials func(context.Context) (Credentials, error)) (string, error) {
 	if err := ctx.Err(); err != nil {
-		return result, err
+		return "", errors.Join(err, context.Cause(ctx))
 	}
 	origin, err := browsing.LoginOrigin(request.URL)
 	verificationOrigin, verificationErr := browsing.LoginOrigin(request.VerificationURL)
 	if err != nil || verificationErr != nil || origin != verificationOrigin || credentials == nil ||
 		!utf8.ValidString(request.ExpectedText) || strings.TrimSpace(request.ExpectedText) == "" || len(request.ExpectedText) > 256 || strings.ContainsRune(request.ExpectedText, '\x00') {
-		return result, errors.New("login requires same-origin URLs and a bounded non-secret verification marker")
+		return "", errors.New("login requires same-origin URLs and a bounded non-secret verification marker")
 	}
-	page, err := newDriver(ctx, origin)
+	return origin, nil
+}
+
+func run(ctx context.Context, request Request, credentials func(context.Context) (Credentials, error), open func(context.Context, string) (*driver, error)) (result Result, runErr error) {
+	result = Result{Status: "unverified", Reason: "not_attempted"}
+	origin, err := validateRequest(ctx, request, credentials)
+	if err != nil {
+		return result, err
+	}
+	page, err := open(ctx, origin)
 	if err != nil {
 		if ctx.Err() != nil {
 			return result, ctx.Err()
@@ -54,11 +66,11 @@ func Run(ctx context.Context, request Request, credentials func(context.Context)
 		return result, errBrowser
 	}
 	defer func() {
-		if err := page.close(); err != nil && runErr == nil {
-			runErr = errBrowser
+		if err := page.close(); err != nil {
+			runErr = errors.Join(runErr, errBrowser)
 		}
 		if ctx.Err() != nil {
-			runErr = ctx.Err()
+			runErr = errors.Join(runErr, ctx.Err(), context.Cause(ctx))
 		}
 	}()
 	// An explicit continuation may already be on a live challenge with private
@@ -106,6 +118,9 @@ func Run(ctx context.Context, request Request, credentials func(context.Context)
 		return result, nil
 	}
 	if err := page.settle(ctx); err != nil {
+		return result, nil
+	}
+	if !page.hasSubmissionResponse() {
 		return result, nil
 	}
 	page.clearFields(ctx)
@@ -186,6 +201,9 @@ func resolveChallenge(ctx context.Context, page *driver, request Request, form f
 	}
 	result.Status, result.Reason = "submission_uncertain", "code_submission_unconfirmed"
 	if err := page.settle(ctx); err != nil {
+		return result, nil
+	}
+	if !page.hasSubmissionResponse() {
 		return result, nil
 	}
 	page.clearFields(ctx)

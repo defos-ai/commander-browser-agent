@@ -18,6 +18,7 @@ import (
 	"time"
 
 	browserruntime "github.com/defos-ai/commander-browser-agent/browser"
+	browserlogin "github.com/defos-ai/commander-browser-agent/browser/login"
 	"github.com/defos-ai/commander-browser-agent/internal/browsing"
 	"github.com/defos-ai/commander-browser-agent/internal/hermes"
 	"github.com/defos-ai/commander-browser-agent/tests/fakes"
@@ -40,6 +41,7 @@ import (
 
 type hermesSessionScenario struct {
 	request     hermes.Request
+	login       *hermesLoginFixture
 	managed     bool
 	prepareOnly bool
 	cancel      <-chan struct{}
@@ -49,6 +51,7 @@ type hermesSessionScenario struct {
 
 type hermesSessionOutput struct {
 	Result  hermes.Result          `json:"result"`
+	Login   *browserlogin.Result   `json:"login,omitempty"`
 	Claim   sessions.CreationClaim `json:"claim"`
 	Session sessions.Session       `json:"session"`
 }
@@ -64,6 +67,7 @@ type hermesSessionHost struct {
 	definitions            []actionmodel.Definition
 	claims                 map[string]sessions.CreationClaim
 	pending                []messages.Message
+	history                []messages.Message
 	accepted               map[string]messages.Message
 	entered                atomic.Int32
 	expectUncertainCleanup bool
@@ -105,7 +109,13 @@ func newHermesSessionHost(t *testing.T, cases map[string]hermesSessionScenario) 
 				}
 				config := hermesConfig()
 				var result hermes.Result
+				var loginResult *browserlogin.Result
 				view, err := h.manager.RunHermes(ctx, browserruntime.HermesOptions{Python: config.Python, Source: config.Source, Executable: config.Lightpanda}, func(workCtx context.Context) error {
+					if scenario.login != nil {
+						outcome, err := runHermesLoginFixture(workCtx, *scenario.login)
+						loginResult = &outcome
+						return err
+					}
 					request := scenario.request
 					if scenario.managed {
 						request, err = h.setup.PrepareHermes(workCtx)
@@ -153,7 +163,7 @@ func newHermesSessionHost(t *testing.T, cases map[string]hermesSessionScenario) 
 				if scenario.result != nil {
 					scenario.result <- err
 				}
-				return hermesSessionOutput{Result: result, Claim: binding.Claim(), Session: view}, err
+				return hermesSessionOutput{Result: result, Login: loginResult, Claim: binding.Claim(), Session: view}, err
 			},
 		})
 		hermesSessionCheck(t, err)
@@ -276,6 +286,8 @@ func (h *hermesSessionHost) wait(match func(messages.Message) bool) messages.Mes
 		hermesSessionCheck(h.t, err)
 		message := delivery.Message()
 		hermesSessionCheck(h.t, delivery.Ack(ctx))
+		message.Payload = bytes.Clone(message.Payload)
+		h.history = append(h.history, message)
 		if receipt, ok := h.accepted[message.ID]; ok {
 			hermesSessionCheck(h.t, (agentevents.Client{Bus: h.bus}).Publish(ctx, receipt))
 			continue
