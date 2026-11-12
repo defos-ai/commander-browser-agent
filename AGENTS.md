@@ -116,6 +116,41 @@
 - Local validation must stay within a combined 3 CPUs and 3,000,000,000 bytes
   of RAM, with swap disabled. Use a resource-limited Docker-container Buildx
   builder and stop it before running a container with the full allowance.
+- The approved isolation deployment uses separate Docker worker containers.
+  [internal/hermes/containers/](internal/hermes/containers/) is a staged launcher
+  through a trusted local Unix daemon socket, using Docker API 1.47 and a
+  preloaded immutable `sha256:` image ID. It never pulls an image, accepts action
+  inputs or mounts the daemon socket into a worker. Docker access gives the
+  trusted launcher control beyond this project; it is not a worker capability.
+  Model/renderer relays and session-manager integration remain separate work;
+  this launcher does not activate a default action backend.
+- Each container uses UID1000, a read-only root, private PID/IPC/network/cgroup
+  namespaces, bridge egress, no published ports, dropped capabilities and
+  `no-new-privileges`. Fix its allowance to one CPU, 1,000,000,000 bytes of memory
+  with equal memory/swap limits, and 128 tasks. A private `/tmp` tmpfs is temporary;
+  one anonymous `/home/commander` volume retains private files after a stop.
+  It receives no host bind mounts, bus/storage directories or sibling volumes.
+  Host disk quotas and outbound network policy remain deployment concerns.
+- [container.py](internal/hermes/container.py) captures container stdin/stdout
+  into non-inheritable private FD3/4 before site imports, clears the environment
+  and discards raw stdout/stderr. Only bridge frames use Docker attach. Bound
+  Docker headers/chunks and logical protocol frames separately; a Docker chunk
+  is not a JSON frame. Losing the only attachment closes worker input, but EOF
+  or a Docker exit receipt does not establish a clean worker receipt.
+- Reserve a random owned name before create so a missing create response retains
+  a recovery reference. Verify image, nonce/session labels, canonical container
+  ID and its sole home volume before controls. Never adopt a foreign resource,
+  restart a stopped worker under an old claim or infer restoration from files.
+  Removal requires a stopped receipt, uses no force and confirms both container
+  deletion and the pinned volume's absence. Docker can acknowledge container
+  deletion while retaining its volume; retain that partial cleanup identity and
+  retry only the pinned volume. Missing receipts retain uncertain ownership.
+  The [Docker Engine API](https://docs.docker.com/reference/api/engine/version/v1.47/)
+  is the launcher protocol, not human-readable CLI output.
+- Container isolation separates the trusted Go host and sibling workers. Native
+  Python, its bridge and its browser still share one worker's resources; this
+  step does not create a sandbox between them or attest every website effect.
+  Keep managed-secret/redaction and checkpoint admission boundaries independent.
 
 ## Reusable browser sessions
 
@@ -697,6 +732,16 @@ Clean-close Hermes scenarios check that their private profiles are removed;
 intentional uncertain-loss scenarios require retained lost state and profiles.
 The container must have no surviving Python or Lightpanda processes before it
 is discarded, including after those uncertain cases.
+The separate `hermescontainerintegration` tag requires explicit
+`HERMES_CONTAINER_TEST_SOCKET` and immutable `HERMES_CONTAINER_TEST_IMAGE` test
+settings. Compile it separately from the ordinary runtime tests. Its trusted
+test host gets the daemon socket and one CPU/1 GB; two workers each get one
+CPU/1 GB, keeping validation within the combined allowance. The probe covers
+actual pinned worker readiness/control frames, private homes/PID/network,
+host environment/argv/file exclusion, detached-child teardown and retained
+private volume ownership. A fake Unix Docker endpoint verifies that failed or
+unconfirmed volume cleanup suppresses success and remains retryable after the
+container has already been removed. Test settings are not agent model settings.
 The bridge currently supports the OpenAI Chat Completions wire profile for
 OpenAI and explicitly selected Other. Tests include escaped provider echoes,
 native observations, key rotation, exact reusable-secret requests, private worker
