@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 )
 
 const maxAttachHeader = 16 << 10
@@ -108,6 +109,14 @@ func (stream *attachment) close() error {
 }
 
 type attachInput struct{ stream *attachment }
+
+// SetWriteDeadline lets the owning bridge bound writes to a stalled worker.
+func (input *attachInput) SetWriteDeadline(deadline time.Time) error {
+	if input.stream.connection.SetWriteDeadline(deadline) != nil {
+		return ErrStream
+	}
+	return nil
+}
 
 func (input *attachInput) Write(data []byte) (int, error) {
 	input.stream.writeMu.Lock()

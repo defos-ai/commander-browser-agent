@@ -28,6 +28,8 @@ const (
 
 var errModelTransport = errors.New("Hermes model transport is unavailable")
 
+const modelFailureJSON = `{"error":{"message":"Model request unavailable","type":"invalid_request_error"}}`
+
 // modelTransport keeps the provider credential outside Hermes. Its local token
 // authorizes one bounded execution against one fixed completion endpoint.
 type modelTransport struct {
@@ -35,28 +37,43 @@ type modelTransport struct {
 	token   []byte
 	key     []byte
 
-	endpoint  string
-	model     string
-	limit     int
-	maxTokens int
-	redact    func(string) string
-	ctx       context.Context
-	cancel    context.CancelFunc
-	server    *http.Server
-	client    *http.Client
-	http      *http.Transport
-	served    chan struct{}
-	joined    chan struct{}
-	handlers  sync.WaitGroup
-	mu        sync.Mutex
-	closing   bool
-	requests  int
-	fault     bool
-	close     sync.Once
-	closeErr  error
+	endpoint      string
+	model         string
+	limit         int
+	maxTokens     int
+	redact        func(string) string
+	ctx           context.Context
+	cancel        context.CancelFunc
+	server        *http.Server
+	client        *http.Client
+	http          *http.Transport
+	served        chan struct{}
+	joined        chan struct{}
+	handlers      sync.WaitGroup
+	relays        sync.WaitGroup
+	mu            sync.Mutex
+	closing       bool
+	requests      int
+	relayOnly     bool
+	activeRelayID string
+	relayCalls    int
+	relayIDs      map[string]bool
+	fault         bool
+	close         sync.Once
+	closeErr      error
 }
 
 func startModelTransport(ctx context.Context, request Request, redact func(string) string) (*modelTransport, error) {
+	return startModelTransportMode(ctx, request, redact, true)
+}
+
+// startRelayedModelTransport shares the local transport's policy without
+// opening a host listener. Only the private worker bridge can reach it.
+func startRelayedModelTransport(ctx context.Context, request Request, redact func(string) string) (*modelTransport, error) {
+	return startModelTransportMode(ctx, request, redact, false)
+}
+
+func startModelTransportMode(ctx context.Context, request Request, redact func(string) string, listen bool) (*modelTransport, error) {
 	endpoint, err := url.Parse(request.Endpoint)
 	if err != nil || endpoint.Hostname() == "" || endpoint.User != nil || endpoint.RawQuery != "" ||
 		endpoint.ForceQuery || endpoint.Fragment != "" || strings.Contains(request.Endpoint, "#") || endpoint.Opaque != "" ||
@@ -73,17 +90,20 @@ func startModelTransport(ctx context.Context, request Request, redact func(strin
 	if _, err := rand.Read(random[:]); err != nil {
 		return nil, errModelTransport
 	}
-	listener, err := net.Listen("tcp4", "127.0.0.1:0")
-	if err != nil {
-		return nil, errModelTransport
+	defer clear(random[:])
+	var listener net.Listener
+	if listen {
+		listener, err = net.Listen("tcp4", "127.0.0.1:0")
+		if err != nil {
+			return nil, errModelTransport
+		}
 	}
 	timeout := time.Duration(request.TimeoutSeconds) * time.Second
 	lifetime, cancel := context.WithTimeout(ctx, timeout)
-	m := &modelTransport{baseURL: "http://" + listener.Addr().String() + "/v1",
+	m := &modelTransport{
 		token: []byte(hex.EncodeToString(random[:])), key: bytes.Clone(request.APIKey),
 		endpoint: request.Endpoint, model: request.Model, limit: request.MaxIterations + 1, maxTokens: request.MaxTokens,
-		redact: redact, ctx: lifetime, cancel: cancel, served: make(chan struct{}), joined: make(chan struct{})}
-	clear(random[:])
+		redact: redact, ctx: lifetime, cancel: cancel, served: make(chan struct{}), joined: make(chan struct{}), relayOnly: !listen}
 	// No environment proxies, redirects, automatic decompression,
 	// shared connections or replayable request bodies belong to this transport.
 	m.http = &http.Transport{DialContext: (&net.Dialer{Timeout: 5 * time.Second}).DialContext,
@@ -91,6 +111,11 @@ func startModelTransport(ctx context.Context, request Request, redact func(strin
 		DisableCompression: true, DisableKeepAlives: true, MaxResponseHeaderBytes: 32 << 10}
 	m.client = &http.Client{Transport: m.http, Timeout: timeout,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	if !listen {
+		close(m.served)
+		return m, nil
+	}
+	m.baseURL = "http://" + listener.Addr().String() + "/v1"
 	m.server = &http.Server{Handler: http.HandlerFunc(m.handle), ReadHeaderTimeout: 2 * time.Second,
 		ReadTimeout: 5 * time.Second, WriteTimeout: timeout + 2*time.Second,
 		IdleTimeout: 2 * time.Second, MaxHeaderBytes: 16 << 10,
@@ -149,7 +174,7 @@ func (m *modelTransport) handle(w http.ResponseWriter, r *http.Request) {
 	request["stream"] = false
 	body, err := json.Marshal(request)
 	defer clear(body)
-	if err != nil || len(body) > modelRequestLimit {
+	if err != nil || len(body) > modelRequestLimit || m.relayOnly && len(body) > modelRelayLimit {
 		modelFailure(w)
 		return
 	}
@@ -306,7 +331,7 @@ func (body *modelBody) Close() error {
 func modelFailure(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusBadRequest) // Non-retryable; no provider error/headers escape.
-	_, _ = io.WriteString(w, `{"error":{"message":"Model request unavailable","type":"invalid_request_error"}}`)
+	_, _ = io.WriteString(w, modelFailureJSON)
 }
 
 func (m *modelTransport) writeJSON(w http.ResponseWriter, value any) {
@@ -447,13 +472,14 @@ func (m *modelTransport) Close() error {
 		m.cancel()
 		deadline, stop := context.WithTimeout(context.Background(), 5*time.Second)
 		defer stop()
-		if m.server.Shutdown(deadline) != nil {
+		if m.server != nil && m.server.Shutdown(deadline) != nil {
 			m.closeErr = errModelTransport
 			_ = m.server.Close()
 		}
 		m.http.CloseIdleConnections()
 		go func() {
 			<-m.served
+			m.relays.Wait()
 			m.handlers.Wait()
 			m.http.CloseIdleConnections()
 			clear(m.key)

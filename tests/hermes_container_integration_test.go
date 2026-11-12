@@ -87,7 +87,7 @@ func TestHermesContainersIsolateWorkersAndOwnNamespaceLifetime(t *testing.T) {
 			t.Fatal("the pinned isolated Hermes container did not launch")
 		}
 		workers[index] = worker
-		worker.expect(t, ctx, "ready", "", map[string]any{"hermes": "v0.23.1"})
+		worker.expect(t, ctx, "ready", "", map[string]any{"hermes": "v0.23.1", "model_relay": 1})
 		var inspection struct {
 			Config struct {
 				User                 string

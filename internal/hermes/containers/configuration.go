@@ -43,7 +43,7 @@ func (instance *Instance) configuration() createConfiguration {
 		Entrypoint: []string{"/opt/hermes/.venv/bin/python"},
 		Cmd: []string{"-I", "-S", "/usr/local/lib/commander-browser/hermes/container.py",
 			"--source", "/opt/hermes", "--session", instance.config.Session,
-			"--lightpanda", "/usr/local/bin/lightpanda", "--home", "/home/commander/state/worker"},
+			"--lightpanda", "/usr/local/bin/lightpanda", "--home", "/home/commander/state/worker", "--model-relay"},
 		Env: []string{"HOME=/home/commander", "TMPDIR=/tmp", "PYTHONDONTWRITEBYTECODE=1", "PYTHONUNBUFFERED=1",
 			"HERMES_DISABLE_LAZY_INSTALLS=1", "ANONYMIZED_TELEMETRY=false",
 			"LIGHTPANDA_DISABLE_TELEMETRY=true", "LIGHTPANDA_DISABLE_CORE_DUMP=true"},

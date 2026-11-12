@@ -122,8 +122,9 @@
   preloaded immutable `sha256:` image ID. It never pulls an image, accepts action
   inputs or mounts the daemon socket into a worker. Docker access gives the
   trusted launcher control beyond this project; it is not a worker capability.
-  Model/renderer relays and session-manager integration remain separate work;
-  this launcher does not activate a default action backend.
+  The model relay is staged through `hermes.StartContainer`; renderer and
+  session-manager integration remain separate work. This launcher does not
+  activate a default action backend.
 - Each container uses UID1000, a read-only root, private PID/IPC/network/cgroup
   namespaces, bridge egress, no published ports, dropped capabilities and
   `no-new-privileges`. Fix its allowance to one CPU, 1,000,000,000 bytes of memory
@@ -302,6 +303,33 @@
   execution gate. Join HTTP work before clearing owned key/token bytes and before
   confirming session closure. Keep worker fingerprints as well as manager-owned
   protection so changing a trusted caller's context cannot forget earlier keys.
+- [internal/hermes/container.go](internal/hermes/container.go) stages the same
+  worker API on a pinned container and its exact full creation claim. Require
+  the advertised `model_relay: 1` capability before accepting work; an old image
+  must fail startup instead of attempting a host-loopback endpoint. Its Docker
+  wait has an independent cancellable lifetime. Cancelling that wait is not a
+  stopped receipt, and partial starts retain their uncertain resource reference.
+- [model_relay.py](internal/hermes/model_relay.py) gives unchanged Hermes a fresh
+  authenticated loopback HTTP adapter inside the worker for each run. Only
+  `/v1/models` and nonstreaming `/v1/chat/completions` cross the separate private
+  `model`/`model_reply` channel. The selected endpoint and real key stay in Go;
+  Go opens no model listener for this mode. Metadata uses the same protection
+  boundary as completion requests and responses. Never route these HTTP bodies,
+  credentials or histories through action handlers, logs, checkpoints or artifacts.
+- The isolated relay bounds each raw request and response to 512 KiB, using
+  base64 to remain below the existing 1 MiB frame limit. Reject oversized data
+  without truncation. The local-process backend retains its separate 2 MiB
+  request/1 MiB response bounds. Validate current execution and call identity,
+  retire completed call IDs, allow one provider exchange at a time and join
+  response delivery too. Extra SDK metadata/errors have a bounded RPC allowance;
+  forwarded completions still cannot exceed `max_iterations + 1`.
+- Stop and join the worker's HTTP listener/accepted connection and pending relay
+  before its SDK-worker join and result receipt. Cancellation wakes the original
+  waiter with a fixed nonretryable error; abandoned callbacks cannot adopt the
+  next run. Go joins provider work and relay delivery before clearing owned
+  credentials. Missing quiescence loses the resource and retains private state.
+  Until a separate renderer relay exists, container `RenderText` is unavailable;
+  never interpret its private CDP loopback address in the Go host's namespace.
 - [browser/intelligence/](browser/intelligence/) implements an in-process Go loop
   on the existing session context. Do not launch the native Lightpanda agent or
   attach another CDP connection for automation. Screenshot rendering has the
@@ -741,7 +769,13 @@ actual pinned worker readiness/control frames, private homes/PID/network,
 host environment/argv/file exclusion, detached-child teardown and retained
 private volume ownership. A fake Unix Docker endpoint verifies that failed or
 unconfirmed volume cleanup suppresses success and remains retryable after the
-container has already been removed. Test settings are not agent model settings.
+container has already been removed. Combine `hermesintegration` with this tag
+for real Hermes model-relay scenarios: native browsing/clarification, retained
+cookies/key rotation, private environment/file audits, blocked-provider
+cancellation and reuse, renderer refusal and oversized provider-response
+rejection. The provider fixture listens only in the trusted parent namespace,
+so these scenarios require the private relay. Test settings are not agent model
+settings.
 The bridge currently supports the OpenAI Chat Completions wire profile for
 OpenAI and explicitly selected Other. Tests include escaped provider echoes,
 native observations, key rotation, exact reusable-secret requests, private worker

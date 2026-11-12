@@ -55,6 +55,7 @@ class Run:
         self.sequence, self.questions, self.in_native = 0, 0, 0
         self.halted = ""
         self.agent = self.thread = None
+        self.model_relay = None
         self.request_threads = set()
         self.key = request.pop("key")
 
@@ -335,6 +336,9 @@ class Worker:
         if not isinstance(payload, dict):
             raise Refused("invalid_request")
         request = dict(payload)
+        relay = request.get("model_relay", False)
+        if type(relay) is not bool or relay != self.args.model_relay:
+            raise Refused("invalid_model_transport")
         if request.get("provider") != "openai":
             raise Refused("unsupported_provider")
         for name, maximum in (("objective", 16384), ("model", 200), ("base_url", 2048)):
@@ -350,6 +354,8 @@ class Worker:
                 endpoint.query or endpoint.fragment or endpoint.scheme not in {"http", "https"} or
                 endpoint.scheme == "http" and not local):
             raise Refused("invalid_endpoint")
+        if relay and request["base_url"] != "http://127.0.0.1/v1":
+            raise Refused("invalid_model_transport")
         for name, maximum in (("max_iterations", 30), ("max_tokens", 16384), ("timeout_seconds", 600)):
             value = request.get(name)
             if type(value) is not int or not 1 <= value <= maximum:
@@ -513,6 +519,11 @@ class Worker:
         agent = None
         try:
             self.verify_handlers()
+            if self.args.model_relay:
+                from model_relay import ModelRelay
+                run.model_relay = ModelRelay(self, run)
+                run.model_relay.start()
+                run.request["base_url"] = run.model_relay.base_url
             agent = self.agent_type(base_url=run.request["base_url"], api_key=run.key, provider="openai",
                                     api_mode="chat_completions", model=run.request["model"],
                                     max_iterations=run.request["max_iterations"], max_tokens=run.request["max_tokens"],
@@ -543,6 +554,11 @@ class Worker:
             run.halted = "uncertain"
             result = {"status": "uncertain"}
         finally:
+            # Joining the local HTTP adapter first breaks any SDK wait without
+            # waiting for more frames on this execution's private channel.
+            if run.model_relay is not None and not run.model_relay.close():
+                self.tainted = True
+                result = {"status": "uncertain"}
             if agent is not None:
                 try:
                     agent.release_clients()
@@ -556,6 +572,7 @@ class Worker:
             try:
                 with self.lock:
                     if (not native_quiet or run.in_native or self.tainted or
+                            (run.model_relay is not None and not run.model_relay.quiet()) or
                             any(identifier.startswith(run.id + ":") for identifier in self.pending)):
                         self.tainted = True
                         run.halted = "uncertain"
@@ -585,6 +602,8 @@ class Worker:
                 agent = run.agent
             else:
                 agent = None
+        if run is not None and run.model_relay is not None:
+            run.model_relay.cancel()
         if agent is not None:
             try:
                 threads = self.request_workers(agent)
@@ -747,6 +766,13 @@ class Worker:
                     except queue.Full:
                         raise Refused("duplicate_reply") from None
             return True
+        if kind == "model_reply":
+            with self.lock:
+                run = self.active
+                relay = run.model_relay if run is not None else None
+            if relay is not None and not relay.reply(identifier, payload):
+                raise Refused("invalid_model_reply")
+            return True
         if kind == "cancel":
             with self.lock:
                 if self.active is not None and self.active.id == identifier:
@@ -791,12 +817,16 @@ def main():
     parser = argparse.ArgumentParser()
     for name in ("source", "session", "lightpanda", "home"):
         parser.add_argument("--" + name, required=True)
+    parser.add_argument("--model-relay", action="store_true")
     args = parser.parse_args()
     logging.disable(logging.CRITICAL)
     worker = Worker(args, outgoing)
     try:
         worker.initialize()
-        worker.send("ready", "", {"hermes": IDENTITY["release"]})
+        ready = {"hermes": IDENTITY["release"]}
+        if args.model_relay:
+            ready["model_relay"] = 1
+        worker.send("ready", "", ready)
         while True:
             line = incoming.readline(MAX_FRAME + 1)
             if not line:

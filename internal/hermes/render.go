@@ -43,6 +43,11 @@ func (browser *Browser) RenderText(ctx context.Context, text string, width, heig
 		return nil, err
 	}
 	defer release()
+	if browser.worker.container != nil {
+		// A container loopback endpoint must never be interpreted in the Go
+		// host's network namespace. Rendering needs its own private relay.
+		return nil, ErrUnavailable
+	}
 	text, err = browser.protectText(text)
 	if err != nil {
 		return nil, err
