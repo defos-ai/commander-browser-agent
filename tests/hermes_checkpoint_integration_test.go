@@ -81,7 +81,7 @@ func (h *hermesSessionHost) runCheckpointed(ctx context.Context, binding session
 		return output, runErr
 	}
 	output.Claim = binding.Claim()
-	output.Session, runErr = h.manager.RunHermes(ctx, hermesScreenshotOptions(), func(workCtx context.Context) error {
+	output.Session, runErr = h.manager.RunHermes(ctx, h.options, func(workCtx context.Context) error {
 		if scenario.login != nil {
 			result, err := runHermesLoginFixture(workCtx, *scenario.login)
 			output.Login = &result

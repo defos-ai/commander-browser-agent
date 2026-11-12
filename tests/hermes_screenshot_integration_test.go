@@ -251,7 +251,7 @@ func checkHermesProtectedScreenshots(t *testing.T, h *hermesSessionHost, parent 
 
 func hermesScreenshotEvaluate(t *testing.T, h *hermesSessionHost, binding sessions.Binding, expression string) {
 	t.Helper()
-	_, err := h.manager.RunHermes(action.WithSession(t.Context(), &binding), hermesScreenshotOptions(), func(ctx context.Context) error {
+	_, err := h.manager.RunHermes(action.WithSession(t.Context(), &binding), h.options, func(ctx context.Context) error {
 		return hermes.WithExistingBrowser(ctx, func(source *hermes.Browser) error {
 			var response struct {
 				Exception json.RawMessage `json:"exceptionDetails"`
@@ -274,7 +274,7 @@ func hermesScreenshotState(t *testing.T, h *hermesSessionHost, binding sessions.
 		Frame json.RawMessage
 		Page  json.RawMessage
 	}
-	_, err := h.manager.RunHermes(action.WithSession(t.Context(), &binding), hermesScreenshotOptions(), func(ctx context.Context) error {
+	_, err := h.manager.RunHermes(action.WithSession(t.Context(), &binding), h.options, func(ctx context.Context) error {
 		return hermes.WithExistingBrowser(ctx, func(source *hermes.Browser) error {
 			if err := source.Execute(ctx, "Page.getFrameTree", map[string]any{}, &state.Frame); err != nil {
 				return err
@@ -294,7 +294,7 @@ func checkHermesScreenshotScopes(t *testing.T, h *hermesSessionHost, binding ses
 	t.Helper()
 	logs := &hermesRenderingWait{entered: make(chan struct{})}
 	var expired context.Context
-	_, err := h.manager.RunHermes(action.WithLogs(action.WithSession(t.Context(), &binding), logs), hermesScreenshotOptions(), func(ctx context.Context) error {
+	_, err := h.manager.RunHermes(action.WithLogs(action.WithSession(t.Context(), &binding), logs), h.options, func(ctx context.Context) error {
 		expired = ctx
 		image, err := browserscreenshot.CaptureHermes(context.WithoutCancel(ctx), 1280, 720)
 		if err == nil || len(image.PNG) != 0 {

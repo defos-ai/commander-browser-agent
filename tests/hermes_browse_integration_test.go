@@ -41,7 +41,7 @@ func newHermesBrowseFixture(h *hermesSessionHost) action.Executor {
 }
 
 func (fixture *hermesBrowseFixture) Run(ctx context.Context, raw json.RawMessage) (action.Result, error) {
-	result, err := fixture.host.setup.RunHermesBrowse(ctx, fixture.host.manager, hermesScreenshotOptions(), raw)
+	result, err := fixture.host.setup.RunHermesBrowse(ctx, fixture.host.manager, fixture.host.options, raw)
 	if fixture.returned != nil {
 		fixture.returned <- result
 	}

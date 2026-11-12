@@ -724,6 +724,10 @@ Keep the suite lean: prioritize agent behavior and meaningful regressions over
 repeated schema/configuration permutations or tests of framework internals.
 Shared HTTP pages belong in `tests/fixtures/`; the fake HTTP model belongs in
 `tests/fakes/`.
+For test-only changes, reuse a pinned runtime image and compile race binaries in
+a directly resource-limited Go bookworm container. Verify CPU, memory and swap
+limits from inside that compiler container; keep BuildKit stopped when no image
+rebuild is needed. Reuse its module/build cache to avoid repeated cold builds.
 
 ```sh
 go test -race -count=1 -timeout=3m ./... ./.github/tests
@@ -802,6 +806,13 @@ The container session scenario dispatches through the real FS bus and manager:
 unopened `use` refusal, direct-parent reuse, independent same-origin cookie jars,
 private inventory, pinned-runtime/creation-claim rejection, clean cancellation
 with reuse, and confirmed close with retained tombstones.
+The combined container workflow uses a loopback HTTP fixture inside one worker:
+managed model setup, native browse/clarification, reusable login credentials,
+transient OTP, authenticated browse reuse, and protected screenshot artifacts.
+It holds login's start receipt before website submissions, rejects output after
+refused final persistence, and refuses an independent saved replay fence before
+setup or container startup. Its fixture bootstrap uses an already prepared
+worker, so the successful path does not independently prove first-start ordering.
 The provider fixture listens only in the trusted parent namespace,
 so these scenarios require the private relay. Test settings are not agent model
 settings.
