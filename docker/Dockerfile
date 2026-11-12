@@ -53,7 +53,7 @@ COPY --from=build /out/commander-browser-agent /usr/local/bin/commander-browser-
 COPY --from=build /out/lightpanda /usr/local/bin/lightpanda
 COPY third_party/lightpanda/ /usr/share/doc/lightpanda/
 COPY third_party/hermes/ /usr/share/doc/hermes/
-COPY docker/check-hermes.py /usr/local/lib/commander-browser/hermes/check.py
+COPY browser/hermes/check.py /usr/local/lib/commander-browser/hermes/check.py
 ENV HOME=/home/commander \
     LIGHTPANDA_PATH=/usr/local/bin/lightpanda LIGHTPANDA_DISABLE_TELEMETRY=true \
     LIGHTPANDA_DISABLE_CORE_DUMP=true \
@@ -64,5 +64,5 @@ ENV HOME=/home/commander \
 USER 1000:1000
 WORKDIR /home/commander
 # Check the copied runtime as its real user, without model calls or browser startup.
-RUN /opt/hermes/.venv/bin/python -I /usr/local/lib/commander-browser/hermes/check.py
+RUN /opt/hermes/.venv/bin/python -I -S /usr/local/lib/commander-browser/hermes/check.py
 ENTRYPOINT ["/usr/local/bin/commander-browser-agent"]

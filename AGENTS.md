@@ -90,11 +90,29 @@
   out of image settings. No runtime dependency downloads or lazy installs.
   [docker/fetch-hermes.sh](docker/fetch-hermes.sh) pins the archive and both uv
   binaries; preserve the license and attribution in [third_party/hermes/](third_party/hermes/).
-  The offline readiness command is `/opt/hermes/.venv/bin/python -I
+  The offline readiness command is `/opt/hermes/.venv/bin/python -I -S
   /usr/local/lib/commander-browser/hermes/check.py`. It checks the packaged
   identity and imports using a temporary private home, without starting an
   agent, browser or model request. Native Go release binaries do not embed this
-  Python runtime; discovery and host integration are separate migration work.
+  Python runtime; packaged prerequisites must be installed independently.
+- [Hermes discovery](browser/hermes/) checks `HERMES_INSTALL_ROOT` (default
+  `/opt/hermes`) through the environment abstraction. The package directory is
+  trusted absolute host configuration; derive `.venv/bin/python` and preserve
+  that invocation path, since resolving its symlink loses virtualenv identity.
+  Do not search arbitrary Python installations. An explicit executable scope
+  must contain the exact absolute virtualenv `bin` directory; empty scope denies
+  execution. Return a fresh zero runtime on any failure and fixed actionable
+  requirements, never raw subprocess output or configured paths.
+- Docker and Go discovery share one offline checker. Use `-I -S`, a private home
+  and working directory, and clear inherited environment before loading site
+  hooks or runtime imports. Pin identity and imports; perform no model, secret,
+  session or browser work. Guard accidental Python socket/process activity during
+  imports, with a twenty-second checker alarm and twenty-five-second host bound.
+  Supply private temporary directories to avoid upstream's detached scratch
+  pruning. Decline urllib3's optional IPv6 bind probe without opening a socket;
+  other caught runtime-activity attempts still refuse readiness.
+  The audit hook is not an OS sandbox. Runtime readiness does not satisfy the
+  deployment-isolation cutover gate or activate native actions.
 - Local validation must stay within a combined 3 CPUs and 3,000,000,000 bytes
   of RAM, with swap disabled. Use a resource-limited Docker-container Buildx
   builder and stop it before running a container with the full allowance.
@@ -248,10 +266,10 @@
 - Model configuration and API keys must not come from the agent's environment.
   New sessions obtain provider/model choices through questions; Other also asks
   for its exact endpoint. Do not retain removed model-environment shortcuts or
-  aliases. Discovery uses the environment abstraction only for Lightpanda,
-  clears stale state, and never makes model network calls, asks questions or
-  requests secrets. Require HTTPS except local HTTP; reject embedded credentials,
-  URL query/fragment and redirects.
+  aliases. Runtime discovery uses the environment abstraction for Lightpanda
+  and Hermes, clears stale state, and never makes model network calls, asks
+  questions or requests secrets. Require HTTPS except local HTTP; reject embedded
+  credentials, URL query/fragment and redirects.
 - [Provider presets](browser/intelligence/provider.go) define fixed endpoints and
   provider-specific managed-secret names matching Playground. Do not import
   Commander apps. Always use `action.RequestReusableSecret` for the selected provider's
@@ -621,8 +639,12 @@ network. Use `--init` for this test container to reap browser descendants.
 The `hermesintegration` tag adds permanent private-bridge scenarios using the
 packaged Python/Hermes paths and a fake HTTP model: native navigation, host
 admission, clarification, cookie reuse across runs, cancellation and confirmed
-close. Commander dispatch scenarios also cover root allocation, direct-parent
-reuse, independent cookie jars, exact-claim rejection, private callback lifetime,
+close. Offline readiness scenarios use the actual packaged virtual environment,
+reject caught network/process import attempts, and require quiet metadata with
+no model requests, retained profiles or child processes. Discovery unit tests
+cover lexical virtualenv paths, explicit executable scope, failed rediscovery
+and cancellation causes. Commander dispatch scenarios also cover root allocation,
+direct-parent reuse, independent cookie jars, exact-claim rejection, private callback lifetime,
 inventory controls, clean cancellation with reuse and lost-target refusal.
 Native managed-login scenarios also cover password/OTP delivery without model
 setup, authenticated reuse by native reasoning, independent accounts on one
