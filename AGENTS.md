@@ -203,6 +203,27 @@
   accessible to the same OS user; deployment isolation remains a cutover gate.
   Do not add a second reasoning loop, fork upstream, parse terminal traces, or
   restore the discarded evaluation files.
+- The approved native browse contract is staged in
+  [internal/browsing/hermes_contract.go](internal/browsing/hermes_contract.go)
+  and [hermes_browse.go](internal/browsing/hermes_browse.go). It reports protected
+  final text, runtime status and Hermes's `api_calls` counter, which can omit
+  internal retries. Do not synthesize typed findings, grounded evidence,
+  `final_url`, browser-operation counts or actual token/cost usage. The starting
+  URL is part of the native task, not an independently confirmed navigation.
+- Native input uses `max_iterations` (default 12, 1–30),
+  `max_tokens_per_response` (default 2048, 1–16384) and `timeout_seconds`
+  (default 120, 5–180). Reject old Go limit fields and ambiguous JSON before
+  session/setup work. Omitted/empty `allowed_hosts` normalizes to `["*"]`;
+  reject every other hostname restriction. Native Python has no enforced
+  hostname/network boundary; a prompt or CDP navigation check cannot supply one.
+- Model setup retains its separate ten-minute bound. After setup, use one wall
+  clock for the start fence, startup, native/model work, clarification waits and
+  final persistence; do not pause it for questions. Outer execution deadlines
+  still win. Cancellation/ownership cleanup can require an additional bounded
+  join. Load the replay fence before setup, save start before worker startup,
+  and publish only validated protected `browse.json` after native quiescence,
+  manager health checks and the final checkpoint receipt. The staged helper uses
+  the same managed setup and host runner; default actions remain unchanged.
 - Keep the current Go actions active until the new integration passes its
   Commander-bound session, managed-secret, screenshot and checkpoint workflows.
   The private bridge is migration infrastructure, not an additional action or an
@@ -225,7 +246,8 @@
   loopback-only OpenAI-compatible endpoint. Forward only bounded nonstreaming
   requests for the exact model, to the fixed selected endpoint, with the real key
   only in its authentication header. Serve SDK metadata locally; never forward
-  metadata probes, SDK headers, redirects, provider errors or retries.
+  metadata probes, SDK headers, redirects or provider errors, and never retry a
+  provider request in the proxy.
   Canonicalize and protect incoming provider JSON before Hermes sees it, including
   nested JSON arguments, IDs and clarification fields. Protect outgoing requests
   and native observations with the same session fingerprints. Fail closed on
@@ -234,6 +256,13 @@
   Public Hermes middleware isolates failures and can fail open; it is not this
   credential boundary. Do not patch Hermes, add a second reasoning loop, or
   substitute terminal-output parsing for this transport.
+- Enforce each native response allowance in the model proxy as well as in
+  Hermes configuration. Preserve a smaller positive integer `max_tokens` or
+  `max_completion_tokens`, clamp a larger one and supply a missing allowance.
+  Reject competing aliases, duplicate root fields, unsupported generation
+  containers and multiple completions before provider contact. Forward at most
+  `max_iterations + 1` HTTP requests, including native retries. These are request
+  allowances, not a provider's actual generated-token or cost guarantee.
 - Worker close owns model-transport startup and shutdown independently of the
   execution gate. Join HTTP work before clearing owned key/token bytes and before
   confirming session closure. Keep worker fingerprints as well as manager-owned
@@ -656,6 +685,11 @@ source state and cookie continuity, and exercise allocated-renderer interruption
 Native checkpoint scenarios hold and retry actual persistence receipts before
 start, clarification, batch dispatch and final output; reject old fences, failed
 loads and saves; and verify cancellation, late receipts and explicit continuation.
+The staged native browse scenario combines managed setup, native observations,
+clarification, protected artifact upload, retained-page reuse, refused final
+persistence and a clarification consuming its wall allowance. Response-allowance
+tests exercise native truncation recovery without equating Hermes's reported
+counter with actual forwarded HTTP requests.
 Focused tests exercise the combined thirty-fence limit and exact execution/claim
 checks without starting a runtime.
 CI combines both integration tags with an eight-minute test-binary bound.

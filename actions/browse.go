@@ -208,7 +208,7 @@ func (a *Browse) Run(ctx context.Context, raw json.RawMessage) (result action.Re
 	}
 	credential := string(key)
 	redact := func(text string) string { return strings.ReplaceAll(text, credential, "[REDACTED]") }
-	if err := checkBrowseURLCredential(input.URL, credential); err != nil {
+	if err := browsing.CheckURLCredential(input.URL, credential); err != nil {
 		return action.Result{}, err
 	}
 	model, err := intelligence.NewModel(modelConfiguration, key)
@@ -323,61 +323,6 @@ func (input *BrowseInput) validate() error {
 		return errors.New("url hostname must be included in allowed_hosts")
 	}
 	return nil
-}
-
-func checkBrowseURLCredential(raw, credential string) error {
-	protected := errors.New("starting URL contains protected model credentials or excessive percent encoding")
-	if strings.Contains(raw, credential) {
-		return protected
-	}
-	target, err := url.Parse(raw)
-	if err != nil {
-		return errors.New("starting URL is invalid")
-	}
-	for _, component := range []struct {
-		value string
-		query bool
-	}{{value: target.EscapedPath()}, {value: target.RawQuery, query: true}, {value: target.EscapedFragment()}} {
-		value := component.value
-		for round := 0; round < 8; round++ {
-			if strings.Contains(value, credential) {
-				return protected
-			}
-			decoded := unescapeBrowseURLComponent(value, component.query)
-			if decoded == value {
-				break
-			}
-			value = decoded
-		}
-		if strings.Contains(value, credential) || unescapeBrowseURLComponent(value, component.query) != value {
-			return protected
-		}
-	}
-	return nil
-}
-
-func unescapeBrowseURLComponent(value string, query bool) string {
-	// A valid encoded percent can become literal text at the next layer. Keep
-	// those literals while decoding other escapes; they must not hide a key.
-	var escaped strings.Builder
-	for i := 0; i < len(value); i++ {
-		if value[i] == '%' && (i+2 >= len(value) || !browseHex(value[i+1]) || !browseHex(value[i+2])) {
-			escaped.WriteString("%25")
-		} else {
-			escaped.WriteByte(value[i])
-		}
-	}
-	var decoded string
-	if query {
-		decoded, _ = url.QueryUnescape(escaped.String())
-	} else {
-		decoded, _ = url.PathUnescape(escaped.String())
-	}
-	return decoded
-}
-
-func browseHex(value byte) bool {
-	return value >= '0' && value <= '9' || value >= 'a' && value <= 'f' || value >= 'A' && value <= 'F'
 }
 
 func validBrowseHost(host string) bool {

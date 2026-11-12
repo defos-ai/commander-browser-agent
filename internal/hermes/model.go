@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -34,24 +35,25 @@ type modelTransport struct {
 	token   []byte
 	key     []byte
 
-	endpoint string
-	model    string
-	limit    int
-	redact   func(string) string
-	ctx      context.Context
-	cancel   context.CancelFunc
-	server   *http.Server
-	client   *http.Client
-	http     *http.Transport
-	served   chan struct{}
-	joined   chan struct{}
-	handlers sync.WaitGroup
-	mu       sync.Mutex
-	closing  bool
-	requests int
-	fault    bool
-	close    sync.Once
-	closeErr error
+	endpoint  string
+	model     string
+	limit     int
+	maxTokens int
+	redact    func(string) string
+	ctx       context.Context
+	cancel    context.CancelFunc
+	server    *http.Server
+	client    *http.Client
+	http      *http.Transport
+	served    chan struct{}
+	joined    chan struct{}
+	handlers  sync.WaitGroup
+	mu        sync.Mutex
+	closing   bool
+	requests  int
+	fault     bool
+	close     sync.Once
+	closeErr  error
 }
 
 func startModelTransport(ctx context.Context, request Request, redact func(string) string) (*modelTransport, error) {
@@ -63,6 +65,7 @@ func startModelTransport(ctx context.Context, request Request, redact func(strin
 		ctx.Err() != nil || redact == nil || len(request.APIKey) == 0 || len(request.APIKey) > 8192 ||
 		!utf8.Valid(request.APIKey) || bytes.ContainsAny(request.APIKey, "\r\n\x00") ||
 		request.Model == "" || request.MaxIterations < 1 || request.MaxIterations > 30 ||
+		request.MaxTokens < 1 || request.MaxTokens > 16384 ||
 		request.TimeoutSeconds < 1 || request.TimeoutSeconds > 600 {
 		return nil, errModelTransport
 	}
@@ -78,7 +81,7 @@ func startModelTransport(ctx context.Context, request Request, redact func(strin
 	lifetime, cancel := context.WithTimeout(ctx, timeout)
 	m := &modelTransport{baseURL: "http://" + listener.Addr().String() + "/v1",
 		token: []byte(hex.EncodeToString(random[:])), key: bytes.Clone(request.APIKey),
-		endpoint: request.Endpoint, model: request.Model, limit: request.MaxIterations + 1,
+		endpoint: request.Endpoint, model: request.Model, limit: request.MaxIterations + 1, maxTokens: request.MaxTokens,
 		redact: redact, ctx: lifetime, cancel: cancel, served: make(chan struct{}), joined: make(chan struct{})}
 	clear(random[:])
 	// No environment proxies, redirects, automatic decompression,
@@ -132,14 +135,14 @@ func (m *modelTransport) handle(w http.ResponseWriter, r *http.Request) {
 	}
 	raw, err := io.ReadAll(io.LimitReader(r.Body, modelRequestLimit+1))
 	defer clear(raw)
-	if err != nil || len(raw) > modelRequestLimit {
+	if err != nil || len(raw) > modelRequestLimit || !uniqueModelRequestFields(raw) {
 		modelFailure(w)
 		return
 	}
 	value, err := m.cleanJSON(raw, modelRequestLimit)
 	request, ok := value.(map[string]any)
 	stream, hasStream := request["stream"]
-	if err != nil || !ok || request["model"] != m.model || hasStream && stream != false {
+	if err != nil || !ok || request["model"] != m.model || hasStream && stream != false || !m.constrainResponseAllowance(request) {
 		modelFailure(w)
 		return
 	}
@@ -199,6 +202,80 @@ func (m *modelTransport) handle(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write(clean)
+}
+
+// constrainResponseAllowance bounds the provider request's per-response
+// allowance. It does not measure actual generated tokens, reasoning or cost.
+func (m *modelTransport) constrainResponseAllowance(request map[string]any) bool {
+	for _, name := range []string{"max_output_tokens", "max_new_tokens", "max_length", "min_tokens", "min_new_tokens", "min_length",
+		"generation_config", "generationConfig", "extra_body", "best_of"} {
+		if _, present := request[name]; present {
+			return false
+		}
+	}
+	if value, present := request["n"]; present {
+		number, ok := value.(json.Number)
+		count, err := number.Int64()
+		if !ok || err != nil || count != 1 {
+			return false
+		}
+	}
+	legacy, hasLegacy := request["max_tokens"]
+	completion, hasCompletion := request["max_completion_tokens"]
+	if hasLegacy && hasCompletion {
+		return false
+	}
+	name, allowance := "max_tokens", int64(m.maxTokens)
+	if hasLegacy || hasCompletion {
+		value := legacy
+		if hasCompletion {
+			name, value = "max_completion_tokens", completion
+		}
+		number, ok := value.(json.Number)
+		requested, err := number.Int64()
+		if !ok || err != nil || requested < 1 {
+			return false
+		}
+		if requested < allowance {
+			allowance = requested
+		}
+	}
+	// New canonical metadata must obey the same known-value protection as the
+	// original body, including a numeric value introduced by clamping.
+	if m.protectText(name) != name || m.protectText(strconv.FormatInt(allowance, 10)) != strconv.FormatInt(allowance, 10) {
+		return false
+	}
+	request[name] = allowance
+	return true
+}
+
+// Canonicalization must not silently pick one competing top-level allowance.
+func uniqueModelRequestFields(raw []byte) bool {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	first, err := decoder.Token()
+	if err != nil || first != json.Delim('{') {
+		return false
+	}
+	seen := make(map[string]bool)
+	for decoder.More() {
+		key, err := decoder.Token()
+		name, ok := key.(string)
+		if err != nil || !ok || seen[name] {
+			return false
+		}
+		seen[name] = true
+		var value json.RawMessage
+		if decoder.Decode(&value) != nil {
+			return false
+		}
+		clear(value)
+	}
+	last, err := decoder.Token()
+	if err != nil || last != json.Delim('}') {
+		return false
+	}
+	_, err = decoder.Token()
+	return err == io.EOF
 }
 
 type modelBody struct {

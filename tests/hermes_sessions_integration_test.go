@@ -79,7 +79,7 @@ type hermesSessionHost struct {
 	checkpoints            map[string]executions.Execution
 }
 
-func newHermesSessionHost(t *testing.T, cases map[string]hermesSessionScenario) *hermesSessionHost {
+func newHermesSessionHost(t *testing.T, cases map[string]hermesSessionScenario, extra ...func(*hermesSessionHost) action.Executor) *hermesSessionHost {
 	t.Helper()
 	profilesBefore := hermesSessionProfiles(t)
 	h := &hermesSessionHost{t: t, claims: map[string]sessions.CreationClaim{}, accepted: map[string]messages.Message{}, checkpoints: map[string]executions.Execution{}}
@@ -180,6 +180,11 @@ func newHermesSessionHost(t *testing.T, cases map[string]hermesSessionScenario) 
 	capture := newHermesScreenshot(h.manager)
 	executors = append(executors, capture)
 	h.definitions = append(h.definitions, capture.Action().Definition())
+	for _, makeExecutor := range extra {
+		executor := makeExecutor(h)
+		executors = append(executors, executor)
+		h.definitions = append(h.definitions, executor.Action().Definition())
+	}
 	root := t.TempDir()
 	h.bus, err = fscomms.NewFsBus(filepath.Join(root, "bus"))
 	hermesSessionCheck(t, err)
