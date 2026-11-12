@@ -122,9 +122,9 @@
   preloaded immutable `sha256:` image ID. It never pulls an image, accepts action
   inputs or mounts the daemon socket into a worker. Docker access gives the
   trusted launcher control beyond this project; it is not a worker capability.
-  The model relay is staged through `hermes.StartContainer`; renderer and
-  session-manager integration remain separate work. This launcher does not
-  activate a default action backend.
+  Model and protected screenshot relays are staged through
+  `hermes.StartContainer`; session-manager integration remains separate work.
+  This launcher does not activate a default action backend.
 - Each container uses UID1000, a read-only root, private PID/IPC/network/cgroup
   namespaces, bridge egress, no published ports, dropped capabilities and
   `no-new-privileges`. Fix its allowance to one CPU, 1,000,000,000 bytes of memory
@@ -328,8 +328,9 @@
   waiter with a fixed nonretryable error; abandoned callbacks cannot adopt the
   next run. Go joins provider work and relay delivery before clearing owned
   credentials. Missing quiescence loses the resource and retains private state.
-  Until a separate renderer relay exists, container `RenderText` is unavailable;
-  never interpret its private CDP loopback address in the Go host's namespace.
+  Container rendering uses the separate namespace-local Go helper described
+  below; never interpret its private CDP loopback address in the Go host's
+  namespace.
 - [browser/intelligence/](browser/intelligence/) implements an in-process Go loop
   on the existing session context. Do not launch the native Lightpanda agent or
   attach another CDP connection for automation. Screenshot rendering has the
@@ -551,6 +552,20 @@
   bounded to 128 KiB for Unicode text and redaction overlap; command parameters
   and filtered event batches retain their separate 32 KiB limits. PNG bytes use
   the isolated Go renderer connection, never the worker JSON protocol.
+- Isolated workers run the fixed packaged Go helper
+  `/usr/local/lib/commander-browser/render-text` through the trusted launcher's
+  Docker exec transport. Send only bounded protected plain text, dimensions and
+  the validated owned loopback endpoint over its private input; never include
+  source DOM, cookies, credentials or model settings. The helper shares
+  `internal/textrender` and opens its temporary renderer inside the worker's
+  network namespace, without a host listener or published port.
+  PNG bytes use a bounded binary stream separate from the Hermes protocol.
+  Keep input open as the helper's cancellation lease, and require both renderer
+  cleanup and a stopped successful exec receipt before returning bytes. Retain
+  ownership through cancellation and source shutdown; a missing cleanup receipt
+  loses the source rather than enabling reuse. Reconfirm the retained source
+  identity after rendering. This staged helper does not activate a default
+  action backend or change session-manager routing.
 - Use native PNG output, validate its byte/pixel bounds and actual dimensions,
   and upload through ArtifactFileStore via action results. Renderer metadata
   belongs in output and `screenshot.json` beside `screenshot.png`; never include
@@ -772,8 +787,9 @@ unconfirmed volume cleanup suppresses success and remains retryable after the
 container has already been removed. Combine `hermesintegration` with this tag
 for real Hermes model-relay scenarios: native browsing/clarification, retained
 cookies/key rotation, private environment/file audits, blocked-provider
-cancellation and reuse, renderer refusal and oversized provider-response
-rejection. The provider fixture listens only in the trusted parent namespace,
+cancellation and reuse, protected screenshot pixels/source continuity,
+renderer-helper cancellation/close and oversized provider-response rejection.
+The provider fixture listens only in the trusted parent namespace,
 so these scenarios require the private relay. Test settings are not agent model
 settings.
 The bridge currently supports the OpenAI Chat Completions wire profile for

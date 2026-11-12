@@ -2,6 +2,7 @@ package hermes
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net"
 	"net/url"
@@ -9,7 +10,10 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/defos-ai/commander-browser-agent/internal/hermes/containers"
 	"github.com/defos-ai/commander-browser-agent/internal/sensitive"
+	"github.com/defos-ai/commander-browser-agent/internal/textrender"
+	"github.com/defos-ai/commander/framework/agent/action"
 )
 
 // ProtectText applies both the callback's manager-owned protection and this
@@ -43,13 +47,11 @@ func (browser *Browser) RenderText(ctx context.Context, text string, width, heig
 		return nil, err
 	}
 	defer release()
-	if browser.worker.container != nil {
-		// A container loopback endpoint must never be interpreted in the Go
-		// host's network namespace. Rendering needs its own private relay.
-		return nil, ErrUnavailable
-	}
 	text, err = browser.protectText(text)
 	if err != nil {
+		return nil, err
+	}
+	if err := textrender.Validate(text, width, height); err != nil {
 		return nil, err
 	}
 	reply, err := browser.request(ctx, browserCommand{Command: "renderer"})
@@ -69,9 +71,45 @@ func (browser *Browser) RenderText(ctx context.Context, text string, width, heig
 		browser.worker.fail(ErrProtocol)
 		return nil, ErrProtocol
 	}
-	png, err := browser.worker.render.Render(ctx, browser.lease, endpoint, text, width, height)
+	var png []byte
+	if browser.worker.container == nil {
+		png, err = browser.worker.render.Render(ctx, browser.lease, endpoint, text, width, height)
+	} else {
+		png, err = browser.worker.render.RenderUsing(ctx, browser.lease, text, width, height, func(active context.Context) ([]byte, error) {
+			if err := action.Log(active, "Rendering the protected screenshot"); err != nil {
+				return nil, errors.Join(ErrUnavailable, contextError(active))
+			}
+			png, err := browser.worker.container.Render(active, endpoint, text, width, height)
+			if errors.Is(err, containers.ErrUncertain) {
+				browser.mu.Lock()
+				browser.uncertain = true
+				browser.mu.Unlock()
+				browser.worker.fail(ErrUncertain)
+			}
+			return png, err
+		})
+		if err == nil {
+			// Reconfirm the original source before lending bytes to the caller.
+			// The container's loopback endpoint is never dialed by this host.
+			var check json.RawMessage
+			check, err = browser.request(ctx, browserCommand{Command: "renderer"})
+			var confirmed struct {
+				Endpoint string `json:"endpoint"`
+			}
+			if err == nil && (strictJSON(check, &confirmed) != nil || confirmed.Endpoint != result.Endpoint) {
+				browser.worker.fail(ErrProtocol)
+				err = ErrProtocol
+			}
+			clear(check)
+		}
+	}
 	if ctx.Err() != nil || browser.lease.Err() != nil {
+		clear(png)
 		return nil, errors.Join(err, ErrClosed, contextError(ctx), contextError(browser.lease))
+	}
+	if err != nil {
+		clear(png)
+		return nil, err
 	}
 	return png, err
 }

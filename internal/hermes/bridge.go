@@ -964,7 +964,13 @@ func (w *Worker) shutdown() {
 	grace, finish := context.WithTimeout(context.Background(), 10*time.Second)
 	defer finish()
 	w.render.Stop()
-	renderWait, stopRenderWait := context.WithTimeout(context.Background(), 2*time.Second)
+	renderAllowance := 2 * time.Second
+	if w.container != nil {
+		// The namespace-local helper needs a stopped Docker exec receipt as
+		// well as its bounded renderer/socket cleanup receipt.
+		renderAllowance = 4 * time.Second
+	}
+	renderWait, stopRenderWait := context.WithTimeout(context.Background(), renderAllowance)
 	renderClean := w.render.Wait(renderWait) == nil
 	stopRenderWait()
 	// Closing a session also owns a model transport still being prepared by

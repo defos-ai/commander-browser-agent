@@ -118,19 +118,7 @@ func TestHermesContainerModelRelayProtectsNativeReasoningAndReuse(t *testing.T) 
 			t.Fatal("model configuration or a real provider key entered the worker's creation settings")
 		}
 	}
-	// The source page is live, but its loopback CDP endpoint belongs to another
-	// network namespace. Rendering must not try the old host-loopback fallback.
-	err = hermes.WithWorker(ctx, worker, func(ctx context.Context) error {
-		return hermes.WithExistingBrowser(ctx, func(browser *hermes.Browser) error {
-			if _, err := browser.RenderText(ctx, "Protected fixture", 1280, 720); !errors.Is(err, hermes.ErrUnavailable) {
-				t.Error("an isolated browser attempted rendering before its private renderer relay")
-			}
-			return nil
-		})
-	})
-	if err != nil || worker.Verify(ctx) != nil || model.Calls() != 5 {
-		t.Fatal("the unsupported renderer path changed the retained isolated session")
-	}
+	checkHermesContainerScreenshots(t, worker, config, model.Calls, firstKey, secondKey)
 }
 
 func TestHermesContainerModelRelayCancellationJoinsBeforeReuse(t *testing.T) {

@@ -25,6 +25,12 @@ type attachment struct {
 }
 
 func attach(ctx context.Context, socket, reference string) (*attachment, error) {
+	return hijack(ctx, socket, apiPrefix+"/containers/"+reference+"/attach?stream=1&stdin=1&stdout=1&stderr=1", nil, false)
+}
+
+// hijack shares Docker's bounded multiplexed framing with the fixed renderer
+// exec. Renderer stderr is a protocol failure rather than diagnostic output.
+func hijack(ctx context.Context, socket, path string, body []byte, strictOutput bool) (*attachment, error) {
 	connection, err := (&net.Dialer{}).DialContext(ctx, "unix", socket)
 	if err != nil {
 		return nil, operationError(ctx, ErrUnavailable)
@@ -49,12 +55,15 @@ func attach(ctx context.Context, socket, reference string) (*attachment, error) 
 			_ = connection.Close()
 		}
 	}()
-	request, err := http.NewRequest(http.MethodPost, "http://docker"+apiPrefix+"/containers/"+reference+"/attach?stream=1&stdin=1&stdout=1&stderr=1", nil)
+	request, err := http.NewRequest(http.MethodPost, "http://docker"+path, bytes.NewReader(body))
 	if err != nil {
 		return nil, ErrUnavailable
 	}
 	request.Header.Set("Connection", "Upgrade")
 	request.Header.Set("Upgrade", "tcp")
+	if body != nil {
+		request.Header.Set("Content-Type", "application/json")
+	}
 	if request.Write(connection) != nil {
 		return nil, operationError(ctx, ErrUnavailable)
 	}
@@ -89,7 +98,7 @@ func attach(ctx context.Context, socket, reference string) (*attachment, error) 
 		return nil, operationError(ctx, ErrUnavailable)
 	}
 	stream := &attachment{connection: connection}
-	stream.output = attachOutput{stream: stream, reader: reader}
+	stream.output = attachOutput{stream: stream, reader: reader, strict: strictOutput}
 	settled = true
 	return stream, nil
 }
@@ -144,6 +153,7 @@ type attachOutput struct {
 	mu        sync.Mutex
 	remaining uint32
 	failed    bool
+	strict    bool
 }
 
 func (output *attachOutput) Read(buffer []byte) (int, error) {
@@ -166,6 +176,9 @@ func (output *attachOutput) Read(buffer []byte) (int, error) {
 			return output.fail()
 		}
 		if header[0] == 2 {
+			if output.strict && length != 0 {
+				return output.fail()
+			}
 			if _, err := io.CopyN(io.Discard, output.reader, int64(length)); err != nil {
 				return output.fail()
 			}

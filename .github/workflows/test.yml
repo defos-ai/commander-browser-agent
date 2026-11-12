@@ -68,6 +68,7 @@ jobs:
             test -s /usr/share/doc/hermes/LICENSE
             test -s /usr/share/doc/hermes/NOTICE
             test -s /usr/local/lib/python3.14/LICENSE.txt
+            test -x /usr/local/lib/commander-browser/render-text
             /opt/hermes/.venv/bin/python -I -S /usr/local/lib/commander-browser/hermes/check.py
           '
       - name: Build agent workflow tests
