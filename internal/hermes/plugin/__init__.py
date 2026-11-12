@@ -24,7 +24,7 @@ def register(ctx):
         return bridge().browser(native.handler, args)
 
     def denied_terminal(_args, **_kwargs):
-        bridge().halt("failed")
+        bridge().deny_terminal()
         return json.dumps({"error": "The generic terminal tool is unavailable in this browser worker."})
 
     for name, schema, handler in (("browser_exec", schemas["browser_exec"], browser),

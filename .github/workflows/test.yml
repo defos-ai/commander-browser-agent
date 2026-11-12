@@ -103,7 +103,9 @@ jobs:
                 echo "Browser processes remain after session cleanup" >&2
                 exit 1
               fi
-              for session_profile in /tmp/commander-browser-session-* /tmp/commander-hermes-*; do
+              # Hermes tests check each clean-close profile delta and explicitly
+              # require retained private state after deliberate uncertain loss.
+              for session_profile in /tmp/commander-browser-session-*; do
                 if [ -e "$session_profile" ]; then
                   echo "Browser profile remains after session cleanup" >&2
                   exit 1

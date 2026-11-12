@@ -14,8 +14,16 @@ import (
 	"github.com/defos-ai/commander/framework/id"
 )
 
-// Manager implements Commander session inventory and controls. Browser processes
-// are created only by Run, after the framework has prepared their identities.
+// sessionRuntime is retained independently of an individual action. The two
+// adapters have separate automation connections and can never share a claim.
+type sessionRuntime interface {
+	Done() <-chan struct{}
+	Verify(context.Context) error
+	Close() error
+}
+
+// Manager implements Commander session inventory and controls. Runtime work
+// starts only inside session callbacks after the framework prepares identity.
 type Manager struct {
 	owner     string
 	mu        sync.Mutex
@@ -30,6 +38,9 @@ type entry struct {
 	claim       sessions.CreationClaim
 	view        sessions.Session
 	engine      Engine
+	backend     string
+	resource    sessionRuntime
+	hermesPaths HermesOptions
 	gate        chan struct{}
 	stopping    chan struct{}
 	lifetime    context.Context
@@ -260,6 +271,10 @@ func (m *Manager) browser(ctx context.Context, item *entry, mode sessions.Mode, 
 		m.mu.Unlock()
 		return nil, err
 	}
+	if item.backend != "" && item.backend != "go" {
+		m.mu.Unlock()
+		return nil, errors.New("browser session belongs to a different runtime")
+	}
 	if item.engine != "" && item.engine != options.Engine {
 		m.mu.Unlock()
 		return nil, errors.New("browser engine differs from the session's engine")
@@ -280,6 +295,7 @@ func (m *Manager) browser(ctx context.Context, item *entry, mode sessions.Mode, 
 		return nil, errors.New("browser session has not been started")
 	}
 	item.engine = options.Engine
+	item.backend = "go"
 	item.view.Kind, item.view.Label, item.view.Busy = string(options.Engine), engineLabel(options.Engine), true
 	item.lifetime, item.cancel = context.WithCancel(context.Background())
 	item.startDone = make(chan struct{})
@@ -291,6 +307,9 @@ func (m *Manager) browser(ctx context.Context, item *entry, mode sessions.Mode, 
 	stopStartup()
 	m.mu.Lock()
 	item.browser = browser
+	if browser != nil {
+		item.resource = browser
+	}
 	close(item.startDone)
 	if err == nil && browser == nil {
 		err = errors.New("browser startup returned no runtime")
@@ -318,7 +337,7 @@ func (m *Manager) browser(ctx context.Context, item *entry, mode sessions.Mode, 
 	return browser, nil
 }
 
-func (m *Manager) monitor(item *entry, browser *browserRuntime) {
+func (m *Manager) monitor(item *entry, browser sessionRuntime) {
 	<-browser.Done()
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -397,11 +416,12 @@ func (m *Manager) Control(ctx context.Context, request sessions.Control) (sessio
 		m.mu.Unlock()
 		return sessions.Session{}, err
 	}
-	if item.browser == nil {
+	if item.resource == nil {
 		m.mu.Unlock()
 		return sessions.Session{}, errors.New("browser session has not been started")
 	}
-	browser := item.browser
+	browser := item.resource
+	revision := item.view.Revision
 	m.mu.Unlock()
 	bounded, cancel := context.WithTimeout(ctx, 5*time.Second)
 	err := browser.Verify(bounded)
@@ -414,11 +434,18 @@ func (m *Manager) Control(ctx context.Context, request sessions.Control) (sessio
 	if unavailable := m.availableLocked(item); unavailable != nil {
 		return item.view.Clone(), unavailable
 	}
+	if item.backend == "hermes" {
+		m.applyHermesHealthLocked(item, err, revision)
+		return item.view.Clone(), err
+	}
 	if err != nil {
 		item.view.State, item.view.Reason, item.view.VerifiedAt = "unverified", "Browser connection could not be verified", nil
 	} else {
 		now := time.Now().UTC()
 		item.view.State, item.view.Reason, item.view.VerifiedAt = "connected", "", &now
+		if item.view.ConnectedAt == nil {
+			item.view.ConnectedAt = &now
+		}
 	}
 	m.touchLocked(item)
 	return item.view.Clone(), err
@@ -457,7 +484,7 @@ func (m *Manager) cleanupLocked(item *entry, explicit bool) <-chan struct{} {
 			<-started
 		}
 		m.mu.Lock()
-		browser := item.browser
+		browser := item.resource
 		m.mu.Unlock()
 		var err error
 		if browser != nil {
@@ -514,7 +541,9 @@ func (m *Manager) Close() error {
 			}{item, m.cleanupLocked(item, false)})
 		}
 		m.mu.Unlock()
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		// Native workers need time for their graceful shutdown and forced reap
+		// bounds, including a startup that was interrupted by this owner close.
+		ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 		defer cancel()
 		for _, wait := range pending {
 			select {

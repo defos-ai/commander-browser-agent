@@ -23,12 +23,15 @@ import (
 )
 
 var (
-	ErrUnavailable = errors.New("Hermes worker is unavailable")
-	ErrProtocol    = errors.New("Hermes worker protocol failed")
-	ErrUncertain   = errors.New("Hermes worker cleanup or browser state is uncertain")
-	ErrClosed      = errors.New("Hermes worker is closed")
-	errHandler     = errors.New("Hermes host event was not accepted")
-	errRequest     = errors.New("invalid Hermes execution request")
+	ErrUnavailable  = errors.New("Hermes worker is unavailable")
+	ErrProtocol     = errors.New("Hermes worker protocol failed")
+	ErrUncertain    = errors.New("Hermes worker cleanup or browser state is uncertain")
+	ErrClosed       = errors.New("Hermes worker is closed")
+	ErrNotConnected = errors.New("Hermes browser has not connected")
+	ErrUnverified   = errors.New("Hermes browser connection could not be verified")
+	ErrLost         = errors.New("Hermes browser identity is lost")
+	errHandler      = errors.New("Hermes host event was not accepted")
+	errRequest      = errors.New("invalid Hermes execution request")
 )
 
 const maxFrame = 1 << 20
@@ -40,6 +43,10 @@ type frame struct {
 	Payload json.RawMessage `json:"payload"`
 }
 
+type health struct {
+	State string `json:"state"`
+}
+
 // Worker owns one private host bridge and its original creation claim. A lost
 // worker cannot be restarted or rebound; the manager must allocate a new one.
 type Worker struct {
@@ -49,21 +56,22 @@ type Worker struct {
 	input  *os.File
 	output *os.File
 
-	lifetime context.Context
-	cancel   context.CancelCauseFunc
-	writeMu  sync.Mutex
-	gate     chan struct{}
-	mu       sync.Mutex
-	ready    bool
-	closing  bool
-	fault    bool
-	runID    string
-	run      chan frame
-	closeID  string
-	ack      bool
-	clean    bool
-	waitErr  error
-	closeErr error
+	lifetime  context.Context
+	cancel    context.CancelCauseFunc
+	writeGate chan struct{}
+	gate      chan struct{}
+	mu        sync.Mutex
+	ready     bool
+	closing   bool
+	fault     bool
+	runID     string
+	run       chan frame
+	closeID   string
+	ack       bool
+	clean     bool
+	waitErr   error
+	closeErr  error
+	health    map[string]chan health
 
 	readyDone chan error
 	procDone  chan struct{}
@@ -75,7 +83,8 @@ type Worker struct {
 
 // Start checks readiness only. It never supplies model credentials or starts a
 // browser. The caller's cancellation stops startup, not a successfully started
-// worker's subsequent lifetime.
+// worker's subsequent lifetime. A failed startup returns a non-nil worker when
+// cleanup is uncertain, so its owner can retain the lost resource reference.
 func Start(ctx context.Context, config Config) (*Worker, error) {
 	if err := contextError(ctx); err != nil {
 		return nil, err
@@ -143,6 +152,7 @@ func Start(ctx context.Context, config Config) (*Worker, error) {
 	lifetime, cancel := context.WithCancelCause(context.Background())
 	w := &Worker{config: config, work: work, cmd: command, input: input, output: output,
 		lifetime: lifetime, cancel: cancel, gate: make(chan struct{}, 1), readyDone: make(chan error, 1),
+		writeGate: make(chan struct{}, 1), health: make(map[string]chan health),
 		procDone: make(chan struct{}), readDone: make(chan struct{}), closedAck: make(chan struct{}), closeDone: make(chan struct{})}
 	go w.readFrames()
 	go w.waitProcess()
@@ -157,7 +167,11 @@ func Start(ctx context.Context, config Config) (*Worker, error) {
 	case <-w.procDone:
 	}
 	closeErr := w.Close()
-	return nil, errors.Join(ErrUnavailable, contextError(startup), closeErr)
+	err = errors.Join(ErrUnavailable, contextError(startup), closeErr)
+	if errors.Is(closeErr, ErrUncertain) {
+		return w, err
+	}
+	return nil, err
 }
 
 func validPath(path string, directory bool) bool {
@@ -204,7 +218,7 @@ func (w *Worker) fail(cause error) {
 	w.mu.Lock()
 	w.fault = true
 	w.mu.Unlock()
-	w.cancel(cause)
+	w.cancel(errors.Join(ErrLost, cause))
 	select {
 	case w.readyDone <- cause:
 	default:
@@ -263,6 +277,25 @@ func (w *Worker) route(message frame) bool {
 			return true
 		}
 	}
+	if message.Kind == "health" {
+		target, expected := w.health[message.ID]
+		var status health
+		if expected && strictJSON(message.Payload, &status) == nil &&
+			(status.State == "starting" || status.State == "connected" || status.State == "unverified" || status.State == "lost") {
+			delete(w.health, message.ID)
+			w.mu.Unlock()
+			if target != nil {
+				target <- status
+			}
+			if status.State == "lost" {
+				w.fail(ErrLost)
+			}
+			return true
+		}
+		w.mu.Unlock()
+		w.fail(ErrProtocol)
+		return false
+	}
 	current, target := w.runID, w.run
 	valid := w.ready && target != nil && ((message.Kind == "event" && strings.HasPrefix(message.ID, current+":")) ||
 		(message.Kind == "result" && message.ID == current))
@@ -320,8 +353,15 @@ func (w *Worker) send(ctx context.Context, kind, id string, payload any) error {
 	defer clear(data)
 	data = append(data, '\n')
 	defer clear(data)
-	w.writeMu.Lock()
-	defer w.writeMu.Unlock()
+	select {
+	case w.writeGate <- struct{}{}:
+		defer func() { <-w.writeGate }()
+	case <-ctx.Done():
+		return contextError(ctx)
+	}
+	if err := contextError(ctx); err != nil {
+		return err
+	}
 	deadline := time.Now().Add(5 * time.Second)
 	if end, ok := ctx.Deadline(); ok && end.Before(deadline) {
 		deadline = end
@@ -331,9 +371,97 @@ func (w *Worker) send(ctx context.Context, kind, id string, payload any) error {
 	}
 	n, err := w.input.Write(data)
 	if err != nil || n != len(data) {
+		if n == 0 && ctx.Err() != nil {
+			return contextError(ctx)
+		}
 		return ErrProtocol
 	}
 	return nil
+}
+
+// Done closes when the owning worker closes or loses its original identity.
+func (w *Worker) Done() <-chan struct{} { return w.lifetime.Done() }
+
+// Verify observes the existing transport only. It neither enters the serialized
+// execution gate nor creates a browser, reconnects, or selects another target.
+func (w *Worker) Verify(ctx context.Context) error {
+	if err := contextError(ctx); err != nil {
+		return err
+	}
+	identifier, err := freshID()
+	if err != nil {
+		return ErrUnverified
+	}
+	response := make(chan health, 1)
+	w.mu.Lock()
+	if w.fault {
+		w.mu.Unlock()
+		return ErrLost
+	}
+	if w.closing {
+		w.mu.Unlock()
+		return ErrClosed
+	}
+	if !w.ready || len(w.health) >= 16 {
+		w.mu.Unlock()
+		return ErrUnverified
+	}
+	w.health[identifier] = response
+	w.mu.Unlock()
+	// Keep abandoned IDs until their reply arrives, so a late receipt cannot be
+	// mistaken for another check. The small pending limit bounds this state.
+	defer func() {
+		w.mu.Lock()
+		if _, pending := w.health[identifier]; pending {
+			w.health[identifier] = nil
+		}
+		w.mu.Unlock()
+	}()
+	check, stop := context.WithTimeout(ctx, 2*time.Second)
+	defer stop()
+	if err := w.send(check, "verify", identifier, struct{}{}); err != nil {
+		if errors.Is(err, ErrProtocol) {
+			w.fail(ErrProtocol)
+			return errors.Join(ErrLost, ErrProtocol)
+		}
+		w.mu.Lock()
+		delete(w.health, identifier) // no frame was written
+		w.mu.Unlock()
+		return errors.Join(ErrUnverified, contextError(check))
+	}
+	select {
+	case status := <-response:
+		w.mu.Lock()
+		lost, closing := w.fault, w.closing
+		w.mu.Unlock()
+		if status.State == "lost" || lost {
+			return ErrLost
+		}
+		if closing {
+			return ErrClosed
+		}
+		if err := contextError(check); err != nil {
+			return errors.Join(ErrUnverified, err)
+		}
+		switch status.State {
+		case "connected":
+			return nil
+		case "starting":
+			return ErrNotConnected
+		default:
+			return ErrUnverified
+		}
+	case <-check.Done():
+		return errors.Join(ErrUnverified, contextError(check))
+	case <-w.lifetime.Done():
+		w.mu.Lock()
+		lost := w.fault
+		w.mu.Unlock()
+		if lost {
+			return ErrLost
+		}
+		return ErrClosed
+	}
 }
 
 // Run serializes executions without holding the lifecycle lock. Controls may
@@ -350,6 +478,9 @@ func (w *Worker) Run(ctx context.Context, request Request, handler Handler) (Res
 	case <-w.lifetime.Done():
 		return Result{}, errors.Join(ErrClosed, contextError(w.lifetime))
 	}
+	if err := contextError(ctx); err != nil {
+		return Result{}, err
+	}
 	identifier, err := freshID()
 	if err != nil {
 		return Result{}, err
@@ -357,7 +488,11 @@ func (w *Worker) Run(ctx context.Context, request Request, handler Handler) (Res
 	frames := make(chan frame, 8)
 	w.mu.Lock()
 	if w.closing || w.fault || !w.ready {
+		lost := w.fault
 		w.mu.Unlock()
+		if lost {
+			return Result{}, errors.Join(ErrClosed, ErrLost)
+		}
 		return Result{}, ErrClosed
 	}
 	w.runID, w.run = identifier, frames
@@ -376,6 +511,14 @@ func (w *Worker) Run(ctx context.Context, request Request, handler Handler) (Res
 		}
 	}()
 	if err := w.send(active, "run", identifier, request); err != nil {
+		if !errors.Is(err, ErrProtocol) {
+			w.mu.Lock()
+			if w.runID == identifier {
+				w.runID, w.run = "", nil
+			}
+			w.mu.Unlock()
+			return Result{}, err // canceled before any command bytes were written
+		}
 		w.fail(ErrProtocol)
 		return Result{}, errors.Join(err, contextError(active), w.Close())
 	}
@@ -384,13 +527,10 @@ func (w *Worker) Run(ctx context.Context, request Request, handler Handler) (Res
 	for {
 		select {
 		case <-active.Done():
-			cancelCtx, finish := context.WithTimeout(context.Background(), time.Second)
-			_ = w.send(cancelCtx, "cancel", identifier, struct{}{})
-			finish()
-			return Result{}, errors.Join(contextError(active), w.Close())
+			return Result{}, w.cancelRun(contextError(active), identifier, frames, nil)
 		case message := <-frames:
 			if active.Err() != nil {
-				return Result{}, errors.Join(contextError(active), w.Close())
+				return Result{}, w.cancelRun(contextError(active), identifier, frames, &message)
 			}
 			if message.Kind == "result" {
 				var result Result
@@ -400,6 +540,10 @@ func (w *Worker) Run(ctx context.Context, request Request, handler Handler) (Res
 				}
 				result.Text = redactKey(result.Text, request.APIKey)
 				clear(message.Payload)
+				if result.Status == "uncertain" {
+					w.fail(ErrUncertain)
+					return result, errors.Join(ErrLost, ErrUncertain, w.Close())
+				}
 				return result, nil
 			}
 			var event Event
@@ -440,6 +584,16 @@ func (w *Worker) Run(ctx context.Context, request Request, handler Handler) (Res
 			} else if event.Kind != "progress" {
 				handlerErr = errHandler
 			}
+			if active.Err() != nil {
+				return Result{}, w.cancelRun(contextError(active), identifier, frames, nil)
+			}
+			if errors.Is(handlerErr, context.Canceled) || errors.Is(handlerErr, context.DeadlineExceeded) {
+				cause := context.Canceled
+				if errors.Is(handlerErr, context.DeadlineExceeded) {
+					cause = context.DeadlineExceeded
+				}
+				return Result{}, w.cancelRun(errors.Join(errHandler, cause), identifier, frames, nil)
+			}
 			if handlerErr != nil || event.Kind != "progress" && (!validReply(reply, event, request.APIKey) || event.Kind == "admit" && !reply.Approved) {
 				refuse, finish := context.WithTimeout(context.Background(), time.Second)
 				_ = w.send(refuse, "reply", message.ID, Reply{})
@@ -448,12 +602,76 @@ func (w *Worker) Run(ctx context.Context, request Request, handler Handler) (Res
 			}
 			if event.Kind != "progress" {
 				if err := w.send(active, "reply", message.ID, reply); err != nil {
+					if !errors.Is(err, ErrProtocol) && active.Err() != nil {
+						return Result{}, w.cancelRun(contextError(active), identifier, frames, nil)
+					}
 					w.fail(ErrProtocol)
 					return Result{}, errors.Join(ErrProtocol, contextError(active), w.Close())
 				}
 			}
 		}
 	}
+}
+
+// A non-uncertain result is the child bridge's receipt that this execution has
+// stopped and joined its work. Without that receipt the transport is lost;
+// cancellation never authorizes replacement or replay of a browser operation.
+func (w *Worker) cancelRun(cause error, identifier string, frames <-chan frame, first *frame) error {
+	if w.lifetime.Err() != nil {
+		return errors.Join(cause, contextError(w.lifetime), w.Close())
+	}
+	quiesce, stop := context.WithTimeout(context.Background(), 5*time.Second)
+	defer stop()
+	if err := w.send(quiesce, "cancel", identifier, struct{}{}); err != nil {
+		w.fail(ErrUncertain)
+		return errors.Join(cause, ErrLost, ErrUncertain, w.Close())
+	}
+	seen := map[string]bool{}
+	for count := 0; count < 128; count++ {
+		var message frame
+		if first != nil {
+			message, first = *first, nil
+		} else {
+			select {
+			case message = <-frames:
+			case <-w.lifetime.Done():
+				return errors.Join(cause, contextError(w.lifetime), w.Close())
+			case <-quiesce.Done():
+				w.fail(ErrUncertain)
+				return errors.Join(cause, ErrLost, ErrUncertain, w.Close())
+			}
+		}
+		if message.Kind == "result" {
+			var result Result
+			valid := strictJSON(message.Payload, &result) == nil && validResult(result)
+			clear(message.Payload)
+			if !valid {
+				w.fail(ErrProtocol)
+				return errors.Join(cause, ErrProtocol, ErrLost, ErrUncertain, w.Close())
+			}
+			if result.Status != "uncertain" && w.lifetime.Err() == nil {
+				return cause
+			}
+			w.fail(ErrUncertain)
+			return errors.Join(cause, ErrLost, ErrUncertain, w.Close())
+		}
+		var event Event
+		valid := !seen[message.ID] && strictJSON(message.Payload, &event) == nil && validEvent(event)
+		clear(message.Payload)
+		if !valid {
+			w.fail(ErrProtocol)
+			return errors.Join(cause, ErrProtocol, ErrLost, ErrUncertain, w.Close())
+		}
+		seen[message.ID] = true
+		if event.Kind != "progress" {
+			if err := w.send(quiesce, "reply", message.ID, Reply{}); err != nil {
+				w.fail(ErrUncertain)
+				return errors.Join(cause, ErrLost, ErrUncertain, w.Close())
+			}
+		}
+	}
+	w.fail(ErrProtocol)
+	return errors.Join(cause, ErrProtocol, ErrLost, ErrUncertain, w.Close())
 }
 
 func validRequest(request Request) bool {

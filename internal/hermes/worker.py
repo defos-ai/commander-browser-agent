@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import contextvars
 import hashlib
 import importlib.metadata
 import json
@@ -54,6 +55,7 @@ class Run:
         self.sequence, self.questions, self.in_native = 0, 0, 0
         self.halted = ""
         self.agent = self.thread = None
+        self.request_threads = set()
         self.key = request.pop("key")
 
     def redact(self, value):
@@ -66,6 +68,7 @@ class Worker:
         self.write_lock = threading.Lock()
         self.lock = threading.RLock()
         self.native_lock = threading.Lock()
+        self.execution = contextvars.ContextVar("commander_browser_execution", default=None)
         self.active = None
         self.pending = {}
         self.handlers = {}
@@ -75,6 +78,9 @@ class Worker:
         self.owned = {}
         self.owned_groups = set()
         self.supervisors = {}
+        self.browser_pin = None
+        self.browser_attempted = False
+        self.lost = False
 
     def send(self, kind, identifier, payload):
         raw = json.dumps({"version": 1, "kind": kind, "id": identifier, "payload": payload},
@@ -126,6 +132,18 @@ class Worker:
         from support import configure
         configure(self)
         from run_agent import AIAgent
+        # Pinned internal observation, not a general Hermes cancellation API:
+        # this exact nonstreaming request worker can outlive an interrupted turn.
+        from agent.chat_completion_nonstream import _NonStreamRequest
+        self.request_type = _NonStreamRequest
+        self.request_code = _NonStreamRequest._call.__code__
+        if Path(self.request_code.co_filename).resolve() != (source / "agent" / "chat_completion_nonstream.py").resolve():
+            raise Refused("request_lifecycle_unavailable")
+        from tools.browser_harness_dirs import fit_default_socket_dir
+        # The native CLI and read-only probes must address the same named daemon.
+        # These public helpers capture their directories at import time.
+        os.environ["BU_NAME"] = self.session_name
+        fit_default_socket_dir(os.environ)
         from hermes_cli.plugins import discover_plugins
         discover_plugins()
         self.agent_type = AIAgent
@@ -142,6 +160,152 @@ class Worker:
             entry = registry.get_entry(name)
             if entry is None or entry.handler is not handler:
                 raise Refused("required_overrides_unavailable")
+
+    def mark_lost(self):
+        self.lost = True
+        self.halt("uncertain")
+
+    def browser_identity(self):
+        """Read only existing Hermes/daemon state; never provision a resource."""
+        import psutil
+        from hermes_cli.process_identity import spawned_by_this_process
+        from tools.browser_harness_dirs import harness_pid_file
+        from tools.browser_lightpanda import get_server
+        from tools.browser_session import session_for_task
+
+        cached = session_for_task("bu-named-" + self.session_name)
+        if not (cached.get("features") or {}).get("lightpanda"):
+            raise Refused("browser_identity_unavailable")
+        server = get_server(cached.get("session_name", ""))
+        if server is None or not server.is_alive() or cached.get("cdp_url") != server.cdp_url:
+            raise Refused("browser_identity_unavailable")
+        native = psutil.Process(server.proc.pid)
+        if native.ppid() != os.getpid() or native.uids().real != os.getuid():
+            raise Refused("browser_identity_unavailable")
+        pid_file = harness_pid_file(os.environ)
+        if pid_file.stat().st_size > 4096:
+            raise Refused("daemon_identity_unavailable")
+        receipt = json.loads(pid_file.read_text())
+        if type(receipt) is int:
+            pid, token = receipt, None
+        elif isinstance(receipt, dict):
+            pid, token = receipt.get("pid"), receipt.get("started")
+        else:
+            raise Refused("daemon_identity_unavailable")
+        if (type(pid) is not int or pid <= 1 or
+                token is not None and (not isinstance(token, str) or not token or len(token) > 128)):
+            raise Refused("daemon_identity_unavailable")
+        daemon = psutil.Process(pid)
+        arguments = daemon.cmdline()
+        module = arguments[arguments.index("-m") + 1] if "-m" in arguments else ""
+        if (daemon.uids().real != os.getuid() or os.getsid(pid) != pid or
+                module != "browser_harness.daemon" or not spawned_by_this_process(pid)):
+            raise Refused("daemon_identity_unavailable")
+        return {"daemon_pid": pid, "daemon_birth": daemon.create_time(), "daemon_token": token,
+                "native_pid": native.pid, "native_birth": native.create_time(),
+                "endpoint": server.cdp_url}
+
+    def pin_browser(self):
+        from browser_harness.admin import daemon_browser_ready
+        from browser_harness.helpers import cdp, current_tab
+
+        identity = self.browser_identity()
+        if not daemon_browser_ready(self.session_name):
+            raise Refused("browser_connection_unavailable")
+        target = current_tab().get("targetId")
+        if not isinstance(target, str) or not target:
+            raise Refused("browser_connection_unavailable")
+        session = cdp("Target.attachToTarget", targetId=target, flatten=True,
+                      _response_timeout=1.0).get("sessionId")
+        if not isinstance(session, str) or not session:
+            raise Refused("browser_connection_unavailable")
+        if self.browser_identity() != identity:
+            raise Refused("browser_identity_changed")
+        self.browser_pin = {**identity, "target": target, "session": session}
+        # This documented override short-circuits get_session_info on subsequent
+        # native calls. Together with require-existing it prevents provisioning a
+        # replacement Lightpanda process or harness daemon for this session.
+        os.environ["BU_CDP_URL"] = identity["endpoint"]
+        os.environ["BH_REQUIRE_EXISTING_DAEMON"] = "1"
+        if self.probe_browser() != "connected":
+            raise Refused("browser_connection_unavailable")
+
+    def probe_browser(self):
+        """Called under native_lock: use the pinned connection without recovery."""
+        if self.lost:
+            return "lost"
+        if self.browser_pin is None:
+            if self.browser_attempted:
+                self.mark_lost()
+                return "lost"
+            return "starting"
+        try:
+            from browser_harness.admin import daemon_browser_ready
+            from browser_harness.helpers import cdp, current_tab
+            from tools.browser_session_lifecycle import update_session_activity
+
+            pin = self.browser_pin
+            identity = self.browser_identity()
+            if any(identity[name] != pin[name] for name in identity) or not daemon_browser_ready(self.session_name):
+                raise Refused("browser_identity_changed")
+            if current_tab().get("targetId") != pin["target"]:
+                raise Refused("browser_target_changed")
+            reply = cdp("Runtime.evaluate", session_id=pin["session"], expression="true",
+                        returnByValue=True, awaitPromise=False, _response_timeout=1.0)
+            if reply.get("exceptionDetails") or reply.get("result", {}).get("value") is not True:
+                raise Refused("browser_connection_unavailable")
+            if self.browser_identity() != identity:
+                raise Refused("browser_identity_changed")
+            update_session_activity("bu-named-" + self.session_name)
+            return "connected"
+        except Exception:
+            self.mark_lost()
+            return "lost"
+
+    def health(self):
+        if self.lost:
+            return "lost"
+        if not self.native_lock.acquire(blocking=False):
+            return "unverified"
+        try:
+            return self.probe_browser()
+        finally:
+            self.native_lock.release()
+
+    def request_workers(self, agent):
+        """Observe only this agent's pinned request frames; never alter them."""
+        if getattr(agent, "api_mode", None) != "chat_completions":
+            raise Refused("request_lifecycle_unavailable")
+        threads = {thread.ident: thread for thread in threading.enumerate()}
+        found = set()
+        for identifier, frame in sys._current_frames().items():
+            while frame is not None:
+                if frame.f_code.co_filename == self.request_code.co_filename and frame.f_code.co_name == "_call":
+                    owner = frame.f_locals.get("self")
+                    if getattr(owner, "agent", None) is agent:
+                        thread = threads.get(identifier)
+                        if type(owner) is not self.request_type or frame.f_code is not self.request_code or thread is None:
+                            raise Refused("request_lifecycle_unavailable")
+                        found.add(thread)
+                frame = frame.f_back
+        return found
+
+    def settle_request_workers(self, run, agent):
+        try:
+            deadline = time.monotonic() + 2
+            while True:
+                with self.lock:
+                    run.request_threads.update(self.request_workers(agent))
+                    threads = set(run.request_threads)
+                for thread in threads:
+                    thread.join(timeout=max(0, deadline - time.monotonic()))
+                if not any(thread.is_alive() for thread in threads) and not self.request_workers(agent):
+                    return True
+                if time.monotonic() >= deadline:
+                    return False
+                time.sleep(0.02)
+        except Exception:
+            return False
 
     def request(self, payload):
         if not isinstance(payload, dict):
@@ -180,18 +344,23 @@ class Worker:
         return request
 
     def event(self, run, payload, *, wait=True):
-        if run.cancelled.is_set() or run.finished.is_set() or self.closing:
-            raise Refused("execution_cancelled")
         identifier = run.id + ":" + secrets.token_hex(12)
         waiter = queue.Queue(maxsize=1)
-        if wait:
-            with self.lock:
+        with self.lock:
+            if (run.cancelled.is_set() or run.finished.is_set() or self.closing or
+                    self.tainted or self.lost or self.active is not run):
+                raise Refused("execution_cancelled")
+            if wait:
                 self.pending[identifier] = waiter
         try:
-            self.send("event", identifier, payload)
+            with self.lock:
+                if run.finished.is_set() or self.tainted:
+                    raise Refused("execution_cancelled")
+                self.send("event", identifier, payload)
             if not wait:
                 return {}
-            while not run.cancelled.is_set() and not self.closing:
+            while not (run.cancelled.is_set() or run.finished.is_set() or
+                       self.closing or self.tainted or self.lost):
                 remaining = run.deadline - time.monotonic()
                 if remaining <= 0:
                     raise Refused("execution_timeout")
@@ -204,10 +373,10 @@ class Worker:
             with self.lock:
                 self.pending.pop(identifier, None)
 
-    def halt(self, status):
+    def halt(self, status, *, owner=None):
         with self.lock:
             run = self.active
-            if run is None:
+            if run is None or owner is not None and run is not owner:
                 return
             run.halted = run.halted or status
             agent = run.agent
@@ -217,13 +386,22 @@ class Worker:
             except Exception:
                 pass
 
+    def deny_terminal(self):
+        run = self.execution.get()
+        if run is not None:
+            self.halt("failed", owner=run)
+
     def browser(self, handler, args):
+        run = self.execution.get()
         with self.native_lock:
             with self.lock:
-                run = self.active
-            if run is None or run.halted or run.cancelled.is_set() or self.closing:
+                current = self.active is run
+            if (run is None or not current or run.finished.is_set() or run.halted or run.cancelled.is_set() or
+                    self.closing or self.tainted or self.lost):
                 return json.dumps({"error": "Browser execution is unavailable."})
             try:
+                if self.probe_browser() == "lost":
+                    raise Refused("browser_session_lost")
                 if not isinstance(args, dict):
                     raise Refused("invalid_browser_request")
                 code = bounded_text(args.get("code"), MAX_TEXT)
@@ -239,13 +417,14 @@ class Worker:
                 self.event(run, {"kind": "progress", "sequence": run.sequence,
                                  "tool": "browser_exec", "text": "started"}, wait=False)
             except Exception:
-                self.halt("failed")
+                self.halt("failed", owner=run)
                 return json.dumps({"error": "Browser admission was refused."})
             run.in_native += 1
+            self.browser_attempted = True
             try:
                 # The public registry supplied this exact native handler. Do not
                 # redispatch the overridden name or forward model session routing.
-                result = handler({"code": code, "session": self.session_name,
+                result = handler({"code": code, "session": "" if self.browser_pin else self.session_name,
                                   "timeout_s": min(remaining, 300)}, task_id=self.session_name)
                 if run.cancelled.is_set():
                     raise Refused("execution_cancelled")
@@ -256,11 +435,17 @@ class Worker:
                 parsed = json.loads(encoded)
                 if isinstance(parsed, dict) and (parsed.get("success") is False or "error" in parsed):
                     raise Refused("browser_operation_unconfirmed")
+                if self.browser_pin is None:
+                    self.pin_browser()
+                elif self.probe_browser() != "connected":
+                    raise Refused("browser_session_lost")
                 self.event(run, {"kind": "progress", "sequence": run.sequence,
                                  "tool": "browser_exec", "text": "finished"}, wait=False)
                 return encoded
             except Exception:
-                self.halt("uncertain")
+                if self.browser_pin is None or self.probe_browser() == "lost":
+                    self.mark_lost()
+                self.halt("uncertain", owner=run)
                 return json.dumps({"error": "Browser execution could not be confirmed."})
             finally:
                 run.in_native -= 1
@@ -289,10 +474,11 @@ class Worker:
                 answers[question["qid"]] = answer
             return {"answers": answers, "outcome": "submitted"}
         except Exception:
-            self.halt("failed")
+            self.halt("failed", owner=run)
             return {"answers": {}, "outcome": "cancelled"}
 
     def execute(self, run):
+        execution_token = self.execution.set(run)
         result = {"status": "failed"}
         agent = None
         try:
@@ -312,9 +498,6 @@ class Worker:
             if run.cancelled.is_set():
                 raise Refused("execution_cancelled")
             raw = agent.run_conversation(run.request["objective"], task_id=self.session_name)
-            if run.in_native:
-                self.tainted = True
-                run.halted = "uncertain"
             count = raw.get("api_calls", 0)
             if type(count) is not int or not 0 <= count <= 1000000:
                 raise Refused("invalid_usage")
@@ -324,7 +507,11 @@ class Worker:
             text = text.encode("utf-8", "replace")[:MAX_TEXT].decode("utf-8", "ignore")
             result = {"status": status, "text": text, "model_requests": count}
         except Exception:
-            result = {"status": run.halted or ("interrupted" if run.cancelled.is_set() else "failed")}
+            # An unexpected escape has no public receipt that Hermes joined all
+            # tool callbacks. Never let a delayed callback adopt a later run.
+            self.tainted = True
+            run.halted = "uncertain"
+            result = {"status": "uncertain"}
         finally:
             if agent is not None:
                 try:
@@ -332,13 +519,33 @@ class Worker:
                 except Exception:
                     self.tainted = True
                     result = {"status": "uncertain"}
-            run.agent = None
-            run.key = ""
-            with self.lock:
-                run.finished.set()
-                self.send("result", run.id, result)
-                if self.active is run:
-                    self.active = None
+                if not self.settle_request_workers(run, agent):
+                    self.tainted = True
+                    result = {"status": "uncertain"}
+            native_quiet = self.native_lock.acquire(blocking=False)
+            try:
+                with self.lock:
+                    if (not native_quiet or run.in_native or self.tainted or
+                            any(identifier.startswith(run.id + ":") for identifier in self.pending)):
+                        self.tainted = True
+                        run.halted = "uncertain"
+                        result = {"status": "uncertain"}
+                    run.agent = None
+                    run.key = ""
+                    run.finished.set()
+                    if self.active is run:
+                        self.active = None
+                    if native_quiet:
+                        self.native_lock.release()
+                        native_quiet = False
+                    # A receipt also hands control back to independent health
+                    # checks. Revoke old callbacks before releasing native work,
+                    # then publish only after that gate is free.
+                    self.send("result", run.id, result)
+            finally:
+                if native_quiet:
+                    self.native_lock.release()
+                self.execution.reset(execution_token)
 
     def cancel(self):
         with self.lock:
@@ -349,6 +556,13 @@ class Worker:
             else:
                 agent = None
         if agent is not None:
+            try:
+                threads = self.request_workers(agent)
+                with self.lock:
+                    run.request_threads.update(threads)
+            except Exception:
+                self.tainted = True
+                run.halted = "uncertain"
             try:
                 agent.interrupt(hard_cancel=True, tool_reason="browser execution cancelled")
             except Exception:
@@ -362,7 +576,12 @@ class Worker:
             for entry in ledger_entries(project_root=Path(self.args.source), verified_only=True):
                 if entry.get("spawner_pid") == os.getpid():
                     try:
-                        processes.append(psutil.Process(entry["pid"]))
+                        root = psutil.Process(entry["pid"])
+                        processes.append(root)
+                        # The harness daemon detaches from this worker. Its
+                        # invocation children must be remembered before their
+                        # daemon exits and they are reparented to init.
+                        processes.extend(root.children(recursive=True))
                     except psutil.NoSuchProcess:
                         pass  # The verified process may exit before this snapshot.
             for process in processes:
@@ -390,15 +609,48 @@ class Worker:
         if run is not None and run.thread is not None:
             run.thread.join(5)
             if run.thread.is_alive():
-                return False
+                self.tainted = True
         self.remember_owned()
         try:
-            from tools.browser_session_lifecycle import cleanup_all_browsers
-            from tools.browser_use_cli import stop_harness_daemons
-            cleanup_all_browsers()
-            stop_harness_daemons()
             import psutil
             from hermes_cli.process_identity import is_owner_death_supervisor
+
+            def signal_owned(*, kill):
+                with self.lock:
+                    owned = dict(self.owned)
+                signalled = False
+                for pid, birth in owned.items():
+                    try:
+                        process = psutil.Process(pid)
+                        if (process.create_time() != birth or process.uids().real != os.getuid() or
+                                self.supervisors.get(pid) == birth and process.ppid() == os.getpid() and
+                                is_owner_death_supervisor(process.cmdline())):
+                            continue
+                        self.tainted = True  # Forced shutdown is never a clean receipt.
+                        process.kill() if kill else process.terminate()
+                        signalled = True
+                    except (psutil.NoSuchProcess, ProcessLookupError):
+                        pass
+                return signalled
+
+            if self.tainted or self.lost:
+                # An abandoned native call can block daemon shutdown. Capture
+                # its detached descendants first, then stop exact owned PIDs
+                # before asking the public daemon cleanup to join.
+                if signal_owned(kill=False):
+                    time.sleep(0.5)
+                    self.remember_owned()
+                    signal_owned(kill=True)
+            from tools.browser_session_lifecycle import cleanup_all_browsers
+            from tools.browser_use_cli import stop_harness_daemons
+            try:
+                cleanup_all_browsers()
+            except Exception:
+                self.tainted = True
+            try:
+                stop_harness_daemons()
+            except Exception:
+                self.tainted = True
             deadline = time.monotonic() + 3
             supervisors_stopped = False
             while time.monotonic() < deadline:
@@ -423,6 +675,11 @@ class Worker:
                         pass
                 if not alive and groups_gone:
                     return not self.tainted
+                if self.tainted or self.lost:
+                    # Public cleanup can leave an abandoned native invocation
+                    # running below a detached daemon. Stop only exact recorded
+                    # PIDs with their original birth identity, never a bare PGID.
+                    signal_owned(kill=True)
                 # Hermes intentionally leaves this idle helper resident for 30s.
                 # Stop only our exact direct child, after every other recorded
                 # process and process group is gone. Never ignore it or change
@@ -467,10 +724,15 @@ class Worker:
             clean = self.close()
             self.send("closed", identifier, {"clean": clean})
             return False
+        if kind == "verify":
+            if payload:
+                raise Refused("invalid_frame")
+            self.send("health", identifier, {"state": self.health()})
+            return True
         if kind != "run":
             raise Refused("invalid_frame")
         with self.lock:
-            if self.active is not None or self.closing or self.tainted:
+            if self.active is not None or self.closing or self.tainted or self.lost:
                 raise Refused("worker_unavailable")
             run = Run(identifier, self.request(payload))
             self.active = run

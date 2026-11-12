@@ -133,6 +133,32 @@
   Serialize work within a session while allowing independent inspect/verify/close
   controls. Close must interrupt work and join startup/cleanup before reporting
   `closed`; uncertain cleanup and owner shutdown retain `lost` references.
+- [browser/hermes.go](browser/hermes.go) binds a private Hermes worker to that same
+  manager and exact creation claim. Its trusted absolute runtime paths are host
+  configuration, never action inputs. A claim cannot switch between the Go and
+  Hermes backends or change its pinned paths. `RunHermes` lends a callback-scoped
+  bridge through [internal/hermes/session.go](internal/hermes/session.go); retained
+  or detached contexts cannot start later work. This infrastructure does not
+  change the default action catalog or move an existing Go session to Hermes.
+- A ready Hermes worker remains `starting` until native automation has opened and
+  verified its browser. Pin the owned Lightpanda process, harness daemon, retained
+  target and original connection; health controls must not create or reconnect
+  them. `use` requires a verified connection. Idle health checks keep a retained
+  session alive; failed identity checks retire it as `lost`, with no replacement
+  under its old claim. Target changes and unavailable execution contexts also
+  conservatively lose the session, even if its processes survive. Native Python
+  may still perform recovery within a batch;
+  these checks do not promise universal prevention of internal retries.
+- Action cancellation preserves a healthy Hermes browser only after a bounded
+  receipt confirms that the model request and native work have stopped. The
+  pinned OpenAI nonstreaming request path needs read-only observation of its exact
+  Python thread frames to join an SDK worker that can outlive Hermes interruption.
+  This is a version-specific internal check, not a public general-purpose Hermes
+  cancellation API. An unfamiliar path, incomplete join or missing receipt loses
+  the resource rather than allowing reuse. Native callbacks carry their original
+  execution token; abandoned callbacks cannot adopt a later run. Every receipt,
+  including failure paths, checks for pending native work and questions. Close
+  also joins owned descendants and retains uncertain cleanup state.
 - Retain closed tombstones and original creation identities for the host lifetime.
   Scope admission and release belong to the controller. Accept a new
   framework-issued creation claim independently of an old identity in the same
@@ -501,7 +527,14 @@ network. Use `--init` for this test container to reap browser descendants.
 The `hermesintegration` tag adds permanent private-bridge scenarios using the
 packaged Python/Hermes paths and a fake HTTP model: native navigation, host
 admission, clarification, cookie reuse across runs, cancellation and confirmed
-close. CI combines both integration tags with a five-minute test-binary bound.
+close. Commander dispatch scenarios also cover root allocation, direct-parent
+reuse, independent cookie jars, exact-claim rejection, private callback lifetime,
+inventory controls, clean cancellation with reuse and lost-target refusal.
+CI combines both integration tags with a five-minute test-binary bound.
+Clean-close Hermes scenarios check that their private profiles are removed;
+intentional uncertain-loss scenarios require retained lost state and profiles.
+The container must have no surviving Python or Lightpanda processes before it
+is discarded, including after those uncertain cases.
 The bridge currently supports OpenAI Chat Completions only; other provider
 profiles and Commander action activation remain separate migration work.
 
