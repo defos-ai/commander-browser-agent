@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -56,9 +57,11 @@ func (r HermesRequest) HasToolText(text string) bool {
 }
 
 type HermesResponse struct {
-	Text  string
-	Tools []HermesToolCall
-	Block bool
+	Text     string
+	Tools    []HermesToolCall
+	Block    bool
+	Escape   string
+	Redirect string
 }
 
 func HermesCall(id, name string, arguments any) HermesToolCall {
@@ -80,32 +83,55 @@ type HermesModel struct {
 	calls        atomic.Int32
 	blockedOnce  sync.Once
 	closedOnce   sync.Once
+	mu           sync.RWMutex
+	key          string
+	protected    []string
 }
 
 func (m *HermesModel) Calls() int { return int(m.calls.Load()) }
 
-func NewHermesModel(t *testing.T, key string, decide func(HermesRequest, int) HermesResponse) *HermesModel {
+func (m *HermesModel) RotateKey(key string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.key = key
+	m.protected = append(m.protected, key)
+}
+
+func NewHermesModel(t *testing.T, key string, decide func(HermesRequest, int) HermesResponse, forbidden ...string) *HermesModel {
 	t.Helper()
-	model := &HermesModel{Blocked: make(chan struct{}), Disconnected: make(chan struct{})}
+	model := &HermesModel{Blocked: make(chan struct{}), Disconnected: make(chan struct{}), key: key, protected: append([]string{key}, forbidden...)}
 	release := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		model.mu.RLock()
+		key, protected := model.key, append([]string(nil), model.protected...)
+		model.mu.RUnlock()
+		for _, value := range protected {
+			if value == "" {
+				continue
+			}
+			if strings.Contains(r.URL.String(), value) {
+				t.Error("a protected value entered the provider URL")
+			}
+			for name, values := range r.Header {
+				if strings.Contains(name, value) {
+					t.Error("a protected value entered a provider header name")
+				}
+				for _, header := range values {
+					if strings.Contains(header, value) && !(value == key && name == "Authorization" && header == "Bearer "+key) {
+						t.Error("a protected value entered a non-authentication provider header")
+					}
+				}
+			}
+		}
 		if r.Header.Get("Authorization") != "Bearer "+key {
 			t.Error("Hermes model authentication was absent or outside its selected key")
 			http.Error(w, "Fixture authentication required", http.StatusUnauthorized)
 			return
 		}
 		if r.Method == http.MethodGet {
-			// The actual SDK probes custom endpoints before its first turn.
-			switch r.URL.Path {
-			case "/v1/models":
-				w.Header().Set("Content-Type", "application/json")
-				_, _ = io.WriteString(w, `{"object":"list","data":[{"id":"gpt-4.1-mini","object":"model"}]}`)
-			case "/api/v1/models", "/api/tags", "/v1/props", "/props", "/version":
-				http.NotFound(w, r)
-			default:
-				t.Error("Hermes made an unexpected metadata request")
-				http.NotFound(w, r)
-			}
+			// SDK discovery belongs to the private proxy, never this provider.
+			t.Error("SDK metadata probes escaped the private model proxy")
+			http.NotFound(w, r)
 			return
 		}
 		body, err := io.ReadAll(io.LimitReader(r.Body, (2<<20)+1))
@@ -114,8 +140,10 @@ func NewHermesModel(t *testing.T, key string, decide func(HermesRequest, int) He
 			http.Error(w, "Invalid fixture request", http.StatusBadRequest)
 			return
 		}
-		if bytes.Contains(body, []byte(key)) {
-			t.Error("the provider key entered a model request body")
+		for _, value := range protected {
+			if hermesJSONContains(body, value, 0) {
+				t.Error("a protected value entered a model request body or replay")
+			}
 		}
 		var request HermesRequest
 		if json.Unmarshal(body, &request) != nil || request.Model != "gpt-4.1-mini" {
@@ -125,6 +153,10 @@ func NewHermesModel(t *testing.T, key string, decide func(HermesRequest, int) He
 		}
 		number := int(model.calls.Add(1))
 		response := decide(request, number)
+		if response.Redirect != "" {
+			http.Redirect(w, r, response.Redirect, http.StatusTemporaryRedirect)
+			return
+		}
 		if response.Block {
 			model.blockedOnce.Do(func() { close(model.Blocked) })
 			select {
@@ -146,7 +178,11 @@ func NewHermesModel(t *testing.T, key string, decide func(HermesRequest, int) He
 			common["object"], common["usage"] = "chat.completion", usage
 			common["choices"] = []any{map[string]any{"index": 0, "message": message, "finish_reason": finish}}
 			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(common)
+			encoded, _ := json.Marshal(common)
+			if response.Escape != "" {
+				encoded = bytes.ReplaceAll(encoded, []byte(response.Escape), []byte(HermesUnicode(response.Escape)))
+			}
+			_, _ = w.Write(encoded)
 			return
 		}
 		if len(response.Tools) > 0 {
@@ -174,4 +210,47 @@ func NewHermesModel(t *testing.T, key string, decide func(HermesRequest, int) He
 		server.Close()
 	})
 	return model
+}
+
+// HermesUnicode creates JSON escapes for the fixture's ASCII synthetic keys.
+func HermesUnicode(value string) string {
+	var encoded strings.Builder
+	for _, character := range value {
+		_, _ = fmt.Fprintf(&encoded, `\u%04x`, character)
+	}
+	return encoded.String()
+}
+
+func hermesJSONContains(data []byte, value string, depth int) bool {
+	if value == "" || depth > 16 {
+		return false
+	}
+	if bytes.Contains(data, []byte(value)) {
+		return true
+	}
+	var decoded any
+	if json.Unmarshal(data, &decoded) != nil {
+		return false
+	}
+	var contains func(any) bool
+	contains = func(item any) bool {
+		switch item := item.(type) {
+		case string:
+			return strings.Contains(item, value) || hermesJSONContains([]byte(item), value, depth+1)
+		case []any:
+			for _, child := range item {
+				if contains(child) {
+					return true
+				}
+			}
+		case map[string]any:
+			for name, child := range item {
+				if strings.Contains(name, value) || contains(child) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	return contains(decoded)
 }

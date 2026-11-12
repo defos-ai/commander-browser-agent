@@ -17,10 +17,26 @@ type Config struct {
 	Claim      sessions.CreationClaim
 }
 
-// Request describes one execution. APIKey is delivered only over a private
-// inherited pipe. The caller retains ownership of its buffer.
-// BaseURL is an API root, not a chat-completion endpoint.
+// Request describes one execution. Endpoint is the exact selected completion
+// endpoint. The real APIKey remains in Go; the caller owns and clears its buffer
+// after Run returns. Hermes receives only an ephemeral local transport credential.
 type Request struct {
+	Objective      string `json:"objective"`
+	Provider       string `json:"provider"`
+	Model          string `json:"model"`
+	Endpoint       string `json:"endpoint"`
+	APIKey         []byte `json:"-"`
+	MaxIterations  int    `json:"max_iterations"`
+	MaxTokens      int    `json:"max_tokens"`
+	TimeoutSeconds int    `json:"timeout_seconds"`
+}
+
+func (Request) String() string   { return "private Hermes execution request" }
+func (Request) GoString() string { return "private Hermes execution request" }
+
+// workerRequest is the only model setup sent over the private worker pipe.
+// Neither the real endpoint nor its managed key belongs to this payload.
+type workerRequest struct {
 	Objective      string `json:"objective"`
 	Provider       string `json:"provider"`
 	Model          string `json:"model"`

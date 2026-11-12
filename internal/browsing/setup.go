@@ -36,6 +36,10 @@ func modelSecretName(address string) string {
 // Prepare resolves model choices and a current managed key for the bound session.
 // The caller owns the returned key bytes and must clear them after use.
 func (s *Setup) Prepare(ctx context.Context) (intelligence.ModelConfig, []byte, error) {
+	return s.prepare(ctx, selectBrowserModel, nil)
+}
+
+func (s *Setup) prepare(ctx context.Context, choose func(context.Context) (intelligence.ModelConfig, error), accept func(intelligence.ModelConfig) error) (intelligence.ModelConfig, []byte, error) {
 	var empty intelligence.ModelConfig
 	if err := ctx.Err(); err != nil {
 		return empty, nil, err
@@ -69,10 +73,17 @@ func (s *Setup) Prepare(ctx context.Context) (intelligence.ModelConfig, []byte, 
 		selection = *setup.selection
 	} else {
 		var err error
-		selection, err = selectBrowserModel(ctx)
+		selection, err = choose(ctx)
 		if err != nil {
 			return empty, nil, err
 		}
+	}
+	if accept != nil {
+		if err := accept(selection); err != nil {
+			return empty, nil, err
+		}
+	}
+	if setup.selection == nil {
 		// Retain valid operator choices even when credentials are still pending.
 		// The framework owns saved question answers and operator/model eligibility.
 		setup.selection = &selection
@@ -101,8 +112,12 @@ func selectBrowserModel(ctx context.Context) (intelligence.ModelConfig, error) {
 	if !ok {
 		return selection, errors.New("model provider answer must identify a supported provider")
 	}
-	selection.Provider = provider
-	question, err = action.Question(ctx, "browser_model_name", "Which exact tool-calling model ID/version should this browser session use? Enter the model ID, not an API key.")
+	return selectModelDetails(ctx, provider)
+}
+
+func selectModelDetails(ctx context.Context, provider string) (intelligence.ModelConfig, error) {
+	selection := intelligence.ModelConfig{Provider: provider}
+	question, err := action.Question(ctx, "browser_model_name", "Which exact tool-calling model ID/version should this browser session use? Enter the model ID, not an API key.")
 	if err != nil {
 		return selection, err
 	}

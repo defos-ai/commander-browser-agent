@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -62,7 +63,7 @@ func closeHermesWorker(t *testing.T, worker *hermes.Worker) {
 func hermesRequest(model *fakes.HermesModel, key []byte) hermes.Request {
 	return hermes.Request{
 		Objective: "Complete the local fixture objective.", Provider: "openai", Model: "gpt-4.1-mini",
-		BaseURL: model.URL, APIKey: key, MaxIterations: 4, MaxTokens: 512, TimeoutSeconds: 25,
+		Endpoint: model.URL + "/chat/completions", APIKey: key, MaxIterations: 4, MaxTokens: 512, TimeoutSeconds: 25,
 	}
 }
 
@@ -217,6 +218,90 @@ func TestHermesNativeBrowserRetainsSessionBetweenRuns(t *testing.T) {
 	if _, err := worker.Run(t.Context(), hermesRequest(secondModel, []byte(secondKey)), handler); !errors.Is(err, hermes.ErrClosed) || secondModel.Calls() != 2 {
 		t.Fatal("a closed worker accepted another execution")
 	}
+}
+
+func TestHermesProviderProxyProtectsNestedReplays(t *testing.T) {
+	key := "fixture-opaque-provider-" + id.New()
+	t.Setenv("OPENAI_API_KEY", "ignored-host-provider-"+id.New())
+	site := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		for _, values := range r.Header {
+			for _, value := range values {
+				if strings.Contains(value, key) {
+					t.Error("the provider key entered a browser request")
+				}
+			}
+		}
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = io.WriteString(w, "<p>Native site inspected "+key+"</p>")
+	}))
+	t.Cleanup(site.Close)
+	model := fakes.NewHermesModel(t, key, func(request fakes.HermesRequest, number int) fakes.HermesResponse {
+		switch number {
+		case 1:
+			code := fmt.Sprintf("# Provider response echo %s\nnew_tab(%q)\nimport os\nprint('ENV_CLEAR' if not any(os.getenv(name) for name in ('OPENAI_API_KEY', 'BROWSER_MODEL_API_KEY')) else 'ENV_EXPOSED')\nprint(js('document.body.textContent'))", key, site.URL)
+			call := fakes.HermesCall("native-echo-"+key, "browser_exec", map[string]any{"code": code})
+			// This is JSON inside function.arguments, not merely an escaped
+			// outer response. The real SDK must never replay its decoded key.
+			call.Function.Arguments = strings.ReplaceAll(call.Function.Arguments, key, fakes.HermesUnicode(key))
+			return fakes.HermesResponse{Tools: []fakes.HermesToolCall{call}}
+		case 2:
+			if !request.HasToolText("Native site inspected") || !request.HasToolText("ENV_CLEAR") {
+				t.Error("the native browser lost its observation or inherited provider environment values")
+			}
+			return fakes.HermesResponse{Escape: key, Tools: []fakes.HermesToolCall{fakes.HermesCall("question-echo-"+key, "clarify", map[string]any{
+				"questions": []any{map[string]any{"qid": "qid-" + key, "question": "Which fixture " + key + "?", "choices": []string{"First", key}}},
+			})}}
+		case 3:
+			if !request.HasToolText("First") {
+				t.Error("the sanitized clarification answer did not reach the next request")
+			}
+			return fakes.HermesResponse{Text: "Final provider echo " + key, Escape: key}
+		default:
+			t.Error("the adversarial fixture exceeded its bounded scripted run")
+			return fakes.HermesResponse{Text: "Fixture stopped."}
+		}
+	})
+	worker := newHermesWorker(t)
+	var questions atomic.Int32
+	unsafe := hermesRequest(model, []byte(key))
+	unsafe.Endpoint = model.URL + "/" + fmt.Sprintf("%%%02x%s", key[0], key[1:]) + "/chat/completions"
+	if _, err := worker.Run(t.Context(), unsafe, nil); err == nil || model.Calls() != 0 {
+		t.Fatal("an encoded provider credential entered an endpoint or model request")
+	}
+	result, err := worker.Run(t.Context(), hermesRequest(model, []byte(key)), func(_ context.Context, event hermes.Event) (hermes.Reply, error) {
+		hermesEventPrivate(t, event, key)
+		if event.Kind == "admit" {
+			return hermes.Reply{Approved: true}, nil
+		}
+		if event.Kind == "question" {
+			questions.Add(1)
+			return hermes.Reply{Answer: "First"}, nil
+		}
+		return hermes.Reply{}, nil
+	})
+	if err != nil || result.Status != "completed" || model.Calls() != 3 || questions.Load() != 1 || !strings.Contains(result.Text, "Final provider echo") {
+		t.Fatal("the real SDK did not complete the sanitized provider-echo workflow")
+	}
+	hermesResultPrivate(t, result, key, site.URL)
+}
+
+func TestHermesProviderProxyRefusesRedirects(t *testing.T) {
+	var redirected atomic.Int32
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		redirected.Add(1)
+		_, _ = io.WriteString(w, "Unexpected redirected provider request")
+	}))
+	t.Cleanup(target.Close)
+	key := "fixture-redirect-provider-" + id.New()
+	model := fakes.NewHermesModel(t, key, func(_ fakes.HermesRequest, _ int) fakes.HermesResponse {
+		return fakes.HermesResponse{Redirect: target.URL + "/capture"}
+	})
+	worker := newHermesWorker(t)
+	result, err := worker.Run(t.Context(), hermesRequest(model, []byte(key)), nil)
+	if err == nil && result.Status == "completed" || redirected.Load() != 0 || model.Calls() == 0 {
+		t.Fatal("the selected model endpoint redirected authentication or reported success")
+	}
+	hermesResultPrivate(t, result, key, target.URL)
 }
 
 func TestHermesAdmissionRefusesEffectsAndTerminal(t *testing.T) {

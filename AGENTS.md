@@ -195,11 +195,31 @@
   checkpoint cannot confirm each operation or prevent every internal retry.
 - Private worker messages use bounded, correlated frames over inherited pipes;
   raw stdout/stderr and returned Hermes transcripts never become protocol data.
-  Questions and results must be bounded and redact known values. This protocol
-  redaction alone does not fix provider-key echoes in Hermes's replayed model
-  context. Prove that separate boundary before cutover. Native browser children
+  Questions and results must be bounded and redact known values. Private
+  observation-protection messages carry bounded native JSON only to the Go
+  redactor; never forward them to action handlers, logs, checkpoints or artifacts.
+  Protect native results before returning them to Hermes's history. Native browser children
   may escape the worker process group; uncertain forced cleanup must retain lost
   ownership and private state, never report a confirmed close or restoration.
+- [internal/hermes/model.go](internal/hermes/model.go) mediates model HTTP without
+  implementing reasoning. The exact selected completion endpoint and real key
+  stay in Go. Hermes receives a random credential for an execution-scoped,
+  loopback-only OpenAI-compatible endpoint. Forward only bounded nonstreaming
+  requests for the exact model, to the fixed selected endpoint, with the real key
+  only in its authentication header. Serve SDK metadata locally; never forward
+  metadata probes, SDK headers, redirects, provider errors or retries.
+  Canonicalize and protect incoming provider JSON before Hermes sees it, including
+  nested JSON arguments, IDs and clarification fields. Protect outgoing requests
+  and native observations with the same session fingerprints. Fail closed on
+  malformed/oversized data, key collisions or protected numeric values. This
+  covers exact values and JSON escaping, not arbitrary website transformations.
+  Public Hermes middleware isolates failures and can fail open; it is not this
+  credential boundary. Do not patch Hermes, add a second reasoning loop, or
+  substitute terminal-output parsing for this transport.
+- Worker close owns model-transport startup and shutdown independently of the
+  execution gate. Join HTTP work before clearing owned key/token bytes and before
+  confirming session closure. Keep worker fingerprints as well as manager-owned
+  protection so changing a trusted caller's context cannot forget earlier keys.
 - [browser/intelligence/](browser/intelligence/) implements an in-process Go loop
   on the existing session context. Do not launch the native Lightpanda agent or
   attach another CDP connection for automation. Screenshot rendering has the
@@ -218,6 +238,13 @@
   operator-first waiting and model eligibility; never have the unconfigured
   browser model answer its own setup. Custom endpoints are a further non-secret
   question, never a secret request. Do not fetch a live model catalog before keys.
+- [internal/browsing/hermes.go](internal/browsing/hermes.go) uses the same setup
+  cache and creation claims. Its staged native path offers OpenAI and explicitly
+  selected Other only; reject unverified profiles before requesting credentials.
+  Keep the exact selected endpoint for both fixed transport routing and custom
+  secret naming. Reuse resolves managed credentials again and honors Commander's
+  delivery lease; it does not force a sync or bypass the managed-secret provider.
+  The current public Go actions retain their existing provider catalog.
 - Model configuration and API keys must not come from the agent's environment.
   New sessions obtain provider/model choices through questions; Other also asks
   for its exact endpoint. Do not retain removed model-environment shortcuts or
@@ -535,8 +562,11 @@ Clean-close Hermes scenarios check that their private profiles are removed;
 intentional uncertain-loss scenarios require retained lost state and profiles.
 The container must have no surviving Python or Lightpanda processes before it
 is discarded, including after those uncertain cases.
-The bridge currently supports OpenAI Chat Completions only; other provider
-profiles and Commander action activation remain separate migration work.
+The bridge currently supports the OpenAI Chat Completions wire profile for
+OpenAI and explicitly selected Other. Tests include escaped provider echoes,
+native observations, key rotation, exact reusable-secret requests, private worker
+files/environments and redirect refusal. Other provider profiles and Commander
+action activation remain separate migration work.
 
 Future API workflow tests that invoke global cleanup must use a dedicated stack,
 with Docker lifecycle owned by setup/CI outside Go tests. Keep fixtures under

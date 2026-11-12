@@ -343,7 +343,7 @@ class Worker:
         request["key"] = key
         return request
 
-    def event(self, run, payload, *, wait=True):
+    def event(self, run, payload, *, wait=True, kind="event"):
         identifier = run.id + ":" + secrets.token_hex(12)
         waiter = queue.Queue(maxsize=1)
         with self.lock:
@@ -356,7 +356,7 @@ class Worker:
             with self.lock:
                 if run.finished.is_set() or self.tainted:
                     raise Refused("execution_cancelled")
-                self.send("event", identifier, payload)
+                self.send(kind, identifier, payload)
             if not wait:
                 return {}
             while not (run.cancelled.is_set() or run.finished.is_set() or
@@ -432,6 +432,12 @@ class Worker:
                 encoded = run.redact(encoded)
                 if len(encoded.encode("utf-8")) > MAX_NATIVE_RESULT:
                     raise Refused("browser_output_limit")
+                # The Go owner holds non-plaintext fingerprints for submitted
+                # values, including old keys. Protect observations before
+                # Hermes can record or replay them, without delivering those
+                # credentials to this process.
+                protected = self.event(run, {"sequence": run.sequence, "text": encoded}, kind="protect")
+                encoded = bounded_text(protected.get("text"), MAX_NATIVE_RESULT)
                 parsed = json.loads(encoded)
                 if isinstance(parsed, dict) and (parsed.get("success") is False or "error" in parsed):
                     raise Refused("browser_operation_unconfirmed")

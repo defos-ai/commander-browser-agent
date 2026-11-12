@@ -20,6 +20,8 @@ import (
 	"time"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/defos-ai/commander-browser-agent/internal/sensitive"
 )
 
 var (
@@ -35,6 +37,7 @@ var (
 )
 
 const maxFrame = 1 << 20
+const maxNativeText = 128 << 10
 
 type frame struct {
 	Version int             `json:"version"`
@@ -47,6 +50,13 @@ type health struct {
 	State string `json:"state"`
 }
 
+// protection stays on the private bridge. Its raw observations are never
+// delivered to an action handler, log, checkpoint or artifact.
+type protection struct {
+	Sequence int    `json:"sequence,omitempty"`
+	Text     string `json:"text"`
+}
+
 // Worker owns one private host bridge and its original creation claim. A lost
 // worker cannot be restarted or rebound; the manager must allocate a new one.
 type Worker struct {
@@ -55,23 +65,26 @@ type Worker struct {
 	cmd    *exec.Cmd
 	input  *os.File
 	output *os.File
+	values *sensitive.Values // Direct callers retain non-plaintext protection across runs.
 
-	lifetime  context.Context
-	cancel    context.CancelCauseFunc
-	writeGate chan struct{}
-	gate      chan struct{}
-	mu        sync.Mutex
-	ready     bool
-	closing   bool
-	fault     bool
-	runID     string
-	run       chan frame
-	closeID   string
-	ack       bool
-	clean     bool
-	waitErr   error
-	closeErr  error
-	health    map[string]chan health
+	lifetime   context.Context
+	cancel     context.CancelCauseFunc
+	writeGate  chan struct{}
+	gate       chan struct{}
+	mu         sync.Mutex
+	ready      bool
+	closing    bool
+	fault      bool
+	runID      string
+	run        chan frame
+	closeID    string
+	ack        bool
+	clean      bool
+	waitErr    error
+	closeErr   error
+	health     map[string]chan health
+	model      *modelTransport
+	modelReady chan struct{}
 
 	readyDone chan error
 	procDone  chan struct{}
@@ -150,7 +163,7 @@ func Start(ctx context.Context, config Config) (*Worker, error) {
 	_ = commands.Close()
 	_ = events.Close()
 	lifetime, cancel := context.WithCancelCause(context.Background())
-	w := &Worker{config: config, work: work, cmd: command, input: input, output: output,
+	w := &Worker{config: config, work: work, cmd: command, input: input, output: output, values: sensitive.New(),
 		lifetime: lifetime, cancel: cancel, gate: make(chan struct{}, 1), readyDone: make(chan error, 1),
 		writeGate: make(chan struct{}, 1), health: make(map[string]chan health),
 		procDone: make(chan struct{}), readDone: make(chan struct{}), closedAck: make(chan struct{}), closeDone: make(chan struct{})}
@@ -297,7 +310,7 @@ func (w *Worker) route(message frame) bool {
 		return false
 	}
 	current, target := w.runID, w.run
-	valid := w.ready && target != nil && ((message.Kind == "event" && strings.HasPrefix(message.ID, current+":")) ||
+	valid := w.ready && target != nil && ((message.Kind == "event" || message.Kind == "protect") && strings.HasPrefix(message.ID, current+":") ||
 		(message.Kind == "result" && message.ID == current))
 	if valid && message.Kind == "result" {
 		w.runID, w.run = "", nil
@@ -466,7 +479,7 @@ func (w *Worker) Verify(ctx context.Context) error {
 
 // Run serializes executions without holding the lifecycle lock. Controls may
 // close the worker while a model call or host question is pending.
-func (w *Worker) Run(ctx context.Context, request Request, handler Handler) (Result, error) {
+func (w *Worker) Run(ctx context.Context, request Request, handler Handler) (result Result, runErr error) {
 	if !validRequest(request) {
 		return Result{}, errRequest
 	}
@@ -495,8 +508,33 @@ func (w *Worker) Run(ctx context.Context, request Request, handler Handler) (Res
 		}
 		return Result{}, ErrClosed
 	}
-	w.runID, w.run = identifier, frames
+	modelReady := make(chan struct{})
+	w.model, w.modelReady = nil, modelReady
 	w.mu.Unlock()
+	var transport *modelTransport
+	modelSettled := false
+	settleModel := func() {
+		w.mu.Lock()
+		w.model = transport
+		close(modelReady)
+		w.mu.Unlock()
+		modelSettled = true
+	}
+	defer func() {
+		if !modelSettled {
+			settleModel()
+		}
+	}()
+	protectionCtx := sensitive.WithValues(ctx, w.values)
+	if err := sensitive.Remember(protectionCtx, request.APIKey); err != nil {
+		return Result{}, errors.New("cannot protect Hermes model credentials; use a new session")
+	}
+	if sensitive.HasValues(ctx) {
+		if err := sensitive.Remember(ctx, request.APIKey); err != nil {
+			return Result{}, errors.New("cannot protect Hermes model credentials; use a new session")
+		}
+	}
+	redact := func(value string) string { return sensitive.Redact(protectionCtx, sensitive.Redact(ctx, value)) }
 	run, cancel := context.WithTimeout(ctx, time.Duration(request.TimeoutSeconds)*time.Second)
 	defer cancel()
 	active, stop := context.WithCancelCause(run)
@@ -510,7 +548,38 @@ func (w *Worker) Run(ctx context.Context, request Request, handler Handler) (Res
 		case <-watchDone:
 		}
 	}()
-	if err := w.send(active, "run", identifier, request); err != nil {
+	transport, err = startModelTransport(active, request, redact)
+	var wireKey []byte
+	if err == nil {
+		// Finish copying the ephemeral credential before Close can join and
+		// clear the transport's owned buffers through modelReady.
+		wireKey = bytes.Clone(transport.token)
+	}
+	defer clear(wireKey)
+	settleModel()
+	if err != nil {
+		return Result{}, errors.Join(err, contextError(active))
+	}
+	defer func() {
+		if err := transport.Close(); err != nil {
+			w.fail(ErrUncertain)
+			result = Result{}
+			runErr = errors.Join(runErr, ErrUncertain, err, w.Close())
+		}
+	}()
+	wire := workerRequest{
+		Objective: redact(request.Objective), Provider: "openai", Model: request.Model,
+		BaseURL: transport.baseURL, APIKey: wireKey,
+		MaxIterations: request.MaxIterations, MaxTokens: request.MaxTokens, TimeoutSeconds: request.TimeoutSeconds,
+	}
+	w.mu.Lock()
+	if w.closing || w.fault || !w.ready {
+		w.mu.Unlock()
+		return Result{}, ErrClosed
+	}
+	w.runID, w.run = identifier, frames
+	w.mu.Unlock()
+	if err := w.send(active, "run", identifier, wire); err != nil {
 		if !errors.Is(err, ErrProtocol) {
 			w.mu.Lock()
 			if w.runID == identifier {
@@ -523,7 +592,7 @@ func (w *Worker) Run(ctx context.Context, request Request, handler Handler) (Res
 		return Result{}, errors.Join(err, contextError(active), w.Close())
 	}
 	seen := map[string]bool{}
-	sequence, questions, progress := 0, 0, 0
+	sequence, questions, progress, protections := 0, 0, 0, 0
 	for {
 		select {
 		case <-active.Done():
@@ -538,7 +607,7 @@ func (w *Worker) Run(ctx context.Context, request Request, handler Handler) (Res
 					w.fail(ErrProtocol)
 					return Result{}, errors.Join(ErrProtocol, w.Close())
 				}
-				result.Text = redactKey(result.Text, request.APIKey)
+				result.Text = redact(result.Text)
 				clear(message.Payload)
 				if result.Status == "uncertain" {
 					w.fail(ErrUncertain)
@@ -546,14 +615,41 @@ func (w *Worker) Run(ctx context.Context, request Request, handler Handler) (Res
 				}
 				return result, nil
 			}
+			if message.Kind == "protect" {
+				var payload protection
+				protections++
+				if strictJSON(message.Payload, &payload) != nil || payload.Sequence != sequence || protections != sequence ||
+					sequence < 1 || !boundedText(payload.Text, maxNativeText, true) {
+					clear(message.Payload)
+					w.fail(ErrProtocol)
+					return Result{}, errors.Join(ErrProtocol, w.Close())
+				}
+				protected, err := protectModelJSON([]byte(payload.Text), redact)
+				clear(message.Payload)
+				if err != nil || len(protected) > maxNativeText {
+					clear(protected)
+					w.fail(ErrUncertain)
+					return Result{}, errors.Join(ErrUncertain, w.Close())
+				}
+				err = w.send(active, "reply", message.ID, protection{Text: string(protected)})
+				clear(protected)
+				if err != nil {
+					if active.Err() != nil {
+						return Result{}, w.cancelRun(contextError(active), identifier, frames, nil)
+					}
+					w.fail(ErrProtocol)
+					return Result{}, errors.Join(ErrProtocol, w.Close())
+				}
+				continue
+			}
 			var event Event
 			if seen[message.ID] || strictJSON(message.Payload, &event) != nil || !validEvent(event) {
 				w.fail(ErrProtocol)
 				return Result{}, errors.Join(ErrProtocol, w.Close())
 			}
-			event.Text = redactKey(event.Text, request.APIKey)
+			event.Text = redact(event.Text)
 			for index := range event.Options {
-				event.Options[index] = redactKey(event.Options[index], request.APIKey)
+				event.Options[index] = redact(event.Options[index])
 			}
 			clear(message.Payload)
 			seen[message.ID] = true
@@ -587,6 +683,9 @@ func (w *Worker) Run(ctx context.Context, request Request, handler Handler) (Res
 			if active.Err() != nil {
 				return Result{}, w.cancelRun(contextError(active), identifier, frames, nil)
 			}
+			// A non-secret answer can accidentally contain an old submitted value.
+			// Protect it before it crosses the worker boundary or enters history.
+			reply.Answer = redact(reply.Answer)
 			if errors.Is(handlerErr, context.Canceled) || errors.Is(handlerErr, context.DeadlineExceeded) {
 				cause := context.Canceled
 				if errors.Is(handlerErr, context.DeadlineExceeded) {
@@ -655,6 +754,14 @@ func (w *Worker) cancelRun(cause error, identifier string, frames <-chan frame, 
 			w.fail(ErrUncertain)
 			return errors.Join(cause, ErrLost, ErrUncertain, w.Close())
 		}
+		if message.Kind == "protect" {
+			clear(message.Payload)
+			if err := w.send(quiesce, "reply", message.ID, struct{}{}); err != nil {
+				w.fail(ErrUncertain)
+				return errors.Join(cause, ErrLost, ErrUncertain, w.Close())
+			}
+			continue
+		}
 		var event Event
 		valid := !seen[message.ID] && strictJSON(message.Payload, &event) == nil && validEvent(event)
 		clear(message.Payload)
@@ -675,22 +782,28 @@ func (w *Worker) cancelRun(cause error, identifier string, frames <-chan frame, 
 }
 
 func validRequest(request Request) bool {
-	if !boundedText(request.Objective, 16384, true) || request.Provider != "openai" ||
+	if !boundedText(request.Objective, 16384, true) || request.Provider != "openai" && request.Provider != "other" ||
 		!boundedText(request.Model, 200, true) || strings.IndexFunc(request.Model, unicode.IsControl) >= 0 ||
-		len(request.APIKey) == 0 || len(request.APIKey) > 8192 || request.MaxIterations < 1 || request.MaxIterations > 30 ||
+		len(request.APIKey) == 0 || len(request.APIKey) > sensitive.MaxValueBytes || request.MaxIterations < 1 || request.MaxIterations > 30 ||
 		request.TimeoutSeconds < 1 || request.TimeoutSeconds > 600 || request.MaxTokens < 1 || request.MaxTokens > 16384 ||
-		!boundedText(request.BaseURL, 2048, true) {
+		!boundedText(request.Endpoint, 2048, true) {
 		return false
 	}
-	if !utf8.Valid(request.APIKey) || bytes.ContainsAny(request.APIKey, "\r\n\x00") {
+	for _, value := range request.APIKey {
+		if value < 0x21 || value > 0x7e {
+			return false
+		}
+	}
+	if containsKey(request.Objective, request.APIKey) || containsKey(request.Model, request.APIKey) || containsKey(request.Endpoint, request.APIKey) {
 		return false
 	}
-	if containsKey(request.Objective, request.APIKey) || containsKey(request.Model, request.APIKey) || containsKey(request.BaseURL, request.APIKey) {
-		return false
-	}
-	endpoint, err := url.Parse(request.BaseURL)
+	endpoint, err := url.Parse(request.Endpoint)
 	if err != nil || endpoint.Hostname() == "" || endpoint.User != nil || endpoint.RawQuery != "" || endpoint.ForceQuery ||
-		endpoint.Fragment != "" || strings.Contains(request.BaseURL, "#") || endpoint.Opaque != "" {
+		endpoint.Fragment != "" || strings.Contains(request.Endpoint, "#") || endpoint.Opaque != "" ||
+		strings.TrimSpace(request.Endpoint) != request.Endpoint || strings.HasSuffix(endpoint.Host, ":") {
+		return false
+	}
+	if containsKey(endpoint.Path, request.APIKey) {
 		return false
 	}
 	if endpoint.Scheme == "https" {
@@ -708,10 +821,6 @@ func boundedText(value string, maximum int, required bool) bool {
 }
 
 func containsKey(value string, key []byte) bool { return bytes.Contains([]byte(value), key) }
-
-func redactKey(value string, key []byte) string {
-	return strings.ReplaceAll(value, string(key), "[REDACTED]")
-}
 
 func validEvent(event Event) bool {
 	if len(event.Options) > 4 {
@@ -777,6 +886,25 @@ func (w *Worker) shutdown() {
 	w.cancel(ErrClosed)
 	grace, finish := context.WithTimeout(context.Background(), 10*time.Second)
 	defer finish()
+	// Closing a session also owns a model transport still being prepared by
+	// Run. Do not wait on Run's execution gate: that call may await this close.
+	w.mu.Lock()
+	modelReady := w.modelReady
+	w.mu.Unlock()
+	modelClean := true
+	if modelReady != nil {
+		select {
+		case <-modelReady:
+			w.mu.Lock()
+			model := w.model
+			w.mu.Unlock()
+			if model != nil && model.Close() != nil {
+				modelClean = false
+			}
+		case <-grace.Done():
+			modelClean = false
+		}
+	}
 	if idErr == nil {
 		_ = w.send(grace, "close", identifier, struct{}{})
 	}
@@ -805,7 +933,7 @@ func (w *Worker) shutdown() {
 		}
 	}
 	w.mu.Lock()
-	clean := acknowledged && exited && w.clean && w.waitErr == nil && !w.fault
+	clean := modelClean && acknowledged && exited && w.clean && w.waitErr == nil && !w.fault
 	w.mu.Unlock()
 	if clean && processGroupExists(w.cmd) {
 		clean = false
@@ -831,6 +959,7 @@ func (w *Worker) shutdown() {
 	clean = clean && !w.fault
 	w.mu.Unlock()
 	if clean {
+		w.values.Clear()
 		if os.RemoveAll(w.work) != nil {
 			w.closeErr = ErrUncertain
 		}

@@ -18,6 +18,7 @@ import (
 	"time"
 
 	browserruntime "github.com/defos-ai/commander-browser-agent/browser"
+	"github.com/defos-ai/commander-browser-agent/internal/browsing"
 	"github.com/defos-ai/commander-browser-agent/internal/hermes"
 	"github.com/defos-ai/commander-browser-agent/tests/fakes"
 	"github.com/defos-ai/commander/framework/agent"
@@ -29,6 +30,7 @@ import (
 	"github.com/defos-ai/commander/framework/comms/messages"
 	actionmodel "github.com/defos-ai/commander/framework/domain/actions"
 	"github.com/defos-ai/commander/framework/domain/operations"
+	"github.com/defos-ai/commander/framework/domain/secrets"
 	"github.com/defos-ai/commander/framework/domain/sessions"
 	"github.com/defos-ai/commander/framework/id"
 	runtimeSessions "github.com/defos-ai/commander/framework/sessions"
@@ -37,10 +39,12 @@ import (
 )
 
 type hermesSessionScenario struct {
-	request hermes.Request
-	cancel  <-chan struct{}
-	scope   chan context.Context
-	result  chan error
+	request     hermes.Request
+	managed     bool
+	prepareOnly bool
+	cancel      <-chan struct{}
+	scope       chan context.Context
+	result      chan error
 }
 
 type hermesSessionOutput struct {
@@ -63,6 +67,8 @@ type hermesSessionHost struct {
 	accepted               map[string]messages.Message
 	entered                atomic.Int32
 	expectUncertainCleanup bool
+	setup                  browsing.Setup
+	modelKeyMetadata       map[string]secrets.Metadata
 }
 
 func newHermesSessionHost(t *testing.T, cases map[string]hermesSessionScenario) *hermesSessionHost {
@@ -100,8 +106,20 @@ func newHermesSessionHost(t *testing.T, cases map[string]hermesSessionScenario) 
 				config := hermesConfig()
 				var result hermes.Result
 				view, err := h.manager.RunHermes(ctx, browserruntime.HermesOptions{Python: config.Python, Source: config.Source, Executable: config.Lightpanda}, func(workCtx context.Context) error {
+					request := scenario.request
+					if scenario.managed {
+						request, err = h.setup.PrepareHermes(workCtx)
+						if err != nil {
+							return err
+						}
+						defer clear(request.APIKey)
+						request.Objective, request.MaxIterations, request.MaxTokens, request.TimeoutSeconds = "Complete the managed local fixture.", 4, 512, 25
+					}
+					if scenario.prepareOnly {
+						return nil
+					}
 					handler := func(ctx context.Context, event hermes.Event) (hermes.Reply, error) {
-						hermesEventPrivate(t, event, string(scenario.request.APIKey))
+						hermesEventPrivate(t, event, string(request.APIKey))
 						if event.Kind == "admit" {
 							return hermes.Reply{Approved: true}, nil
 						}
@@ -112,7 +130,7 @@ func newHermesSessionHost(t *testing.T, cases map[string]hermesSessionScenario) 
 						return hermes.Reply{}, nil
 					}
 					if scenario.scope != nil {
-						if _, err := hermes.Run(context.WithoutCancel(workCtx), scenario.request, handler); err == nil {
+						if _, err := hermes.Run(context.WithoutCancel(workCtx), request, handler); err == nil {
 							t.Error("a detached context retained native execution authority")
 						}
 						scenario.scope <- workCtx
@@ -129,7 +147,7 @@ func newHermesSessionHost(t *testing.T, cases map[string]hermesSessionScenario) 
 						}
 					}()
 					defer func() { cancel(); <-joined }()
-					result, err = hermes.Run(runCtx, scenario.request, handler)
+					result, err = hermes.Run(runCtx, request, handler)
 					return err
 				})
 				if scenario.result != nil {
@@ -150,7 +168,8 @@ func newHermesSessionHost(t *testing.T, cases map[string]hermesSessionScenario) 
 	files, err := fsartifacts.NewArtifactFileFsStore(filepath.Join(root, "storage"))
 	hermesSessionCheck(t, err)
 	zero := time.Duration(0)
-	h.host, err = agent.NewAgent(agent.AgentConfig{ID: owner, Type: "browser-agent", Actions: executors, Sessions: h.manager, ArtifactFileStore: files, HeartbeatInterval: &zero})
+	h.host, err = agent.NewAgent(agent.AgentConfig{ID: owner, Type: "browser-agent", Actions: executors, Sessions: h.manager, ArtifactFileStore: files,
+		Secrets: &agent.SecretConfig{RequestTTL: 2 * time.Second, RefreshInterval: 500 * time.Millisecond, RetryInterval: 100 * time.Millisecond}, HeartbeatInterval: &zero})
 	hermesSessionCheck(t, err)
 	ctx, cancel := context.WithCancel(t.Context())
 	served := make(chan error, 1)
