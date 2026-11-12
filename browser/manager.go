@@ -35,24 +35,24 @@ type Manager struct {
 }
 
 type entry struct {
-	claim       sessions.CreationClaim
-	view        sessions.Session
-	engine      Engine
-	backend     string
-	resource    sessionRuntime
-	hermesPaths HermesOptions
-	gate        chan struct{}
-	stopping    chan struct{}
-	lifetime    context.Context
-	cancel      context.CancelFunc
-	startDone   chan struct{}
-	browser     *browserRuntime
-	closing     bool
-	explicit    bool
-	cleanupDone chan struct{}
-	cleaned     bool
-	cleanupErr  error
-	values      *sensitive.Values
+	claim         sessions.CreationClaim
+	view          sessions.Session
+	engine        Engine
+	backend       string
+	resource      sessionRuntime
+	hermesOptions HermesOptions
+	gate          chan struct{}
+	stopping      chan struct{}
+	lifetime      context.Context
+	cancel        context.CancelFunc
+	startDone     chan struct{}
+	browser       *browserRuntime
+	closing       bool
+	explicit      bool
+	cleanupDone   chan struct{}
+	cleaned       bool
+	cleanupErr    error
+	values        *sensitive.Values
 }
 
 var _ sessions.Provider = (*Manager)(nil)

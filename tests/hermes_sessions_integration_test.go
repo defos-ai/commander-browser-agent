@@ -64,6 +64,7 @@ type hermesSessionHost struct {
 	t                      *testing.T
 	host                   *agent.Agent
 	manager                *browserruntime.Manager
+	options                browserruntime.HermesOptions
 	files                  *fsartifacts.ArtifactFileFsStore
 	bus                    comms.Bus
 	observer               comms.Subscription
@@ -81,8 +82,13 @@ type hermesSessionHost struct {
 
 func newHermesSessionHost(t *testing.T, cases map[string]hermesSessionScenario, extra ...func(*hermesSessionHost) action.Executor) *hermesSessionHost {
 	t.Helper()
+	return newHermesSessionHostWithOptions(t, cases, hermesScreenshotOptions(), extra...)
+}
+
+func newHermesSessionHostWithOptions(t *testing.T, cases map[string]hermesSessionScenario, options browserruntime.HermesOptions, extra ...func(*hermesSessionHost) action.Executor) *hermesSessionHost {
+	t.Helper()
 	profilesBefore := hermesSessionProfiles(t)
-	h := &hermesSessionHost{t: t, claims: map[string]sessions.CreationClaim{}, accepted: map[string]messages.Message{}, checkpoints: map[string]executions.Execution{}}
+	h := &hermesSessionHost{t: t, options: options, claims: map[string]sessions.CreationClaim{}, accepted: map[string]messages.Message{}, checkpoints: map[string]executions.Execution{}}
 	owner, err := id.AgentID("browser-agent")
 	hermesSessionCheck(t, err)
 	h.manager, err = browserruntime.New(owner)
@@ -114,10 +120,9 @@ func newHermesSessionHost(t *testing.T, cases map[string]hermesSessionScenario, 
 				if scenario.checkpointed {
 					return h.runCheckpointed(ctx, binding, scenario)
 				}
-				config := hermesConfig()
 				var result hermes.Result
 				var loginResult *browserlogin.Result
-				view, err := h.manager.RunHermes(ctx, browserruntime.HermesOptions{Python: config.Python, Source: config.Source, Executable: config.Lightpanda}, func(workCtx context.Context) error {
+				view, err := h.manager.RunHermes(ctx, h.options, func(workCtx context.Context) error {
 					if scenario.login != nil {
 						outcome, err := runHermesLoginFixture(workCtx, *scenario.login)
 						loginResult = &outcome
@@ -178,6 +183,7 @@ func newHermesSessionHost(t *testing.T, cases map[string]hermesSessionScenario, 
 		h.definitions = append(h.definitions, executor.Action().Definition())
 	}
 	capture := newHermesScreenshot(h.manager)
+	capture.options = options
 	executors = append(executors, capture)
 	h.definitions = append(h.definitions, capture.Action().Definition())
 	for _, makeExecutor := range extra {

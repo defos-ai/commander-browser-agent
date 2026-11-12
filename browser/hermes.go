@@ -2,8 +2,10 @@ package browser
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/defos-ai/commander-browser-agent/internal/hermes"
@@ -12,15 +14,36 @@ import (
 	"github.com/defos-ai/commander/framework/domain/sessions"
 )
 
-// HermesOptions are trusted discovered runtime paths. They are not action input
-// or browser session selectors. Lightpanda is the only supported engine.
+// HermesContainerOptions identifies a trusted local daemon and preloaded image.
+// These settings never come from action input or browser session selectors.
+type HermesContainerOptions struct {
+	Socket string
+	Image  string
+}
+
+// HermesOptions selects either discovered local paths or an isolated container.
+// A session pins the complete selection; there is no cross-mode fallback.
+// Lightpanda is the only supported browser engine.
 type HermesOptions struct {
 	Python     string
 	Source     string
 	Executable string
+	Container  HermesContainerOptions
 }
 
 func (o HermesOptions) validate() error {
+	if o.Container != (HermesContainerOptions{}) {
+		digest := strings.TrimPrefix(o.Container.Image, "sha256:")
+		if o.Python != "" || o.Source != "" || o.Executable != "" ||
+			!filepath.IsAbs(o.Container.Socket) || len(o.Container.Socket) > 4096 || strings.ContainsRune(o.Container.Socket, 0) ||
+			len(o.Container.Image) != 71 || len(digest) != 64 || strings.ToLower(digest) != digest {
+			return errors.New("isolated Hermes requires only an absolute Docker socket and immutable sha256 image ID")
+		}
+		if _, err := hex.DecodeString(digest); err != nil {
+			return errors.New("isolated Hermes requires only an absolute Docker socket and immutable sha256 image ID")
+		}
+		return nil
+	}
 	if !filepath.IsAbs(o.Python) || !filepath.IsAbs(o.Source) || !filepath.IsAbs(o.Executable) {
 		return errors.New("Hermes requires absolute discovered runtime paths")
 	}
@@ -114,7 +137,7 @@ func (m *Manager) hermesWorker(ctx context.Context, item *entry, mode sessions.M
 		m.mu.Unlock()
 		return nil, err
 	}
-	if item.backend != "" && (item.backend != "hermes" || item.hermesPaths != options) {
+	if item.backend != "" && (item.backend != "hermes" || item.hermesOptions != options) {
 		m.mu.Unlock()
 		return nil, errors.New("browser session belongs to a different runtime")
 	}
@@ -137,7 +160,7 @@ func (m *Manager) hermesWorker(ctx context.Context, item *entry, mode sessions.M
 		m.mu.Unlock()
 		return nil, errors.New("browser session has not been started")
 	}
-	item.backend, item.hermesPaths, item.engine = "hermes", options, Lightpanda
+	item.backend, item.hermesOptions, item.engine = "hermes", options, Lightpanda
 	item.view.Kind, item.view.Label, item.view.Busy = string(Lightpanda), "Lightpanda browser session (Hermes)", true
 	item.lifetime, item.cancel = context.WithCancel(context.Background())
 	item.startDone = make(chan struct{})
@@ -148,9 +171,17 @@ func (m *Manager) hermesWorker(ctx context.Context, item *entry, mode sessions.M
 		item.cancel()
 		close(startupCancelled)
 	})
-	worker, err := hermes.Start(item.lifetime, hermes.Config{
-		Python: options.Python, Source: options.Source, Lightpanda: options.Executable, Claim: item.claim,
-	})
+	var worker *hermes.Worker
+	var err error
+	if options.Container != (HermesContainerOptions{}) {
+		worker, err = hermes.StartContainer(item.lifetime, hermes.ContainerConfig{
+			Socket: options.Container.Socket, Image: options.Container.Image, Claim: item.claim,
+		})
+	} else {
+		worker, err = hermes.Start(item.lifetime, hermes.Config{
+			Python: options.Python, Source: options.Source, Lightpanda: options.Executable, Claim: item.claim,
+		})
+	}
 	if !stopStartup() {
 		<-startupCancelled
 	}

@@ -43,13 +43,14 @@ import (
 type hermesScreenshot struct {
 	*action.Base
 	manager *browserruntime.Manager
+	options browserruntime.HermesOptions
 }
 
 func newHermesScreenshot(manager *browserruntime.Manager) *hermesScreenshot {
 	return &hermesScreenshot{Base: action.NewBase(actionmodel.Action{
 		Name: "native-capture", Description: "Capture the retained native fixture.", SessionMode: "use",
 		InputSchema: json.RawMessage(`{"type":"object","additionalProperties":false,"properties":{"viewport":{"type":"string","enum":["desktop","mobile"]}}}`),
-	}), manager: manager}
+	}), manager: manager, options: hermesScreenshotOptions()}
 }
 
 func (capture *hermesScreenshot) Run(ctx context.Context, raw json.RawMessage) (action.Result, error) {
@@ -69,7 +70,7 @@ func (capture *hermesScreenshot) Run(ctx context.Context, raw json.RawMessage) (
 		return action.Result{}, errors.New("unsupported native fixture viewport")
 	}
 	var image browserscreenshot.Image
-	view, err := capture.manager.RunHermes(ctx, hermesScreenshotOptions(), func(ctx context.Context) error {
+	view, err := capture.manager.RunHermes(ctx, capture.options, func(ctx context.Context) error {
 		var err error
 		image, err = browserscreenshot.CaptureHermes(ctx, width, height)
 		return err

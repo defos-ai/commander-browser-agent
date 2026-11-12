@@ -123,7 +123,7 @@
   inputs or mounts the daemon socket into a worker. Docker access gives the
   trusted launcher control beyond this project; it is not a worker capability.
   Model and protected screenshot relays are staged through
-  `hermes.StartContainer`; session-manager integration remains separate work.
+  `hermes.StartContainer` and the session manager's explicit container options.
   This launcher does not activate a default action backend.
 - Each container uses UID1000, a read-only root, private PID/IPC/network/cgroup
   namespaces, bridge egress, no published ports, dropped capabilities and
@@ -194,6 +194,15 @@
   bridge through [internal/hermes/session.go](internal/hermes/session.go); retained
   or detached contexts cannot start later work. This infrastructure does not
   change the default action catalog or move an existing Go session to Hermes.
+- `HermesOptions` selects exactly one trusted runtime: absolute local paths or
+  `HermesContainerOptions` with an absolute local Docker socket and a preloaded
+  immutable `sha256:` image ID. Refuse incomplete or mixed configuration before
+  startup. Pin the complete selection to the original creation claim, including
+  socket and image; no local fallback, mode change or image rotation within that
+  claim is allowed. Constructors and preparation still open no runtime. The
+  manager retains partial container starts for honest cleanup and uses the same
+  health, inventory, cancellation and close controls for both transports.
+  Deployment configuration and the default action switch remain separate work.
 - A ready Hermes worker remains `starting` until native automation has opened and
   verified its browser. Pin the owned Lightpanda process, harness daemon, retained
   target and original connection; health controls must not create or reconnect
@@ -789,6 +798,10 @@ for real Hermes model-relay scenarios: native browsing/clarification, retained
 cookies/key rotation, private environment/file audits, blocked-provider
 cancellation and reuse, protected screenshot pixels/source continuity,
 renderer-helper cancellation/close and oversized provider-response rejection.
+The container session scenario dispatches through the real FS bus and manager:
+unopened `use` refusal, direct-parent reuse, independent same-origin cookie jars,
+private inventory, pinned-runtime/creation-claim rejection, clean cancellation
+with reuse, and confirmed close with retained tombstones.
 The provider fixture listens only in the trusted parent namespace,
 so these scenarios require the private relay. Test settings are not agent model
 settings.
