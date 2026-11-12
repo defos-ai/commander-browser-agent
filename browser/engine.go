@@ -21,6 +21,7 @@ import (
 	"github.com/chromedp/cdproto/target"
 	"github.com/chromedp/chromedp"
 	lpruntime "github.com/defos-ai/commander-browser-agent/browser/lightpanda"
+	"github.com/defos-ai/commander-browser-agent/internal/textrender"
 )
 
 type Engine string
@@ -58,6 +59,7 @@ var errPortInUse = errors.New("browser startup port occupied")
 type browserRuntime struct {
 	ctx             context.Context
 	cancel          context.CancelFunc
+	stopProcess     context.CancelFunc
 	page            context.Context
 	cancelPage      context.CancelFunc
 	cancelAllocator context.CancelFunc
@@ -70,9 +72,8 @@ type browserRuntime struct {
 	profileMu       sync.Mutex
 	removal         *profileRemoval
 	endpoint        string
-	renderMu        sync.Mutex
-	renderClosing   bool
-	renderers       sync.WaitGroup
+	renderer        *textrender.Owner
+	renderErr       error
 }
 
 type profileRemoval struct {
@@ -94,7 +95,11 @@ func launchBrowser(parent context.Context, options Options) (*browserRuntime, er
 
 func launchAttempt(parent context.Context, options Options) (retained *browserRuntime, result error) {
 	ctx, cancel := context.WithCancel(parent)
-	r := &browserRuntime{ctx: ctx, cancel: cancel, closed: make(chan struct{})}
+	// Session cancellation interrupts automation immediately. Keep the owned
+	// process alive until Close has allowed renderer sockets to finish cleanup.
+	processCtx, stopProcess := context.WithCancel(context.WithoutCancel(parent))
+	r := &browserRuntime{ctx: ctx, cancel: cancel, stopProcess: stopProcess, closed: make(chan struct{})}
+	r.renderer = textrender.New(ctx, cancel)
 	startupTimer := time.AfterFunc(startupTimeout, cancel)
 	defer startupTimer.Stop()
 	defer func() {
@@ -125,7 +130,7 @@ func launchAttempt(parent context.Context, options Options) (retained *browserRu
 	}
 	address := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
 	arguments := []string{"serve", "--host", "127.0.0.1", "--port", strconv.Itoa(port)}
-	r.command = exec.CommandContext(ctx, options.Executable, arguments...)
+	r.command = exec.CommandContext(processCtx, options.Executable, arguments...)
 	r.command.Dir = profile
 	r.command.Env = browserEnvironment()
 	r.command.Stdout, r.command.Stderr = io.Discard, io.Discard
@@ -263,16 +268,21 @@ func (r *browserRuntime) Verify(ctx context.Context) error {
 }
 
 func (r *browserRuntime) Close() error {
-	r.renderMu.Lock()
-	r.renderClosing = true
+	r.renderer.Stop()
 	r.cancel()
-	r.renderMu.Unlock()
 	r.closeOnce.Do(func() {
 		go func() {
+			// Give temporary targets a bounded opportunity to close while their
+			// server is still alive. A stalled cleanup must not prevent killing
+			// the process; its ownership and first uncertainty remain retained.
+			prewait, stop := context.WithTimeout(context.Background(), 2*time.Second)
+			r.renderErr = r.renderer.Wait(prewait)
+			stop()
+			r.stopProcess()
 			if r.waited != nil {
 				<-r.waited
 			}
-			r.renderers.Wait()
+			r.renderErr = errors.Join(r.renderErr, r.renderer.Wait(context.Background()))
 			if r.initialized != nil {
 				<-r.initialized
 			}
@@ -283,7 +293,9 @@ func (r *browserRuntime) Close() error {
 				r.cancelAllocator()
 			}
 			// Continue cleanup even if every bounded Close caller timed out.
-			r.removeProfile()
+			if r.renderErr == nil {
+				r.removeProfile()
+			}
 			close(r.closed)
 		}()
 	})
@@ -293,6 +305,9 @@ func (r *browserRuntime) Close() error {
 	case <-r.closed:
 	case <-deadline.C:
 		return errors.New("browser cleanup could not be confirmed within its time limit")
+	}
+	if r.renderErr != nil {
+		return r.renderErr
 	}
 	attempt := r.removeProfile()
 	select {

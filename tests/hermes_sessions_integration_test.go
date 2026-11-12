@@ -62,6 +62,7 @@ type hermesSessionHost struct {
 	t                      *testing.T
 	host                   *agent.Agent
 	manager                *browserruntime.Manager
+	files                  *fsartifacts.ArtifactFileFsStore
 	bus                    comms.Bus
 	observer               comms.Subscription
 	definitions            []actionmodel.Definition
@@ -170,6 +171,9 @@ func newHermesSessionHost(t *testing.T, cases map[string]hermesSessionScenario) 
 		executors = append(executors, executor)
 		h.definitions = append(h.definitions, executor.Action().Definition())
 	}
+	capture := newHermesScreenshot(h.manager)
+	executors = append(executors, capture)
+	h.definitions = append(h.definitions, capture.Action().Definition())
 	root := t.TempDir()
 	h.bus, err = fscomms.NewFsBus(filepath.Join(root, "bus"))
 	hermesSessionCheck(t, err)
@@ -177,6 +181,7 @@ func newHermesSessionHost(t *testing.T, cases map[string]hermesSessionScenario) 
 	hermesSessionCheck(t, err)
 	files, err := fsartifacts.NewArtifactFileFsStore(filepath.Join(root, "storage"))
 	hermesSessionCheck(t, err)
+	h.files = files
 	zero := time.Duration(0)
 	h.host, err = agent.NewAgent(agent.AgentConfig{ID: owner, Type: "browser-agent", Actions: executors, Sessions: h.manager, ArtifactFileStore: files,
 		Secrets: &agent.SecretConfig{RequestTTL: 2 * time.Second, RefreshInterval: 500 * time.Millisecond, RetryInterval: 100 * time.Millisecond}, HeartbeatInterval: &zero})

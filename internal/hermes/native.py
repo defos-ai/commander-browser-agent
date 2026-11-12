@@ -11,7 +11,8 @@ import time
 
 
 MAX_PARAMS = 32 << 10
-MAX_RESULT = 32 << 10
+MAX_RESULT = 128 << 10
+MAX_EVENT_RESULT = 32 << 10
 MAX_EVENTS = 128  # The pinned daemon silently evicts at 500 total events.
 METHODS = frozenset({
     "Page.enable", "Page.navigate", "Page.getFrameTree", "Page.createIsolatedWorld", "Page.stopLoading",
@@ -53,6 +54,8 @@ class NativeBrowser:
             payload["result"] = result
         if state is not None:
             payload["state"] = state
+        if len(json.dumps(payload, ensure_ascii=True).encode()) > MAX_RESULT + 256:
+            raise RuntimeError("browser_result_limit")
         self.worker.send("browser", identifier, payload)
 
     def fail(self, lease):
@@ -101,12 +104,14 @@ class NativeBrowser:
         if command == "call" and params is None:
             params = {}
         timeout_ms, uncertain = payload.get("timeout_ms"), payload.get("uncertain", False)
+        require_connected = payload.get("require_connected", False)
         keys = set(payload)
         payload.clear()  # The reader must not retain a second credential map.
         valid = (isinstance(lease_id, str) and re.fullmatch(r"[a-f0-9]{32}", lease_id) and
                  identifier.startswith(lease_id + ":") and len(identifier) > len(lease_id) + 1 and
-                 type(timeout_ms) is int and 1 <= timeout_ms <= 8000 and type(uncertain) is bool)
-        if not valid or keys - {"lease", "command", "method", "timeout_ms", "uncertain"}:
+                 type(timeout_ms) is int and 1 <= timeout_ms <= 8000 and type(uncertain) is bool and
+                 type(require_connected) is bool)
+        if not valid or keys - {"lease", "command", "method", "timeout_ms", "uncertain", "require_connected"}:
             if isinstance(params, dict):
                 params.clear()
             self.reply(identifier, ok=False, state="lost")
@@ -121,7 +126,7 @@ class NativeBrowser:
                         self.reply(identifier, ok=False, state="lost")
                         return
                     lease = self.current = Lease(lease_id)
-            if not self.start(lease, identifier, lambda: self.begin(lease, timeout_ms)):
+            if not self.start(lease, identifier, lambda: self.begin(lease, timeout_ms, require_connected)):
                 self.fail(lease)
                 self.reply(identifier, ok=False, state="lost")
             return
@@ -142,6 +147,8 @@ class NativeBrowser:
             operation = lambda: (self.events(), None)
         elif command == "destroy" and method is None and params is None:
             operation = lambda: self.destroy(lease)
+        elif command == "renderer" and method is None and params is None:
+            operation = lambda: ({"endpoint": self.identity()["endpoint"]}, None)
         elif (command == "call" and isinstance(method, str) and method in METHODS and isinstance(params, dict) and
               not set(params).intersection({"session_id", "sessionId", "target_id", "targetId"})):
             operation = lambda: (self.call(method, params, timeout_ms), None)
@@ -157,7 +164,7 @@ class NativeBrowser:
             self.fail(lease)
             self.reply(identifier, ok=False, state="lost")
 
-    def begin(self, lease, timeout_ms):
+    def begin(self, lease, timeout_ms, require_connected):
         if not self.worker.native_lock.acquire(timeout=min(2, timeout_ms / 1000)):
             raise RuntimeError("browser_unavailable")
         lease.locked = True
@@ -165,6 +172,8 @@ class NativeBrowser:
             raise RuntimeError("browser_unavailable")
         state = self.worker.probe_browser()
         if state == "starting":
+            if require_connected:
+                raise RuntimeError("browser_not_connected")
             from tools.browser_use_cli import browser_exec
             self.worker.browser_attempted = True
             result = browser_exec("print('ready')", session=self.worker.session_name,
@@ -238,7 +247,7 @@ class NativeBrowser:
                         raise RuntimeError("browser_event_unavailable")
                     selected[response_key] = {"status": status}
                 output.append({"method": method, "params": selected})
-            if len(json.dumps(output, ensure_ascii=True).encode()) > MAX_RESULT:
+            if len(json.dumps(output, ensure_ascii=True).encode()) > MAX_EVENT_RESULT:
                 raise RuntimeError("browser_event_limit")
             self.identity()
             return output

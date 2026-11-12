@@ -402,6 +402,13 @@
 
 ## Protected text screenshots
 
+- [browser/screenshot/hermes.go](browser/screenshot/hermes.go) stages capture on
+  the existing native session with an exact framework `use` binding. Its
+  `WithExistingBrowser` lease cannot bootstrap a browser. Read the same fixed
+  snapshot function through the original automation attachment, protect text
+  using both manager and worker fingerprints before truncation, and retain the
+  lease through renderer cleanup and final source-health confirmation. Capture
+  asks no setup questions, resolves no credentials and invokes no model.
 - [actions/screenshot.go](actions/screenshot.go) is use-only: require the exact
   framework `use` binding with its existing session reference. Do not navigate, create
   an automation session, ask model questions or request credentials for capture.
@@ -419,13 +426,21 @@
   text in an inert blank document. Never copy cookies, storage, authentication,
   source HTML or source scripts. Keep its endpoint and runtime handle private.
   Renderer-local metrics must not change the source page's viewport/media state.
-- [browser/render.go](browser/render.go) owns temporary renderer connections and
-  joins target/allocator/socket cleanup, including on action cancellation and
+- [browser/render.go](browser/render.go) and the private native bridge share
+  [internal/textrender/](internal/textrender/) for temporary renderer connections
+  and target/allocator/socket cleanup, including on action cancellation and
   session close. Bind the private renderer handle to the original `Manager.Run`
   lifetime; detached contexts cannot render after that callback ends. Source
   shutdown stops admission and waits for render borrows.
   Return PNG bytes only after confirmed cleanup; uncertain cleanup retains
   ownership and marks the source runtime lost rather than silently reconnecting.
+- The native renderer endpoint crosses only a private, scoped host message. It
+  must identify the exact owned loopback Lightpanda process and never reach model
+  handlers, results or artifacts. Worker shutdown stops admission, cancels and
+  joins renderer work before removing private state. Keep source-result frames
+  bounded to 128 KiB for Unicode text and redaction overlap; command parameters
+  and filtered event batches retain their separate 32 KiB limits. PNG bytes use
+  the isolated Go renderer connection, never the worker JSON protocol.
 - Use native PNG output, validate its byte/pixel bounds and actual dimensions,
   and upload through ArtifactFileStore via action results. Renderer metadata
   belongs in output and `screenshot.json` beside `screenshot.png`; never include
@@ -585,7 +600,9 @@ setup, authenticated reuse by native reasoning, independent accounts on one
 origin, stale/expired transient deliveries, form mutation, dropped responses,
 pending-session close, and event overflow before filtering. Login values must
 remain absent from model requests and public Commander messages.
-CI combines both integration tags with a six-minute test-binary bound.
+Native screenshots also compare decoded pixels after secret redaction, verify
+source state and cookie continuity, and exercise allocated-renderer interruption.
+CI combines both integration tags with a seven-minute test-binary bound.
 Clean-close Hermes scenarios check that their private profiles are removed;
 intentional uncertain-loss scenarios require retained lost state and profiles.
 The container must have no surviving Python or Lightpanda processes before it

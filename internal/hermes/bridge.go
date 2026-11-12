@@ -22,6 +22,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/defos-ai/commander-browser-agent/internal/sensitive"
+	"github.com/defos-ai/commander-browser-agent/internal/textrender"
 )
 
 var (
@@ -66,6 +67,7 @@ type Worker struct {
 	input  *os.File
 	output *os.File
 	values *sensitive.Values // Direct callers retain non-plaintext protection across runs.
+	render *textrender.Owner
 
 	lifetime     context.Context
 	cancel       context.CancelCauseFunc
@@ -169,6 +171,7 @@ func Start(ctx context.Context, config Config) (*Worker, error) {
 		lifetime: lifetime, cancel: cancel, gate: make(chan struct{}, 1), readyDone: make(chan error, 1),
 		writeGate: make(chan struct{}, 1), health: make(map[string]chan health), browserCalls: make(map[string]chan browserReply),
 		procDone: make(chan struct{}), readDone: make(chan struct{}), closedAck: make(chan struct{}), closeDone: make(chan struct{})}
+	w.render = textrender.New(lifetime, func() { w.fail(ErrUncertain) })
 	go w.readFrames()
 	go w.waitProcess()
 	startup, stop := context.WithTimeout(ctx, 30*time.Second)
@@ -314,7 +317,8 @@ func (w *Worker) route(message frame) bool {
 	if message.Kind == "browser" {
 		response, expected := w.browserCalls[message.ID]
 		var reply browserReply
-		if expected && len(message.Payload) <= maxBrowserMessage && strictJSON(message.Payload, &reply) == nil &&
+		if expected && len(message.Payload) <= maxBrowserPayload && strictJSON(message.Payload, &reply) == nil &&
+			len(reply.Result) <= maxBrowserResult &&
 			(reply.State == "" || reply.State == "connected" || reply.State == "lost") {
 			delete(w.browserCalls, message.ID)
 			w.mu.Unlock()
@@ -907,6 +911,10 @@ func (w *Worker) shutdown() {
 	w.cancel(ErrClosed)
 	grace, finish := context.WithTimeout(context.Background(), 10*time.Second)
 	defer finish()
+	w.render.Stop()
+	renderWait, stopRenderWait := context.WithTimeout(context.Background(), 2*time.Second)
+	renderClean := w.render.Wait(renderWait) == nil
+	stopRenderWait()
 	// Closing a session also owns a model transport still being prepared by
 	// Run. Do not wait on Run's execution gate: that call may await this close.
 	w.mu.Lock()
@@ -954,7 +962,7 @@ func (w *Worker) shutdown() {
 		}
 	}
 	w.mu.Lock()
-	clean := modelClean && acknowledged && exited && w.clean && w.waitErr == nil && !w.fault
+	clean := renderClean && modelClean && acknowledged && exited && w.clean && w.waitErr == nil && !w.fault
 	w.mu.Unlock()
 	if clean && processGroupExists(w.cmd) {
 		clean = false
@@ -966,6 +974,14 @@ func (w *Worker) shutdown() {
 		case <-time.After(5 * time.Second):
 		}
 	}
+	// Killing the source may unblock a renderer whose socket cleanup could not
+	// join earlier. Retain uncertainty from that first missing receipt even when
+	// this final ownership wait succeeds.
+	renderWait, stopRenderWait = context.WithTimeout(context.Background(), 3*time.Second)
+	if w.render.Wait(renderWait) != nil {
+		clean = false
+	}
+	stopRenderWait()
 	_ = w.input.Close()
 	if clean {
 		select {

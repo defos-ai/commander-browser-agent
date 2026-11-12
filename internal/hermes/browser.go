@@ -8,7 +8,12 @@ import (
 	"time"
 )
 
-const maxBrowserMessage = 32 << 10
+const (
+	maxBrowserParams  = 32 << 10
+	maxBrowserEvents  = 32 << 10
+	maxBrowserResult  = 128 << 10
+	maxBrowserPayload = maxBrowserResult + 256
+)
 
 // BrowserEvent is a private, filtered event from the pinned daemon connection.
 // It never contains request headers, cookies or POST data.
@@ -18,12 +23,13 @@ type BrowserEvent struct {
 }
 
 type browserCommand struct {
-	Lease     string          `json:"lease"`
-	Command   string          `json:"command"`
-	Method    string          `json:"method,omitempty"`
-	Params    json.RawMessage `json:"params,omitempty"`
-	TimeoutMS int             `json:"timeout_ms,omitempty"`
-	Uncertain bool            `json:"uncertain,omitempty"`
+	Lease            string          `json:"lease"`
+	Command          string          `json:"command"`
+	Method           string          `json:"method,omitempty"`
+	Params           json.RawMessage `json:"params,omitempty"`
+	TimeoutMS        int             `json:"timeout_ms,omitempty"`
+	Uncertain        bool            `json:"uncertain,omitempty"`
+	RequireConnected bool            `json:"require_connected,omitempty"`
 }
 
 type browserReply struct {
@@ -39,6 +45,7 @@ type Browser struct {
 	worker               *Worker
 	id                   string
 	owner                context.Context
+	lease                context.Context
 	mu                   sync.Mutex
 	active               bool
 	uncertain            bool
@@ -50,6 +57,16 @@ type Browser struct {
 // WithBrowser serializes deterministic host work against Hermes reasoning.
 // Browser construction can bootstrap an empty native page, never a model.
 func WithBrowser(ctx context.Context, work func(*Browser) error) error {
+	return withBrowser(ctx, false, work)
+}
+
+// WithExistingBrowser lends only an already connected browser. It cannot
+// bootstrap a browser while capturing the retained page.
+func WithExistingBrowser(ctx context.Context, work func(*Browser) error) error {
+	return withBrowser(ctx, true, work)
+}
+
+func withBrowser(ctx context.Context, existing bool, work func(*Browser) error) error {
 	if work == nil {
 		return ErrUnavailable
 	}
@@ -65,6 +82,11 @@ func WithBrowser(ctx context.Context, work func(*Browser) error) error {
 		if err := contextError(active); err != nil {
 			return err
 		}
+		if existing {
+			if err := worker.Verify(active); err != nil {
+				return err
+			}
+		}
 		identifier, err := freshID()
 		if err != nil {
 			return err
@@ -73,7 +95,9 @@ func WithBrowser(ctx context.Context, work func(*Browser) error) error {
 		watch := context.AfterFunc(worker.lifetime, func() { stop(context.Cause(worker.lifetime)) })
 		defer watch()
 		defer stop(ErrClosed)
-		browser := &Browser{worker: worker, id: identifier, owner: owner, active: true}
+		lease, revoke := context.WithCancelCause(active)
+		defer revoke(ErrClosed)
+		browser := &Browser{worker: worker, id: identifier, owner: owner, lease: lease, active: true}
 		worker.mu.Lock()
 		if worker.closing || worker.fault || !worker.ready || worker.browser != nil {
 			worker.mu.Unlock()
@@ -89,6 +113,7 @@ func WithBrowser(ctx context.Context, work func(*Browser) error) error {
 				browser.uncertain = true
 			}
 			browser.mu.Unlock()
+			revoke(ErrClosed)
 			browser.uses.Wait()
 			if started {
 				browser.mu.Lock()
@@ -113,7 +138,7 @@ func WithBrowser(ctx context.Context, work func(*Browser) error) error {
 			}
 			worker.mu.Unlock()
 		}()
-		if _, err := browser.request(active, browserCommand{Command: "begin"}); err != nil {
+		if _, err := browser.request(active, browserCommand{Command: "begin", RequireConnected: existing}); err != nil {
 			browser.mu.Lock()
 			browser.active = false
 			browser.mu.Unlock()
@@ -133,18 +158,26 @@ func WithBrowser(ctx context.Context, work func(*Browser) error) error {
 }
 
 func (browser *Browser) use(ctx context.Context, command browserCommand) (json.RawMessage, error) {
+	release, err := browser.borrow(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	return browser.request(ctx, command)
+}
+
+func (browser *Browser) borrow(ctx context.Context) (func(), error) {
 	if err := contextError(ctx); err != nil {
 		return nil, err
 	}
 	browser.mu.Lock()
-	if !browser.active || browser.owner.Err() != nil {
+	if ctx.Done() == nil || !browser.active || browser.owner.Err() != nil {
 		browser.mu.Unlock()
 		return nil, ErrClosed
 	}
 	browser.uses.Add(1)
 	browser.mu.Unlock()
-	defer browser.uses.Done()
-	return browser.request(ctx, command)
+	return browser.uses.Done, nil
 }
 
 func (browser *Browser) request(ctx context.Context, command browserCommand) (json.RawMessage, error) {
@@ -226,7 +259,7 @@ func (browser *Browser) Execute(ctx context.Context, method string, params any, 
 		return ErrProtocol
 	}
 	encoded, err := json.Marshal(params)
-	if err != nil || len(encoded) > maxBrowserMessage {
+	if err != nil || len(encoded) > maxBrowserParams {
 		clear(encoded)
 		return ErrProtocol
 	}
@@ -262,7 +295,7 @@ func (browser *Browser) Drain(ctx context.Context) ([]BrowserEvent, error) {
 	}
 	defer clear(reply)
 	var events []BrowserEvent
-	if json.Unmarshal(reply, &events) != nil || len(events) > 128 {
+	if len(reply) > maxBrowserEvents || json.Unmarshal(reply, &events) != nil || len(events) >= 128 {
 		browser.mu.Lock()
 		browser.uncertain = true
 		browser.mu.Unlock()

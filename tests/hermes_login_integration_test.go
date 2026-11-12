@@ -165,11 +165,11 @@ func TestHermesManagedLoginOTPThenNativeBrowse(t *testing.T) {
 	key := "fixture-native-otp-provider-" + id.New()
 	protected := []string{site.Accounts[0].Username, site.Accounts[0].Password, site.Code}
 	model := fakes.NewHermesModel(t, key, func(request fakes.HermesRequest, call int) fakes.HermesResponse {
-		if call == 1 {
+		if call == 1 || call == 3 {
 			code := fmt.Sprintf("# Read the retained signed-in account\ngoto_url(%q)\nprint(js('document.body.textContent'))", site.URL+"/otp-account")
 			return fakes.HermesResponse{Tools: []fakes.HermesToolCall{fakes.HermesCall("signed-in-account", "browser_exec", map[string]any{"code": code})}}
 		}
-		if call != 2 || !request.HasToolText(site.Accounts[0].Label) {
+		if call != 2 && call != 4 || !request.HasToolText(site.Accounts[0].Label) {
 			t.Error("native browsing lost the deterministic login's authenticated cookies")
 		}
 		return fakes.HermesResponse{Text: "Signed-in fixture confirmed."}
@@ -213,6 +213,10 @@ func TestHermesManagedLoginOTPThenNativeBrowse(t *testing.T) {
 	browsed := h.call(h.task(&root, sessions.Open, "browse"))
 	if browsed.Result.Status != "completed" || model.Calls() != 2 || browsed.Claim != binding.Claim() {
 		t.Fatal("native browsing did not reuse the same authenticated session")
+	}
+	checkHermesProtectedScreenshots(t, h, root, site, key, model.Calls)
+	if h.call(h.task(&root, sessions.Open, "browse")).Result.Status != "completed" || model.Calls() != 4 || site.Posts.Load() != 1 || site.CodePosts.Load() != 1 {
+		t.Fatal("native screenshots lost the retained authenticated cookie or repeated login")
 	}
 	assertNativeLoginPrivate(t, h, append(protected, key)...)
 }
