@@ -356,10 +356,9 @@
   Container rendering uses the separate namespace-local Go helper described
   below; never interpret its private CDP loopback address in the Go host's
   namespace.
-- [browser/intelligence/](browser/intelligence/) retains the unused legacy Go loop
-  until the separate cleanup commit; default actions do not invoke it. Do not
-  launch the native Lightpanda agent or
-  attach another CDP connection for automation. Screenshot rendering has the
+- Hermes owns the reasoning loop; Go manages setup, secrets, sessions and the
+  private bridge. Do not restore a second Go reasoning loop, launch the native
+  Lightpanda agent or attach another CDP connection for automation. Screenshot rendering has the
   isolated, unauthenticated connection described below. The pinned native agent has a fixed tool catalog,
   creates its own browser/session and exposes environment values through `getEnv`;
   a fake-model probe confirmed that path reaches model context. Its JSONL trace is
@@ -389,14 +388,13 @@
   and Hermes, clears stale state, and never makes model network calls, asks
   questions or requests secrets. Require HTTPS except local HTTP; reject embedded
   credentials, URL query/fragment and redirects.
-- [Provider presets](browser/intelligence/provider.go) define fixed endpoints and
-  provider-specific managed-secret names matching Playground. Do not import
+- [Model configuration](internal/browsing/model_config.go) binds OpenAI
+  to its fixed endpoint and managed-secret name matching Playground. Do not import
   Commander apps. Always use `action.RequestReusableSecret` for the selected provider's
   canonical secret name. Other uses only the endpoint-bound managed name from
   the setup helper. Never send a standard provider's key to a custom endpoint or
-  reuse an unscoped generic key after an endpoint change. Provider wire profiles
-  must follow their primary API references; compatibility is not established by
-  copying provider names alone. Keep fake-provider regressions for each profile.
+  reuse an unscoped generic key after an endpoint change. The native proxy owns
+  the verified OpenAI-compatible wire profile; retain its fake-provider regressions.
 - Keep valid non-secret choices in memory per full Commander creation claim;
   serialize setup per identity and reject conflicting claims.
   Never cache plaintext keys in setup or discovery state. Session reuse skips
@@ -416,35 +414,17 @@
   Managed browser sessions must not inherit provider keys. Send the key only in the
   model authentication header and redact known values from observations, output
   and artifacts. Suppress raw provider/browser errors and protocol output.
-- The unused legacy Go loop exposes typed browser commands only, with one model command per turn and no
-  model-supplied JavaScript, selectors, credentials or raw CDP. Keep safe bounded
-  observations, evidence references and static execution logs. Document navigation
-  allows all HTTP(S) hostnames by default: omitted/empty `allowed_hosts` normalizes
-  to `["*"]`. Explicit hostname lists restrict documents to those exact hosts and
-  must include the starting host. The wildcard must stand alone; partial wildcards
-  are unsupported. Keep URL credential/scheme checks in both modes.
-  Reject malformed/multiple commands before side effects. Stop on uncertain
-  browser operations instead of automatically retrying them. Bound wall time,
-  steps, completion allowances, observations, responses and evidence. Do not claim
-  a provider cost/generation-token limit or transparent recovery from lost state.
-  Token allowance accounting differs by provider (including reasoning/tool tokens).
 - The action factory receives the same production session runner as the host.
   Preserve explicitly empty catalogs; do not create a second manager inside an
   action. Return artifact bytes through action results for ArtifactFileStore
   upload; never write raw DOM, model transcripts or credentials to artifacts.
-- The unused legacy loop's typed `ask` command bridges to `action.Question` using
-  execution-local keys
-  `browser_clarification_1` through `_4`. Commander owns operator waiting, fallback
-  eligibility and saved answers; do not ask the browser model to answer itself or
-  retry browser operations while a question is pending. Validate bounded nonblank
-  UTF-8 question/options before publication, retain at most four answers of at most
-  2,000 bytes with their question/options in memory for the current run, and keep
-  transcripts out of results, logs and artifacts. Answers cannot authorize scope,
-  tool or budget changes, secret entry or new external side effects.
-  Clarification waits pause the active browsing timer, are individually bounded to
-  three minutes, and never extend the task deadline. Preserve cancellation and
-  deadline causes. In Commander v0.4.1, canceling a waiter does not retract a saved
-  pending question; do not claim automatic question cleanup or action restoration.
+- Native clarification calls `action.Question` with execution-local keys
+  `browser_clarification_1` through `_4`, after its checkpoint receipt. Commander
+  owns operator waiting, fallback eligibility and saved answers. Protect question
+  text, options and answers through the session redactor; keep their transcripts
+  out of results, logs and artifacts. Each wait is bounded to three minutes and
+  the browse wall deadline still wins. In Commander v0.4.1, canceling a waiter
+  does not retract its saved pending question; do not promise automatic cleanup.
 - Keep non-action setup and active-time budget helpers under
   [internal/browsing/](internal/browsing/). The action owns one setup instance and
   delegates model/session selection to it; do not expose these helpers as actions
@@ -603,7 +583,7 @@
 ## Browsing checkpoints
 
 - [internal/browsing/hermes_checkpoint.go](internal/browsing/hermes_checkpoint.go)
-  records native execution facts separately from legacy typed Go progress. Load through
+  records native execution facts. Load through
   `Manager.WithSession` before model setup, secrets or worker startup; save the
   start fence before `RunHermes`, including deterministic login bootstrap. Keep
   `browse_started`/`login_started` as replay gates so any saved version blocks
@@ -631,8 +611,8 @@
   uncertain outcomes remain `work_unconfirmed`. Result delivery always remains
   `unconfirmed`. Missing checkpoint providers allow direct calls with in-memory
   bounds and identity checks, without durable recovery promises.
-- [internal/browsing/checkpoint.go](internal/browsing/checkpoint.go) uses the
-  execution-scoped `action.LoadCheckpoint`/`SaveCheckpoint` exchange.
+- Native checkpoints use the execution-scoped
+  `action.LoadCheckpoint`/`SaveCheckpoint` exchange.
   The production host supplies it. Direct public-action calls without that
   provider remain usable but offer no durable checkpoints; actual provider
   failures must stop work rather than silently disabling persistence.
@@ -640,24 +620,8 @@
   questions inside the session lifetime. An existing fence refuses automatic
   replay before questions, secrets or browser work. Checkpoints belong to one
   execution, not to a transferable browser snapshot or a session-global history.
-- The unused Go checkpoint helper persists `browse_started` before initial page
-  navigation and `login_started`
-  before deterministic login, covering both password and code work. Each
-  `browse_step_01` through `_30` is saved after
-  model command validation and before executing that command, including question
-  publication. The fact records the pending command type, current reserved usage
-  and preceding completed steps; it does not prove whether the pending effect ran.
-  One start, thirty command fences and one final fact fit the framework's limit
-  of thirty-two immutable names. Never overwrite a named fact with new content.
-- Legacy Go facts persist only version/action/engine, exact session reference and
-  original
-  creation claim, configured limits, progress counters, fixed step outcomes and
-  evidence IDs with SHA256 of already-redacted canonical evidence JSON. Do not
-  persist objective text, URLs, DOM, full model commands/transcripts, question text or
-  answers, provider settings, cookies, credential names/values or artifact bytes.
-  Findings and evidence content remain in the final results and artifacts.
-  Go fact version 2 records Commander's flat creation claim. A saved start fence of
-  any version still blocks replay; old facts are never rewritten or restored.
+- A saved start fence of any version, including legacy version 2, still blocks
+  replay. Old facts are never rewritten or restored.
 - Every checkpoint wait is bounded to five seconds and preserves the execution
   and session lifetime. The initial load belongs to setup; writes count against
   active work time. A save error or cancellation may follow a committed write;
@@ -772,8 +736,7 @@ The production catalog workflow uses the `hermesintegration` tag. It exercises
 the actual default actions over
 the FS bus with managed secret delivery, checkpoint receipts and artifact upload.
 Its fake model uses the real SDK HTTP boundary; no external model or demo stack
-is required. The remaining `browserintegration` tag supports legacy Go model
-fixtures until their separate cleanup, not a production action backend.
+is required.
 The production manager owns browser lifecycle; fixtures own HTTP pages only.
 CI compiles the race-enabled test binary in the Go bookworm image to match the
 runtime's glibc, then executes it as the runtime image's UID1000 with no external
@@ -805,7 +768,7 @@ tests exercise native truncation recovery without equating Hermes's reported
 counter with actual forwarded HTTP requests.
 Focused tests exercise the combined thirty-fence limit and exact execution/claim
 checks without starting a runtime.
-CI combines both integration tags with an eight-minute test-binary bound.
+CI runs the native integration suite with an eight-minute test-binary bound.
 Clean-close Hermes scenarios check that their private profiles are removed;
 intentional uncertain-loss scenarios require retained lost state and profiles.
 The container must have no surviving Python or Lightpanda processes before it

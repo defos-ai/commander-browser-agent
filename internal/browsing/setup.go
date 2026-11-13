@@ -8,7 +8,6 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/defos-ai/commander-browser-agent/browser/intelligence"
 	"github.com/defos-ai/commander/framework/agent/action"
 	"github.com/defos-ai/commander/framework/domain/sessions"
 )
@@ -23,7 +22,7 @@ type Setup struct {
 type modelSetup struct {
 	claim     sessions.CreationClaim
 	gate      chan struct{}
-	selection *intelligence.ModelConfig // Non-secret settings only; never API keys.
+	selection *modelConfig // Non-secret settings only; never API keys.
 }
 
 // modelSecretName binds custom endpoint credentials to their exact validated URL.
@@ -33,14 +32,8 @@ func modelSecretName(address string) string {
 	return "browser-model-api-key-" + hex.EncodeToString(digest[:])
 }
 
-// Prepare resolves model choices and a current managed key for the bound session.
-// The caller owns the returned key bytes and must clear them after use.
-func (s *Setup) Prepare(ctx context.Context) (intelligence.ModelConfig, []byte, error) {
-	return s.prepare(ctx, selectBrowserModel, nil)
-}
-
-func (s *Setup) prepare(ctx context.Context, choose func(context.Context) (intelligence.ModelConfig, error), accept func(intelligence.ModelConfig) error) (intelligence.ModelConfig, []byte, error) {
-	var empty intelligence.ModelConfig
+func (s *Setup) prepare(ctx context.Context) (modelConfig, []byte, error) {
+	var empty modelConfig
 	if err := ctx.Err(); err != nil {
 		return empty, nil, err
 	}
@@ -68,20 +61,18 @@ func (s *Setup) prepare(ctx context.Context, choose func(context.Context) (intel
 	case <-ctx.Done():
 		return empty, nil, ctx.Err()
 	}
-	var selection intelligence.ModelConfig
+	var selection modelConfig
 	if setup.selection != nil {
 		selection = *setup.selection
 	} else {
 		var err error
-		selection, err = choose(ctx)
+		selection, err = selectHermesModel(ctx)
 		if err != nil {
 			return empty, nil, err
 		}
 	}
-	if accept != nil {
-		if err := accept(selection); err != nil {
-			return empty, nil, err
-		}
+	if err := acceptHermesModel(selection); err != nil {
+		return empty, nil, err
 	}
 	if setup.selection == nil {
 		// Retain valid operator choices even when credentials are still pending.
@@ -92,37 +83,14 @@ func (s *Setup) prepare(ctx context.Context, choose func(context.Context) (intel
 	return selection, key, err
 }
 
-func selectBrowserModel(ctx context.Context) (intelligence.ModelConfig, error) {
-	var selection intelligence.ModelConfig
-	question, err := action.Question(ctx, "browser_model_provider", "Which model provider should this browser session use? Select a provider, not an API key.",
-		"OpenAI", "Anthropic", "Google Gemini", "More providers")
-	if err != nil {
-		return selection, err
-	}
-	answer := question.Answer
-	if strings.EqualFold(strings.TrimSpace(answer), "More providers") {
-		question, err = action.Question(ctx, "browser_model_provider_more", "Which additional model provider should this browser session use?",
-			"xAI", "DeepSeek", "Other (OpenAI-compatible)")
-		if err != nil {
-			return selection, err
-		}
-		answer = question.Answer
-	}
-	provider, ok := providerID(answer)
-	if !ok {
-		return selection, errors.New("model provider answer must identify a supported provider")
-	}
-	return selectModelDetails(ctx, provider)
-}
-
-func selectModelDetails(ctx context.Context, provider string) (intelligence.ModelConfig, error) {
-	selection := intelligence.ModelConfig{Provider: provider}
+func selectModelDetails(ctx context.Context, provider string) (modelConfig, error) {
+	selection := modelConfig{Provider: provider}
 	question, err := action.Question(ctx, "browser_model_name", "Which exact tool-calling model ID/version should this browser session use? Enter the model ID, not an API key.")
 	if err != nil {
 		return selection, err
 	}
 	selection.Name = strings.TrimSpace(question.Answer)
-	if intelligence.ValidateModelName(selection.Name) != nil {
+	if validateModelName(selection.Name) != nil {
 		return selection, errors.New("model answer must be a valid exact model ID/version")
 	}
 	if selection.Provider == "other" {
@@ -131,27 +99,29 @@ func selectModelDetails(ctx context.Context, provider string) (intelligence.Mode
 			return selection, err
 		}
 		selection.URL = strings.TrimSpace(question.Answer)
+	} else if selection.Provider == "openai" {
+		selection.URL = openAIEndpoint
 	} else {
-		preset, ok := intelligence.Provider(selection.Provider)
-		if !ok {
-			return selection, errors.New("model provider is not supported")
-		}
-		selection.URL = preset.URL
+		return selection, errors.New("model provider is not supported")
 	}
-	if intelligence.ValidateModelConfig(selection) != nil {
+	if validateModelConfig(selection) != nil {
 		return selection, errors.New("selected browser model configuration is invalid")
 	}
 	return selection, nil
 }
 
-func selectedModelKey(ctx context.Context, selection intelligence.ModelConfig) ([]byte, error) {
-	name := modelSecretName(selection.URL)
-	if selection.Provider != "other" {
-		preset, ok := intelligence.Provider(selection.Provider)
-		if !ok || selection.URL != preset.URL || preset.SecretName == "" {
+func selectedModelKey(ctx context.Context, selection modelConfig) ([]byte, error) {
+	var name string
+	switch selection.Provider {
+	case "other":
+		name = modelSecretName(selection.URL)
+	case "openai":
+		if selection.URL != openAIEndpoint {
 			return nil, errors.New("model credential destination does not match its provider")
 		}
-		name = preset.SecretName
+		name = openAISecretName
+	default:
+		return nil, errors.New("model credential destination does not match its provider")
 	}
 	return action.RequestReusableSecret(ctx, name)
 }
@@ -160,14 +130,6 @@ func providerID(value string) (string, bool) {
 	switch strings.ToLower(strings.TrimSpace(value)) {
 	case "openai", "open ai":
 		return "openai", true
-	case "anthropic", "claude":
-		return "anthropic", true
-	case "gemini", "google", "google gemini":
-		return "gemini", true
-	case "xai", "x.ai":
-		return "xai", true
-	case "deepseek":
-		return "deepseek", true
 	case "other", "other (openai-compatible)", "openai-compatible", "custom":
 		return "other", true
 	default:

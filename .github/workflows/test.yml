@@ -80,7 +80,7 @@ jobs:
             --env GOMODCACHE=/tmp/go-mod --env GOCACHE=/tmp/go-build \
             golang:1.26.7-bookworm sh -ec '
               go mod download
-              CGO_ENABLED=1 go test -c -race -tags=browserintegration,hermesintegration -o /out/browser-session-tests ./tests
+              CGO_ENABLED=1 go test -c -race -tags=hermesintegration -o /out/browser-session-tests ./tests
               CGO_ENABLED=1 go test -c -race -tags=hermesintegration,hermescontainerintegration -o /out/hermes-container-tests ./tests
             '
       - name: Test browser workflows and sessions

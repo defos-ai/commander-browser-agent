@@ -1,4 +1,4 @@
-//go:build browserintegration || hermesintegration
+//go:build hermesintegration
 
 package fixtures
 
