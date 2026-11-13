@@ -127,43 +127,6 @@
   of RAM, with swap disabled. Prefer smaller limits when practical. Use a
   resource-limited Docker-container Buildx builder for image builds and stop it
   before running a container with the full allowance.
-- The earlier separate-container transport remains private infrastructure for
-  its existing tests, pending cleanup; default actions do not select it.
-  [internal/hermes/containers/](internal/hermes/containers/) is a launcher
-  through a trusted local Unix daemon socket, using Docker API 1.47 and a
-  preloaded immutable `sha256:` image ID. It never pulls an image, accepts action
-  inputs or mounts the daemon socket into a worker. Docker access gives the
-  trusted launcher control beyond this project; it is not a worker capability.
-  Model and protected screenshot relays use `hermes.StartContainer` and the
-  session manager's explicit container options. Neither this launcher nor its
-  Docker settings are used by the production catalog or Compose demo.
-- Each container uses UID1000, a read-only root, private PID/IPC/network/cgroup
-  namespaces, bridge egress, no published ports, dropped capabilities and
-  `no-new-privileges`. Fix its allowance to one CPU, 1,000,000,000 bytes of memory
-  with equal memory/swap limits, and 128 tasks. A private `/tmp` tmpfs is temporary;
-  one anonymous `/home/commander` volume retains private files after a stop.
-  It receives no host bind mounts, bus/storage directories or sibling volumes.
-  Host disk quotas and outbound network policy remain deployment concerns.
-- [container.py](internal/hermes/container.py) captures container stdin/stdout
-  into non-inheritable private FD3/4 before site imports, clears the environment
-  and discards raw stdout/stderr. Only bridge frames use Docker attach. Bound
-  Docker headers/chunks and logical protocol frames separately; a Docker chunk
-  is not a JSON frame. Losing the only attachment closes worker input, but EOF
-  or a Docker exit receipt does not establish a clean worker receipt.
-- Reserve a random owned name before create so a missing create response retains
-  a recovery reference. Verify image, nonce/session labels, canonical container
-  ID and its sole home volume before controls. Never adopt a foreign resource,
-  restart a stopped worker under an old claim or infer restoration from files.
-  Removal requires a stopped receipt, uses no force and confirms both container
-  deletion and the pinned volume's absence. Docker can acknowledge container
-  deletion while retaining its volume; retain that partial cleanup identity and
-  retry only the pinned volume. Missing receipts retain uncertain ownership.
-  The [Docker Engine API](https://docs.docker.com/reference/api/engine/version/v1.47/)
-  is the launcher protocol, not human-readable CLI output.
-- This unused transport separates the trusted Go host and sibling workers. Native
-  Python, its bridge and its browser still share one worker's resources; this
-  step does not create a sandbox between them or attest every website effect.
-  Keep managed-secret/redaction and checkpoint admission boundaries independent.
 
 ## Reusable browser sessions
 
@@ -206,16 +169,11 @@
   bridge through [internal/hermes/session.go](internal/hermes/session.go); retained
   or detached contexts cannot start later work. Default actions use this bridge
   on local child processes; existing Go sessions cannot move to Hermes.
-- `HermesOptions` selects exactly one trusted runtime: absolute local paths or
-  `HermesContainerOptions` with an absolute local Docker socket and a preloaded
-  immutable `sha256:` image ID. Refuse incomplete or mixed configuration before
-  startup. Pin the complete selection to the original creation claim, including
-  socket and image; no local fallback, mode change or image rotation within that
-  claim is allowed. Constructors and preparation still open no runtime. The
-  manager retains partial container starts for honest cleanup and uses the same
-  health, inventory, cancellation and close controls for both transports.
-  Default action discovery supplies only the verified local runtime paths.
-  Container options remain a private adapter path pending cleanup.
+- `HermesOptions` contains the discovered absolute Python, Hermes source and
+  Lightpanda paths. Refuse incomplete configuration before startup and pin the
+  complete selection to the original creation claim. A retained session cannot
+  change runtime paths. Constructors and preparation open no runtime; the manager
+  owns child-process startup, health, cancellation and cleanup.
 - A ready Hermes worker remains `starting` until native automation has opened and
   verified its browser. Pin the owned Lightpanda process, harness daemon, retained
   target and original connection; health controls must not create or reconnect
@@ -317,6 +275,8 @@
   Public Hermes middleware isolates failures and can fail open; it is not this
   credential boundary. Do not patch Hermes, add a second reasoning loop, or
   substitute terminal-output parsing for this transport.
+  Bound local proxy requests to 2 MiB and responses to 1 MiB; reject oversized
+  payloads without returning a truncated prefix.
 - Enforce each native response allowance in the model proxy as well as in
   Hermes configuration. Preserve a smaller positive integer `max_tokens` or
   `max_completion_tokens`, clamp a larger one and supply a missing allowance.
@@ -328,34 +288,6 @@
   execution gate. Join HTTP work before clearing owned key/token bytes and before
   confirming session closure. Keep worker fingerprints as well as manager-owned
   protection so changing a trusted caller's context cannot forget earlier keys.
-- The unused [internal/hermes/container.go](internal/hermes/container.go) binds the same
-  worker API on a pinned container and its exact full creation claim. Require
-  the advertised `model_relay: 1` capability before accepting work; an old image
-  must fail startup instead of attempting a host-loopback endpoint. Its Docker
-  wait has an independent cancellable lifetime. Cancelling that wait is not a
-  stopped receipt, and partial starts retain their uncertain resource reference.
-- The unused container [model_relay.py](internal/hermes/model_relay.py) gives unchanged Hermes a fresh
-  authenticated loopback HTTP adapter inside the worker for each run. Only
-  `/v1/models` and nonstreaming `/v1/chat/completions` cross the separate private
-  `model`/`model_reply` channel. The selected endpoint and real key stay in Go;
-  Go opens no model listener for this mode. Metadata uses the same protection
-  boundary as completion requests and responses. Never route these HTTP bodies,
-  credentials or histories through action handlers, logs, checkpoints or artifacts.
-- The isolated relay bounds each raw request and response to 512 KiB, using
-  base64 to remain below the existing 1 MiB frame limit. Reject oversized data
-  without truncation. The local-process backend retains its separate 2 MiB
-  request/1 MiB response bounds. Validate current execution and call identity,
-  retire completed call IDs, allow one provider exchange at a time and join
-  response delivery too. Extra SDK metadata/errors have a bounded RPC allowance;
-  forwarded completions still cannot exceed `max_iterations + 1`.
-- Stop and join the worker's HTTP listener/accepted connection and pending relay
-  before its SDK-worker join and result receipt. Cancellation wakes the original
-  waiter with a fixed nonretryable error; abandoned callbacks cannot adopt the
-  next run. Go joins provider work and relay delivery before clearing owned
-  credentials. Missing quiescence loses the resource and retains private state.
-  Container rendering uses the separate namespace-local Go helper described
-  below; never interpret its private CDP loopback address in the Go host's
-  namespace.
 - Hermes owns the reasoning loop; Go manages setup, secrets, sessions and the
   private bridge. Do not restore a second Go reasoning loop, launch the native
   Lightpanda agent or attach another CDP connection for automation. Screenshot rendering has the
@@ -559,20 +491,9 @@
   bounded to 128 KiB for Unicode text and redaction overlap; command parameters
   and filtered event batches retain their separate 32 KiB limits. PNG bytes use
   the isolated Go renderer connection, never the worker JSON protocol.
-- The unused container transport runs the fixed packaged Go helper
-  `/usr/local/lib/commander-browser/render-text` through the trusted launcher's
-  Docker exec transport. Send only bounded protected plain text, dimensions and
-  the validated owned loopback endpoint over its private input; never include
-  source DOM, cookies, credentials or model settings. The helper shares
-  `internal/textrender` and opens its temporary renderer inside the worker's
-  network namespace, without a host listener or published port.
-  PNG bytes use a bounded binary stream separate from the Hermes protocol.
-  Keep input open as the helper's cancellation lease, and require both renderer
-  cleanup and a stopped successful exec receipt before returning bytes. Retain
-  ownership through cancellation and source shutdown; a missing cleanup receipt
-  loses the source rather than enabling reuse. Reconfirm the retained source
-  identity after rendering. The default screenshot action renders
-  through the in-process Go adapter on the local worker's scoped endpoint.
+- The screenshot action renders through the in-process Go adapter on the local
+  worker's scoped endpoint. Retain its borrow through target/socket cleanup and
+  source-health confirmation; return no PNG after an unconfirmed cleanup.
 - Use native PNG output, validate its byte/pixel bounds and actual dimensions,
   and upload through ArtifactFileStore via action results. Renderer metadata
   belongs in output and `screenshot.json` beside `screenshot.png`; never include
@@ -773,32 +694,13 @@ Clean-close Hermes scenarios check that their private profiles are removed;
 intentional uncertain-loss scenarios require retained lost state and profiles.
 The container must have no surviving Python or Lightpanda processes before it
 is discarded, including after those uncertain cases.
-The separate `hermescontainerintegration` tag requires explicit
-`HERMES_CONTAINER_TEST_SOCKET` and immutable `HERMES_CONTAINER_TEST_IMAGE` test
-settings. Compile it separately from the ordinary runtime tests. Its trusted
-test host gets the daemon socket and one CPU/1 GB; two workers each get one
-CPU/1 GB, keeping validation within the combined allowance. The probe covers
-actual pinned worker readiness/control frames, private homes/PID/network,
-host environment/argv/file exclusion, detached-child teardown and retained
-private volume ownership. A fake Unix Docker endpoint verifies that failed or
-unconfirmed volume cleanup suppresses success and remains retryable after the
-container has already been removed. Combine `hermesintegration` with this tag
-for real Hermes model-relay scenarios: native browsing/clarification, retained
-cookies/key rotation, private environment/file audits, blocked-provider
-cancellation and reuse, protected screenshot pixels/source continuity,
-renderer-helper cancellation/close and oversized provider-response rejection.
-The container session scenario dispatches through the real FS bus and manager:
-unopened `use` refusal, direct-parent reuse, independent same-origin cookie jars,
-private inventory, pinned-runtime/creation-claim rejection, clean cancellation
-with reuse, and confirmed close with retained tombstones.
 The default-catalog workflow uses a loopback HTTP fixture in the same test
 container: managed model setup, native browse/clarification, reusable login
 credentials, transient OTP, authenticated browse reuse and protected screenshot
 artifacts. It holds the first browse start receipt before any worker starts and
 login's start receipt before website submissions, rejects output after refused
 final persistence, and refuses an independent saved replay fence before setup
-or worker startup. It runs without a Docker socket or external model. Private
-container-transport settings are not production agent settings.
+or worker startup. It runs without a Docker socket or external model.
 The bridge currently supports the OpenAI Chat Completions wire profile for
 OpenAI and explicitly selected Other. Tests include escaped provider echoes,
 native observations, key rotation, exact reusable-secret requests, private worker

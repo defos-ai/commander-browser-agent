@@ -21,7 +21,6 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/defos-ai/commander-browser-agent/internal/hermes/containers"
 	"github.com/defos-ai/commander-browser-agent/internal/sensitive"
 	"github.com/defos-ai/commander-browser-agent/internal/textrender"
 )
@@ -59,24 +58,16 @@ type protection struct {
 	Text     string `json:"text"`
 }
 
-type commandInput interface {
-	io.WriteCloser
-	SetWriteDeadline(time.Time) error
-}
-
 // Worker owns one private host bridge and its original creation claim. A lost
 // worker cannot be restarted or rebound; the manager must allocate a new one.
 type Worker struct {
-	config    Config
-	work      string
-	cmd       *exec.Cmd
-	input     commandInput
-	output    io.ReadCloser
-	values    *sensitive.Values // Direct callers retain non-plaintext protection across runs.
-	container *containers.Instance
-	waitCtx   context.Context
-	stopWait  context.CancelFunc
-	render    *textrender.Owner
+	config Config
+	work   string
+	cmd    *exec.Cmd
+	input  *os.File
+	output *os.File
+	values *sensitive.Values // Direct callers retain non-plaintext protection across runs.
+	render *textrender.Owner
 
 	lifetime     context.Context
 	cancel       context.CancelCauseFunc
@@ -233,16 +224,7 @@ func stageWorker(root string) error {
 }
 
 func (w *Worker) waitProcess() {
-	var err error
-	if w.container == nil {
-		err = w.cmd.Wait()
-	} else {
-		var status int
-		status, err = w.container.Wait(w.waitCtx)
-		if err == nil && status != 0 {
-			err = ErrUncertain
-		}
-	}
+	err := w.cmd.Wait()
 	w.mu.Lock()
 	w.waitErr = err
 	unexpected := !w.closing || err != nil
@@ -296,11 +278,9 @@ func (w *Worker) route(message frame) bool {
 	w.mu.Lock()
 	if !w.ready && !w.closing && message.Kind == "ready" && message.ID == "" {
 		var pins struct {
-			Hermes     string `json:"hermes"`
-			ModelRelay int    `json:"model_relay,omitempty"`
+			Hermes string `json:"hermes"`
 		}
-		if strictJSON(message.Payload, &pins) == nil && pins.Hermes == "v0.23.1" &&
-			(w.container == nil && pins.ModelRelay == 0 || w.container != nil && pins.ModelRelay == 1) {
+		if strictJSON(message.Payload, &pins) == nil && pins.Hermes == "v0.23.1" {
 			w.ready = true
 			w.mu.Unlock()
 			select {
@@ -309,23 +289,6 @@ func (w *Worker) route(message frame) bool {
 			}
 			return true
 		}
-	}
-	if message.Kind == "model" {
-		current, model := w.runID, w.model
-		valid := w.container != nil && w.ready && !w.fault && current != "" &&
-			w.run != nil && model != nil && strings.HasPrefix(message.ID, current+":model:")
-		closing := w.closing
-		w.mu.Unlock()
-		if valid && closing {
-			clear(message.Payload)
-			return true // Close is cancelling the original waiter; do not admit new work.
-		}
-		if !valid {
-			clear(message.Payload)
-			w.fail(ErrProtocol)
-			return false
-		}
-		return w.relayModel(message, model)
 	}
 	if w.closing && message.Kind == "closed" && message.ID == w.closeID && !w.ack {
 		var closed struct {
@@ -616,11 +579,7 @@ func (w *Worker) Run(ctx context.Context, request Request, handler Handler) (res
 		case <-watchDone:
 		}
 	}()
-	if w.container == nil {
-		transport, err = startModelTransport(active, request, redact)
-	} else {
-		transport, err = startRelayedModelTransport(active, request, redact)
-	}
+	transport, err = startModelTransport(active, request, redact)
 	var wireKey []byte
 	if err == nil {
 		// Finish copying the ephemeral credential before Close can join and
@@ -643,11 +602,6 @@ func (w *Worker) Run(ctx context.Context, request Request, handler Handler) (res
 		Objective: redact(request.Objective), Provider: "openai", Model: request.Model,
 		BaseURL: transport.baseURL, APIKey: wireKey,
 		MaxIterations: request.MaxIterations, MaxTokens: request.MaxTokens, TimeoutSeconds: request.TimeoutSeconds,
-	}
-	if w.container != nil {
-		// This is only a local adapter sentinel, never the real endpoint or a
-		// Go-host loopback address. Python replaces it before constructing Hermes.
-		wire.BaseURL, wire.ModelRelay = "http://127.0.0.1/v1", true
 	}
 	w.mu.Lock()
 	if w.closing || w.fault || !w.ready {
@@ -964,13 +918,7 @@ func (w *Worker) shutdown() {
 	grace, finish := context.WithTimeout(context.Background(), 10*time.Second)
 	defer finish()
 	w.render.Stop()
-	renderAllowance := 2 * time.Second
-	if w.container != nil {
-		// The namespace-local helper needs a stopped Docker exec receipt as
-		// well as its bounded renderer/socket cleanup receipt.
-		renderAllowance = 4 * time.Second
-	}
-	renderWait, stopRenderWait := context.WithTimeout(context.Background(), renderAllowance)
+	renderWait, stopRenderWait := context.WithTimeout(context.Background(), 2*time.Second)
 	renderClean := w.render.Wait(renderWait) == nil
 	stopRenderWait()
 	// Closing a session also owns a model transport still being prepared by
@@ -1022,17 +970,11 @@ func (w *Worker) shutdown() {
 	w.mu.Lock()
 	clean := renderClean && modelClean && acknowledged && exited && w.clean && w.waitErr == nil && !w.fault
 	w.mu.Unlock()
-	if clean && w.container == nil && processGroupExists(w.cmd) {
+	if clean && processGroupExists(w.cmd) {
 		clean = false
 	}
 	if !clean {
-		if w.container == nil {
-			killProcessGroup(w.cmd)
-		} else {
-			cleanup, stop := context.WithTimeout(context.Background(), 5*time.Second)
-			_ = w.container.Kill(cleanup)
-			stop()
-		}
+		killProcessGroup(w.cmd)
 		select {
 		case <-w.procDone:
 		case <-time.After(5 * time.Second):
@@ -1056,23 +998,11 @@ func (w *Worker) shutdown() {
 	}
 	_ = w.output.Close()
 	<-w.readDone
-	if w.stopWait != nil {
-		w.stopWait()
-		<-w.procDone // Cancelling an unknown Docker wait is not an exit receipt.
-	}
 	w.mu.Lock()
 	clean = clean && !w.fault
 	w.mu.Unlock()
 	if clean {
-		var err error
-		if w.container == nil {
-			err = os.RemoveAll(w.work)
-		} else {
-			cleanup, stop := context.WithTimeout(context.Background(), 5*time.Second)
-			err = w.container.Remove(cleanup)
-			stop()
-		}
-		if err != nil {
+		if err := os.RemoveAll(w.work); err != nil {
 			w.closeErr = ErrUncertain
 		} else {
 			w.values.Clear()

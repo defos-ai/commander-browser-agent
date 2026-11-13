@@ -45,7 +45,6 @@ type workerRequest struct {
 	MaxIterations  int    `json:"max_iterations"`
 	MaxTokens      int    `json:"max_tokens"`
 	TimeoutSeconds int    `json:"timeout_seconds"`
-	ModelRelay     bool   `json:"model_relay,omitempty"`
 }
 
 // Event contains only a bounded question or fixed progress/admission metadata.

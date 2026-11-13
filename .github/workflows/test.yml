@@ -68,7 +68,6 @@ jobs:
             test -s /usr/share/doc/hermes/LICENSE
             test -s /usr/share/doc/hermes/NOTICE
             test -s /usr/local/lib/python3.14/LICENSE.txt
-            test -x /usr/local/lib/commander-browser/render-text
             /opt/hermes/.venv/bin/python -I -S /usr/local/lib/commander-browser/hermes/check.py
           '
       - name: Build agent workflow tests
@@ -81,7 +80,6 @@ jobs:
             golang:1.26.7-bookworm sh -ec '
               go mod download
               CGO_ENABLED=1 go test -c -race -tags=hermesintegration -o /out/browser-session-tests ./tests
-              CGO_ENABLED=1 go test -c -race -tags=hermesintegration,hermescontainerintegration -o /out/hermes-container-tests ./tests
             '
       - name: Test browser workflows and sessions
         run: |
@@ -114,22 +112,3 @@ jobs:
                 fi
               done
             '
-      - name: Test isolated Hermes worker containers
-        run: |
-          worker_image_id="$(docker image inspect commander-browser-agent:local --format '{{.Id}}')"
-          docker_socket_gid="$(docker run --rm --network none \
-            --cpus=1 --memory=1000000000 --memory-swap=1000000000 \
-            --mount type=bind,source=/var/run/docker.sock,target=/var/run/docker.sock \
-            --entrypoint stat commander-browser-agent:local -c '%g' /var/run/docker.sock)"
-          # The trusted test host gets the socket. Each of its two workers has
-          # its own 1 CPU / 1 GB allowance and never receives this mount.
-          docker run --rm --init --network none \
-            --cpus=1 --memory=1000000000 --memory-swap=1000000000 \
-            --cap-drop=ALL --security-opt=no-new-privileges:true \
-            --group-add "$docker_socket_gid" \
-            --mount type=bind,source=/var/run/docker.sock,target=/var/run/docker.sock \
-            --mount "type=bind,source=$RUNNER_TEMP/hermes-container-tests,target=/hermes-container-tests,readonly" \
-            --env "HERMES_CONTAINER_TEST_IMAGE=$worker_image_id" \
-            --env HERMES_CONTAINER_TEST_SOCKET=/var/run/docker.sock \
-            --entrypoint /hermes-container-tests commander-browser-agent:local \
-            -test.v -test.count=1 -test.timeout=3m -test.run='^TestHermesContainer'

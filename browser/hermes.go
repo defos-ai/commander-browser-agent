@@ -2,10 +2,8 @@ package browser
 
 import (
 	"context"
-	"encoding/hex"
 	"errors"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/defos-ai/commander-browser-agent/internal/hermes"
@@ -14,36 +12,16 @@ import (
 	"github.com/defos-ai/commander/framework/domain/sessions"
 )
 
-// HermesContainerOptions identifies a trusted local daemon and preloaded image.
-// These settings never come from action input or browser session selectors.
-type HermesContainerOptions struct {
-	Socket string
-	Image  string
-}
-
-// HermesOptions selects either discovered local paths or an isolated container.
-// A session pins the complete selection; there is no cross-mode fallback.
+// HermesOptions selects the discovered local runtime paths.
+// A session pins the complete selection for its lifetime.
 // Lightpanda is the only supported browser engine.
 type HermesOptions struct {
 	Python     string
 	Source     string
 	Executable string
-	Container  HermesContainerOptions
 }
 
 func (o HermesOptions) validate() error {
-	if o.Container != (HermesContainerOptions{}) {
-		digest := strings.TrimPrefix(o.Container.Image, "sha256:")
-		if o.Python != "" || o.Source != "" || o.Executable != "" ||
-			!filepath.IsAbs(o.Container.Socket) || len(o.Container.Socket) > 4096 || strings.ContainsRune(o.Container.Socket, 0) ||
-			len(o.Container.Image) != 71 || len(digest) != 64 || strings.ToLower(digest) != digest {
-			return errors.New("isolated Hermes requires only an absolute Docker socket and immutable sha256 image ID")
-		}
-		if _, err := hex.DecodeString(digest); err != nil {
-			return errors.New("isolated Hermes requires only an absolute Docker socket and immutable sha256 image ID")
-		}
-		return nil
-	}
 	if !filepath.IsAbs(o.Python) || !filepath.IsAbs(o.Source) || !filepath.IsAbs(o.Executable) {
 		return errors.New("Hermes requires absolute discovered runtime paths")
 	}
@@ -171,17 +149,9 @@ func (m *Manager) hermesWorker(ctx context.Context, item *entry, mode sessions.M
 		item.cancel()
 		close(startupCancelled)
 	})
-	var worker *hermes.Worker
-	var err error
-	if options.Container != (HermesContainerOptions{}) {
-		worker, err = hermes.StartContainer(item.lifetime, hermes.ContainerConfig{
-			Socket: options.Container.Socket, Image: options.Container.Image, Claim: item.claim,
-		})
-	} else {
-		worker, err = hermes.Start(item.lifetime, hermes.Config{
-			Python: options.Python, Source: options.Source, Lightpanda: options.Executable, Claim: item.claim,
-		})
-	}
+	worker, err := hermes.Start(item.lifetime, hermes.Config{
+		Python: options.Python, Source: options.Source, Lightpanda: options.Executable, Claim: item.claim,
+	})
 	if !stopStartup() {
 		<-startupCancelled
 	}

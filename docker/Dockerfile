@@ -23,8 +23,7 @@ RUN sh /tmp/fetch-hermes.sh "$TARGETARCH" /out/hermes /out/uv
 COPY . .
 RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg/mod \
-    go build -trimpath -buildvcs=false -o /out/commander-browser-agent ./cmd \
-    && go build -trimpath -buildvcs=false -o /out/render-text ./internal/textrender/cmd
+    go build -trimpath -buildvcs=false -o /out/commander-browser-agent ./cmd
 
 FROM python:3.14.10-slim-bookworm@sha256:3fe1a0b6c2d6b2ebb572906cdabeca75aeb558c0c17db5ffefbcf8094871c32b AS hermes
 ENV UV_PYTHON_DOWNLOADS=never UV_LINK_MODE=copy \
@@ -51,7 +50,6 @@ COPY --from=hermes /usr/local/ /usr/local/
 COPY --from=hermes /opt/hermes /opt/hermes
 RUN ldconfig
 COPY --from=build /out/commander-browser-agent /usr/local/bin/commander-browser-agent
-COPY --from=build /out/render-text /usr/local/lib/commander-browser/render-text
 COPY --from=build /out/lightpanda /usr/local/bin/lightpanda
 COPY third_party/lightpanda/ /usr/share/doc/lightpanda/
 COPY third_party/hermes/ /usr/share/doc/hermes/
