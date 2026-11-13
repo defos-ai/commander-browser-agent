@@ -22,8 +22,8 @@ type HermesBrowseRunner interface {
 	RunHermes(context.Context, browserruntime.HermesOptions, func(context.Context) error) (sessions.Session, error)
 }
 
-// RunHermesBrowse stages the native browse contract without changing the default
-// action catalog. Runtime paths are trusted discovery output, never action input.
+// RunHermesBrowse executes the default native browse contract. Runtime options
+// are trusted discovery output, never action input.
 // The Setup receiver retains only non-secret choices for the exact creation claim.
 func (s *Setup) RunHermesBrowse(ctx context.Context, runner HermesBrowseRunner, options browserruntime.HermesOptions, raw json.RawMessage) (result action.Result, runErr error) {
 	if ctx.Err() != nil {

@@ -1,9 +1,10 @@
 # Commander browser agent
 
-A [Lightpanda](https://lightpanda.io/) browser agent for
+A [Hermes](https://github.com/NousResearch/hermes-agent) and
+[Lightpanda](https://lightpanda.io/) browser agent for
 [DEFOS Commander v0.4.1](https://github.com/defos-ai/commander).
 
-- `browse` — navigate and interact with websites; return findings and evidence.
+- `browse` — navigate and interact with websites; return protected final text.
 - `login` — sign in with managed credentials and one-time codes; reuse the session.
 - `screenshot` — capture the current session as a text-only PNG.
 
@@ -20,9 +21,11 @@ docker compose run --rm --no-deps playground
 The agent asks which model to use and requests credentials through Commander's
 managed secrets.
 
-Docker includes Lightpanda `1.0.2`. Native runs need that version on `PATH` or an
-absolute `LIGHTPANDA_PATH`; Linux needs glibc, and Windows needs Docker or WSL.
+One agent container runs the Go agent, Hermes `v0.23.1` and Lightpanda `1.0.2`
+as separate processes. Native runs need those packaged runtimes installed;
+Windows hosts use Docker or WSL.
 
 ## License
 
-Agent source: [MIT](LICENSE). See [third-party licenses and notices](third_party/).
+Agent source: [MIT](LICENSE). Commander dependencies: AGPL-3.0-only.
+See [third-party licenses and notices](third_party/).

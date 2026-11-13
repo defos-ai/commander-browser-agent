@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
@@ -15,6 +14,7 @@ import (
 	browser "github.com/defos-ai/commander-browser-agent"
 	"github.com/defos-ai/commander-browser-agent/actions"
 	runtime "github.com/defos-ai/commander-browser-agent/browser"
+	"github.com/defos-ai/commander-browser-agent/internal/sensitive"
 	"github.com/defos-ai/commander/framework/agent"
 	"github.com/defos-ai/commander/framework/agent/action"
 	"github.com/defos-ai/commander/framework/agent/environment"
@@ -149,6 +149,7 @@ func TestSessionContractsAllocateRootIdentityAndKeepContinuations(t *testing.T) 
 }
 
 func TestActionsRejectSessionSelectorsBeforeSideEffects(t *testing.T) {
+	requireHermesDiscoveryPlatform(t)
 	for _, name := range []string{"browse", "login", "screenshot"} {
 		for _, selector := range []string{"session_scope", "session_id"} {
 			t.Run(name+"/"+selector, func(t *testing.T) {
@@ -177,6 +178,7 @@ func TestActionsRejectSessionSelectorsBeforeSideEffects(t *testing.T) {
 }
 
 func TestBrowseSetupUsesManagedKeysAndRetainsOnlySessionSelection(t *testing.T) {
+	requireHermesDiscoveryPlatform(t)
 	const endpoint = "https://custom.example.test/v1/chat/completions"
 	for _, provider := range []string{"OpenAI", "Other"} {
 		t.Run(provider, func(t *testing.T) {
@@ -227,6 +229,7 @@ func TestBrowseSetupUsesManagedKeysAndRetainsOnlySessionSelection(t *testing.T) 
 }
 
 func TestCheckpointRecoveryGateStopsBeforeModelSetup(t *testing.T) {
+	requireHermesDiscoveryPlatform(t)
 	for _, failure := range []error{nil, errors.New("private-checkpoint-provider-error")} {
 		probe := &unitSetup{t: t}
 		executor := actions.NewBrowse(probe)
@@ -253,33 +256,62 @@ func (unitCheckpoint) SaveCheckpoint(context.Context, string, json.RawMessage) e
 	return errors.New("unexpected checkpoint write")
 }
 
+const unitHermesRoot = "/trusted/hermes-fixture"
+const unitLightpandaExecutable = "/trusted/lightpanda"
+
 type unitSetup struct {
-	t          *testing.T
-	key        string
-	executable string
-	answers    map[string]string
-	events     []string
-	returned   [][]byte
-	runs       int
+	t                     *testing.T
+	key                   string
+	unavailableHermes     bool
+	unavailableLightpanda bool
+	discoveryRuns         int
+	values                *sensitive.Values
+	answers               map[string]string
+	events                []string
+	returned              [][]byte
+	runs                  int
 }
 
 func (p *unitSetup) LookupEnv(name string) (string, bool) {
-	if name != "LIGHTPANDA_PATH" {
-		p.t.Error("agent read model configuration from the environment")
+	switch name {
+	case "HERMES_INSTALL_ROOT":
+		return unitHermesRoot, true
+	case "LIGHTPANDA_PATH":
+		return unitLightpandaExecutable, true
+	default:
+		p.t.Error("agent read configuration outside the packaged runtime paths")
+		return "", false
 	}
-	if p.executable == "" {
-		p.executable = filepath.Join(p.t.TempDir(), "lightpanda")
-	}
-	return p.executable, true
 }
-func (p *unitSetup) FindExecutable(context.Context, string, *environment.DiscoveryScope) (string, error) {
-	return p.executable, nil
+func (p *unitSetup) FindExecutable(_ context.Context, name string, scope *environment.DiscoveryScope) (string, error) {
+	if name != "lightpanda" {
+		p.t.Error("runtime discovery searched an unexpected executable")
+		return "", errors.New("unexpected executable")
+	}
+	if scope != nil && scope.Paths != nil && !slices.Contains(scope.Paths, "/trusted") {
+		return "", nil
+	}
+	return unitLightpandaExecutable, nil
 }
 
 type unitEnvironment struct{ *unitSetup }
 
-func (unitEnvironment) Run(context.Context, []string) (environment.Result, error) {
-	return environment.Result{Stdout: "1.0.2"}, nil
+func (p unitEnvironment) Run(_ context.Context, argv []string) (environment.Result, error) {
+	p.discoveryRuns++
+	if len(argv) == 7 && argv[0] == unitHermesRoot+"/.venv/bin/python" && argv[1] == "-I" && argv[2] == "-S" && argv[3] == "-c" && argv[4] != "" && argv[5] == "--source" && argv[6] == unitHermesRoot {
+		if p.unavailableHermes {
+			return environment.Result{Stdout: "private-runtime-output", ReturnCode: 1}, nil
+		}
+		return environment.Result{Stdout: hermesReadyReceipt}, nil
+	}
+	if slices.Equal(argv, []string{unitLightpandaExecutable, "version"}) {
+		if p.unavailableLightpanda {
+			return environment.Result{Stdout: "private-runtime-output", ReturnCode: 1}, nil
+		}
+		return environment.Result{Stdout: "1.0.2"}, nil
+	}
+	p.t.Error("runtime discovery invoked an unexpected program")
+	return environment.Result{}, errors.New("unexpected execution")
 }
 func (p *unitSetup) Question(_ context.Context, key, text string, options []string) (operations.Question, error) {
 	p.events = append(p.events, key)
@@ -292,8 +324,18 @@ func (p *unitSetup) RequestSecret(_ context.Context, name string) ([]byte, error
 	p.returned = append(p.returned, value)
 	return value, nil
 }
-func (p *unitSetup) Run(context.Context, runtime.Options, func(context.Context) error) (sessions.Session, error) {
+func (p *unitSetup) WithSession(ctx context.Context, work func(context.Context) error) error {
+	if p.values == nil {
+		p.values = sensitive.New()
+		p.t.Cleanup(p.values.Clear)
+	}
+	return work(sensitive.WithValues(ctx, p.values))
+}
+func (p *unitSetup) RunHermes(_ context.Context, options runtime.HermesOptions, _ func(context.Context) error) (sessions.Session, error) {
 	p.runs++
+	if options != (runtime.HermesOptions{Python: unitHermesRoot + "/.venv/bin/python", Source: unitHermesRoot, Executable: unitLightpandaExecutable}) {
+		p.t.Error("action did not use the discovered local runtime")
+	}
 	return sessions.Session{}, errors.New("fixture browser failure: " + p.key)
 }
 

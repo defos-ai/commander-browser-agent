@@ -25,8 +25,8 @@ import (
 	runtimeSessions "github.com/defos-ai/commander/framework/sessions"
 )
 
-// Only this test host registers the staged adapter. The default production
-// catalog remains on the Go backend until the separate cutover gates pass.
+// This test-owned adapter exercises the shared native browse composition
+// directly. The managed workflow separately uses the default action catalog.
 type hermesBrowseFixture struct {
 	*action.Base
 	host     *hermesSessionHost
@@ -52,7 +52,11 @@ func (h *hermesSessionHost) nativeBrowseTask(parent *operations.Task, input brow
 	h.t.Helper()
 	raw, err := json.Marshal(input)
 	hermesSessionCheck(h.t, err)
-	next, err := runtimeSessions.Normalize(parent, []actionmodel.NextAction{{ActionName: "native-browse", Input: raw}}, nil, h.definitions...)
+	name := "native-browse"
+	if h.production {
+		name = "browse"
+	}
+	next, err := runtimeSessions.Normalize(parent, []actionmodel.NextAction{{ActionName: name, Input: raw}}, nil, h.definitions...)
 	hermesSessionCheck(h.t, err)
 	operation, parentID := id.OperationID(), ""
 	if parent != nil {

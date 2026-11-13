@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	browseragent "github.com/defos-ai/commander-browser-agent"
 	browserruntime "github.com/defos-ai/commander-browser-agent/browser"
 	browserlogin "github.com/defos-ai/commander-browser-agent/browser/login"
 	"github.com/defos-ai/commander-browser-agent/internal/browsing"
@@ -58,13 +59,14 @@ type hermesSessionOutput struct {
 	Session sessions.Session       `json:"session"`
 }
 
-// This host registers only test-owned open/use actions. Production action
-// schemas and model setup are deliberately outside this session-binding test.
+// The shared host supports test-owned session adapters and the real default
+// catalog, while retaining the same bus, managed secrets and artifact receipts.
 type hermesSessionHost struct {
 	t                      *testing.T
 	host                   *agent.Agent
 	manager                *browserruntime.Manager
 	options                browserruntime.HermesOptions
+	production             bool
 	files                  *fsartifacts.ArtifactFileFsStore
 	bus                    comms.Bus
 	observer               comms.Subscription
@@ -191,7 +193,27 @@ func newHermesSessionHostWithOptions(t *testing.T, cases map[string]hermesSessio
 		executors = append(executors, executor)
 		h.definitions = append(h.definitions, executor.Action().Definition())
 	}
+	return startHermesSessionHost(h, owner, executors, profilesBefore)
+}
+
+// The default catalog uses the same bus, secret delivery and artifact receipts
+// as the staged scenarios, without replacing any production action executor.
+func newDefaultHermesSessionHost(t *testing.T) *hermesSessionHost {
+	t.Helper()
+	h := &hermesSessionHost{t: t, options: hermesScreenshotOptions(), production: true, claims: map[string]sessions.CreationClaim{},
+		accepted: map[string]messages.Message{}, checkpoints: map[string]executions.Execution{}}
+	owner, err := id.AgentID("browser-agent")
+	hermesSessionCheck(t, err)
+	h.manager, err = browserruntime.New(owner)
+	hermesSessionCheck(t, err)
+	return startHermesSessionHost(h, owner, nil, hermesSessionProfiles(t))
+}
+
+func startHermesSessionHost(h *hermesSessionHost, owner string, executors []action.Executor, profilesBefore map[string]bool) *hermesSessionHost {
+	t := h.t
+	t.Helper()
 	root := t.TempDir()
+	var err error
 	h.bus, err = fscomms.NewFsBus(filepath.Join(root, "bus"))
 	hermesSessionCheck(t, err)
 	h.observer, err = h.bus.Subscribe(t.Context(), comms.Inbox{Topic: messages.ControllerEvents(messages.DefaultControllerType), Name: "native-session-tests", Mode: comms.TransientExclusive})
@@ -200,9 +222,19 @@ func newHermesSessionHostWithOptions(t *testing.T, cases map[string]hermesSessio
 	hermesSessionCheck(t, err)
 	h.files = files
 	zero := time.Duration(0)
-	h.host, err = agent.NewAgent(agent.AgentConfig{ID: owner, Type: "browser-agent", Actions: executors, Sessions: h.manager, ArtifactFileStore: files,
-		Secrets: &agent.SecretConfig{RequestTTL: 2 * time.Second, RefreshInterval: 500 * time.Millisecond, RetryInterval: 100 * time.Millisecond}, HeartbeatInterval: &zero})
+	configuration := agent.AgentConfig{ID: owner, Type: "browser-agent", Actions: executors, Sessions: h.manager, ArtifactFileStore: files,
+		Secrets: &agent.SecretConfig{RequestTTL: 2 * time.Second, RefreshInterval: 500 * time.Millisecond, RetryInterval: 100 * time.Millisecond}, HeartbeatInterval: &zero}
+	if h.production {
+		h.host, err = browseragent.NewAgent(configuration)
+	} else {
+		h.host, err = agent.NewAgent(configuration)
+	}
 	hermesSessionCheck(t, err)
+	if h.production {
+		for _, contract := range h.host.Describe().Actions {
+			h.definitions = append(h.definitions, contract.Definition())
+		}
+	}
 	ctx, cancel := context.WithCancel(t.Context())
 	served := make(chan error, 1)
 	go func() { served <- h.host.Serve(ctx, h.bus, nil) }()
@@ -243,6 +275,17 @@ func newHermesSessionHostWithOptions(t *testing.T, cases map[string]hermesSessio
 		_ = h.bus.Close()
 	})
 	h.wait(func(m messages.Message) bool { return m.Type == controllerevents.AgentStarted })
+	if h.production {
+		catalog := h.host.Describe().Actions
+		if len(catalog) != 3 {
+			t.Fatal("the default agent did not register its three production actions")
+		}
+		for _, contract := range catalog {
+			if contract.Status != actionmodel.Ready || len(contract.RequiredSecrets) != 0 {
+				t.Fatal("the default browser catalog was unavailable or requested credentials during discovery")
+			}
+		}
+	}
 	if len(h.host.Describe().Sessions) != 0 {
 		t.Fatal("session discovery opened a native runtime")
 	}

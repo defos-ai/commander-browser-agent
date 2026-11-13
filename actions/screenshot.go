@@ -8,7 +8,6 @@ import (
 	"time"
 
 	browserruntime "github.com/defos-ai/commander-browser-agent/browser"
-	"github.com/defos-ai/commander-browser-agent/browser/lightpanda"
 	browserscreenshot "github.com/defos-ai/commander-browser-agent/browser/screenshot"
 	"github.com/defos-ai/commander/framework/agent/action"
 	"github.com/defos-ai/commander/framework/agent/environment"
@@ -17,7 +16,7 @@ import (
 )
 
 const ScreenshotName = "screenshot"
-const ScreenshotDescription = "Capture a protected text-only PNG snapshot of the existing Lightpanda session bound by Commander. Continue a session-aware task or supply a trusted Commander binding; no session IDs belong in action input."
+const ScreenshotDescription = "Capture a protected text-only PNG snapshot of the existing Hermes/Lightpanda session bound by Commander. Continue a session-aware task or supply a trusted Commander binding; no session IDs belong in action input."
 
 type ScreenshotInput struct {
 	Viewport       string `json:"viewport,omitempty"`
@@ -38,7 +37,7 @@ type ScreenshotOutput struct {
 type Screenshot struct {
 	*action.Base
 	runner         BrowserRunner
-	configuration  atomic.Pointer[lightpanda.Runtime]
+	configuration  atomic.Pointer[browserruntime.HermesOptions]
 	validateInput  func(any) error
 	validateOutput func(any) error
 }
@@ -66,36 +65,19 @@ func (a *Screenshot) Discover(ctx context.Context, env environment.Environment, 
 		if err := ctx.Err(); err != nil {
 			a.configuration.Store(nil)
 			a.SetStatus(action.Unknown)
-			status, discoveryErr = action.Unknown, err
+			status, discoveryErr = action.Unknown, errors.Join(err, context.Cause(ctx))
 		}
 	}()
-	if a.runner == nil {
-		a.SetUnavailable("The host must provide its browser session runner", actionmodel.Requirement{Kind: actionmodel.ConfigurationRequirement, Name: "browser-session-provider"})
-		return action.Unavailable, nil
+	configuration, status, err := discoverRuntime(ctx, a.Base, a.runner, env, scope)
+	if err == nil && status == action.Ready {
+		a.configuration.Store(configuration)
 	}
-	if env == nil {
-		env = &environment.Local{}
-	}
-	runtime, err := lightpanda.Discover(ctx, env, scope)
-	if err != nil {
-		var unavailable *lightpanda.UnavailableError
-		if errors.As(err, &unavailable) {
-			a.SetUnavailable(unavailable.Reason, unavailable.Requirement)
-			return action.Unavailable, nil
-		}
-		return action.Unknown, err
-	}
-	if err := ctx.Err(); err != nil {
-		return action.Unknown, err
-	}
-	a.configuration.Store(&runtime)
-	a.SetStatus(action.Ready)
-	return action.Ready, nil
+	return status, err
 }
 
 func (a *Screenshot) Run(ctx context.Context, raw json.RawMessage) (action.Result, error) {
 	if err := ctx.Err(); err != nil {
-		return action.Result{}, err
+		return action.Result{}, errors.Join(err, context.Cause(ctx))
 	}
 	if err := a.Check(); err != nil {
 		return action.Result{}, err
@@ -128,16 +110,18 @@ func (a *Screenshot) Run(ctx context.Context, raw json.RawMessage) (action.Resul
 		return action.Result{}, err
 	}
 	var capture browserscreenshot.Image
-	snapshot, runErr := a.runner.Run(budget, browserruntime.Options{Engine: browserruntime.Lightpanda, Executable: configuration.Executable()}, func(ctx context.Context) error {
+	snapshot, runErr := a.runner.RunHermes(budget, *configuration, func(ctx context.Context) error {
 		var err error
-		capture, err = browserscreenshot.Capture(ctx, width, height)
+		capture, err = browserscreenshot.CaptureHermes(ctx, width, height)
 		return err
 	})
 	result := action.Result{Session: &snapshot}
-	if err := budget.Err(); err != nil {
-		return result, err
+	if budget.Err() != nil {
+		clear(capture.PNG)
+		return result, errors.Join(budget.Err(), context.Cause(budget))
 	}
 	if runErr != nil {
+		clear(capture.PNG)
 		if errors.Is(runErr, context.Canceled) {
 			return result, context.Canceled
 		}
@@ -150,13 +134,16 @@ func (a *Screenshot) Run(ctx context.Context, raw json.RawMessage) (action.Resul
 		Viewport: input.Viewport, Width: width, Height: height, MediaType: "image/png", Truncated: capture.Truncated}
 	encoded, err := json.Marshal(output)
 	if err != nil || validateBrowseJSON(a.validateOutput, encoded) != nil {
+		clear(capture.PNG)
 		return result, errors.New("screenshot metadata does not match its schema")
 	}
 	if err := action.Log(budget, "Protected Lightpanda PNG and renderer metadata are ready"); err != nil {
+		clear(capture.PNG)
 		return result, err
 	}
-	if err := budget.Err(); err != nil {
-		return result, err
+	if budget.Err() != nil {
+		clear(capture.PNG)
+		return result, errors.Join(budget.Err(), context.Cause(budget))
 	}
 	result.Output = encoded
 	result.Artifacts = []action.Artifact{{Name: "Lightpanda protected text screenshot", Files: []artifacts.FileSource{

@@ -15,6 +15,7 @@ import (
 	"image/png"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -154,6 +155,9 @@ func TestHermesContainerScreenshotCancellationAndCloseJoinRenderer(t *testing.T)
 		marker := "/home/commander/renderer-stop-" + id.New()
 		api.exec(t, ctx, container, hermesContainerRendererWatcher(marker))
 		work, cancel := context.WithCancelCause(ctx)
+		phase := &hermesContainerRenderingFence{entered: make(chan struct{}), release: make(chan struct{})}
+		work = action.WithLogs(work, phase)
+		defer cancel(nil)
 		cause := errors.New("fixture isolated renderer cancellation")
 		type outcome struct {
 			png []byte
@@ -171,8 +175,35 @@ func TestHermesContainerScreenshotCancellationAndCloseJoinRenderer(t *testing.T)
 			})
 			done <- outcome{png: png, err: err}
 		}()
-		// A test-only watcher pauses this exact helper while its exec is live.
-		// Cancellation must join it before allowing source reuse or close.
+		select {
+		case <-phase.entered:
+		case result := <-done:
+			t.Fatalf("isolated renderer returned before its rendering phase (%T): %v", result.err, result.err)
+		case <-time.After(8 * time.Second):
+			t.Fatal("isolated renderer did not enter its rendering phase")
+		}
+		// The existing progress callback occurs after the source lease and
+		// endpoint identity check, before the helper starts. Pausing only this
+		// worker's exact Lightpanda process prevents a short render from beating
+		// the helper watcher; no timing hook is added to production code.
+		panda := api.exec(t, ctx, container, hermesContainerLightpandaPause)
+		pandaPID, parseErr := strconv.Atoi(panda["pid"])
+		if parseErr != nil || pandaPID < 2 || panda["birth"] == "" {
+			t.Fatal("the renderer fixture did not pin its owned Lightpanda process")
+		}
+		paused := true
+		resumePanda := func() {
+			if paused {
+				cleanup, stop := context.WithTimeout(context.Background(), 3*time.Second)
+				defer stop()
+				api.exec(t, cleanup, container, hermesContainerLightpandaResume(pandaPID, panda["birth"]))
+				paused = false
+			}
+		}
+		defer resumePanda()
+		close(phase.release)
+		// The helper now remains live while its browser connection waits. The
+		// watcher can stop it deterministically before cancellation or close.
 		stopped := api.exec(t, ctx, container, fmt.Sprintf(`import json, time
 from pathlib import Path
 path = Path(%q)
@@ -193,6 +224,7 @@ else:
 			}
 			t.Fatal("the isolated renderer did not reach its interruption phase")
 		}
+		resumePanda()
 		closed := make(chan error, 1)
 		if closing {
 			go func() { closed <- worker.Close() }()
@@ -236,6 +268,48 @@ print(json.dumps({'resumed': 'true'}))`, pid, pid, marker))
 			t.Fatal("isolated renderer cancellation lost or changed its reusable source")
 		}
 	}
+}
+
+type hermesContainerRenderingFence struct {
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (phase *hermesContainerRenderingFence) Log(ctx context.Context, message string) error {
+	if message == "Rendering the protected screenshot" {
+		phase.once.Do(func() { close(phase.entered) })
+		select {
+		case <-phase.release:
+		case <-ctx.Done():
+		}
+	}
+	return ctx.Err()
+}
+
+const hermesContainerLightpandaPause = `import json, os, signal
+from pathlib import Path
+owned = []
+for process in Path('/proc').glob('[0-9]*'):
+    try:
+        if process.joinpath('exe').resolve() == Path('/usr/local/bin/lightpanda'):
+            owned.append(process)
+    except (OSError, PermissionError):
+        pass
+assert len(owned) == 1
+process = owned[0]
+birth = process.joinpath('stat').read_text().rsplit(')', 1)[1].split()[19]
+os.kill(int(process.name), signal.SIGSTOP)
+print(json.dumps({'pid': process.name, 'birth': birth}))`
+
+func hermesContainerLightpandaResume(pid int, birth string) string {
+	return fmt.Sprintf(`import json, os, signal
+from pathlib import Path
+process = Path('/proc/%d')
+assert process.joinpath('exe').resolve() == Path('/usr/local/bin/lightpanda')
+assert process.joinpath('stat').read_text().rsplit(')', 1)[1].split()[19] == %q
+os.kill(%d, signal.SIGCONT)
+print(json.dumps({'resumed': 'true'}))`, pid, birth, pid)
 }
 
 func hermesContainerRendererWatcher(marker string) string {

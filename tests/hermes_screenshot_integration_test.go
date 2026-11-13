@@ -38,8 +38,8 @@ import (
 	runtimeSessions "github.com/defos-ai/commander/framework/sessions"
 )
 
-// The migration uses a test-owned action until the production catalog cuts over.
-// Returning bytes through Result exercises Commander's actual artifact upload.
+// This test-owned adapter isolates native screenshot edge cases. The managed
+// workflow separately exercises the default production catalog and its uploads.
 type hermesScreenshot struct {
 	*action.Base
 	manager *browserruntime.Manager
@@ -97,7 +97,11 @@ func hermesScreenshotOptions() browserruntime.HermesOptions {
 func (h *hermesSessionHost) screenshotTask(parent *operations.Task, viewport string) operations.Task {
 	h.t.Helper()
 	input, _ := json.Marshal(map[string]string{"viewport": viewport})
-	next, err := runtimeSessions.Normalize(parent, []actionmodel.NextAction{{ActionName: "native-capture", Input: input}}, nil, h.definitions...)
+	name := "native-capture"
+	if h.production {
+		name = "screenshot"
+	}
+	next, err := runtimeSessions.Normalize(parent, []actionmodel.NextAction{{ActionName: name, Input: input}}, nil, h.definitions...)
 	hermesSessionCheck(h.t, err)
 	if parent == nil {
 		h.t.Fatal("a native fixture screenshot needs a session-aware parent")

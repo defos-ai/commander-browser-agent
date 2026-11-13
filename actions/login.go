@@ -10,9 +10,9 @@ import (
 	"unicode/utf8"
 
 	browserruntime "github.com/defos-ai/commander-browser-agent/browser"
-	"github.com/defos-ai/commander-browser-agent/browser/lightpanda"
 	browserlogin "github.com/defos-ai/commander-browser-agent/browser/login"
 	"github.com/defos-ai/commander-browser-agent/internal/browsing"
+	"github.com/defos-ai/commander-browser-agent/internal/sensitive"
 	"github.com/defos-ai/commander/framework/agent/action"
 	"github.com/defos-ai/commander/framework/agent/environment"
 	actionmodel "github.com/defos-ai/commander/framework/domain/actions"
@@ -20,7 +20,7 @@ import (
 )
 
 const LoginName = "login"
-const LoginDescription = "Open or reuse a Commander-bound Lightpanda session to sign in through supported username/password and one-time-code forms using managed secrets, verify a same-site success condition and retain the session for task continuations. No session IDs belong in action input."
+const LoginDescription = "Use managed credentials and one-time codes to sign in on a Hermes/Lightpanda session, check a configured success marker on the same origin, and retain the session for Commander continuations. Login does not invoke a model. No session IDs belong in action input."
 
 type LoginInput struct {
 	URL               string `json:"url"`
@@ -38,7 +38,7 @@ type LoginOutput struct {
 type Login struct {
 	*action.Base
 	runner         BrowserRunner
-	configuration  atomic.Pointer[lightpanda.Runtime]
+	configuration  atomic.Pointer[browserruntime.HermesOptions]
 	validateInput  func(any) error
 	validateOutput func(any) error
 }
@@ -66,36 +66,19 @@ func (a *Login) Discover(ctx context.Context, env environment.Environment, scope
 		if err := ctx.Err(); err != nil {
 			a.configuration.Store(nil)
 			a.SetStatus(action.Unknown)
-			status, discoveryErr = action.Unknown, err
+			status, discoveryErr = action.Unknown, errors.Join(err, context.Cause(ctx))
 		}
 	}()
-	if a.runner == nil {
-		a.SetUnavailable("The host must provide its browser session runner", actionmodel.Requirement{Kind: actionmodel.ConfigurationRequirement, Name: "browser-session-provider"})
-		return action.Unavailable, nil
+	configuration, status, err := discoverRuntime(ctx, a.Base, a.runner, env, scope)
+	if err == nil && status == action.Ready {
+		a.configuration.Store(configuration)
 	}
-	if env == nil {
-		env = &environment.Local{}
-	}
-	runtime, err := lightpanda.Discover(ctx, env, scope)
-	if err != nil {
-		var unavailable *lightpanda.UnavailableError
-		if errors.As(err, &unavailable) {
-			a.SetUnavailable(unavailable.Reason, unavailable.Requirement)
-			return action.Unavailable, nil
-		}
-		return action.Unknown, err
-	}
-	if err := ctx.Err(); err != nil {
-		return action.Unknown, err
-	}
-	a.configuration.Store(&runtime)
-	a.SetStatus(action.Ready)
-	return action.Ready, nil
+	return status, err
 }
 
 func (a *Login) Run(ctx context.Context, raw json.RawMessage) (result action.Result, runErr error) {
 	if err := ctx.Err(); err != nil {
-		return action.Result{}, err
+		return action.Result{}, errors.Join(err, context.Cause(ctx))
 	}
 	if err := a.Check(); err != nil {
 		return action.Result{}, err
@@ -118,10 +101,10 @@ func (a *Login) Run(ctx context.Context, raw json.RawMessage) (result action.Res
 		return action.Result{}, err
 	}
 	setup, stopSetup := context.WithTimeout(ctx, 10*time.Minute)
-	var checkpoints *browsing.Checkpoints
-	var err error
-	prepare := func(ctx context.Context) error {
-		checkpoints, err = browsing.NewCheckpoints(ctx, LoginName)
+	var checkpoints *browsing.HermesCheckpoints
+	err := a.runner.WithSession(setup, func(ctx context.Context) error {
+		var err error
+		checkpoints, err = browsing.NewHermesCheckpoints(ctx, LoginName)
 		if err != nil {
 			return err
 		}
@@ -136,14 +119,9 @@ func (a *Login) Run(ctx context.Context, raw json.RawMessage) (result action.Res
 			return errors.New("login credential_profile must be a non-secret lowercase alias of at most 32 characters")
 		}
 		return nil
-	}
-	if runner, ok := a.runner.(browserSetupRunner); ok {
-		err = runner.WithSession(setup, prepare)
-	} else {
-		err = prepare(setup)
-	}
-	if err == nil {
-		err = setup.Err()
+	})
+	if setup.Err() != nil {
+		err = errors.Join(err, setup.Err(), context.Cause(setup))
 	}
 	stopSetup()
 	if err != nil {
@@ -159,40 +137,17 @@ func (a *Login) Run(ctx context.Context, raw json.RawMessage) (result action.Res
 	}
 	budget := browsing.NewBudget(ctx, time.Duration(input.TimeoutSeconds)*time.Second)
 	defer budget.Close()
-	var outcome browserlogin.Result
-	defer func() {
-		status := "failed"
-		if runErr == nil && len(result.Output) != 0 {
-			status = outcome.Status
-		}
-		finish := func(ctx context.Context) error {
-			return checkpoints.Finish(ctx, status, nil, outcome.Submitted)
-		}
-		var finishErr error
-		if runner, ok := a.runner.(browserSetupRunner); ok {
-			finishErr = runner.WithSession(budget.Context(), finish)
-		} else {
-			finishErr = finish(budget.Context())
-		}
-		if err := budget.Err(); err != nil {
-			finishErr = err
-		}
-		if finishErr != nil {
-			result = action.Result{Session: result.Session}
-			if !errors.Is(finishErr, context.Canceled) && !errors.Is(finishErr, context.DeadlineExceeded) {
-				finishErr = errors.New("cannot finalize browser progress; inspect the session before retrying")
-			}
-			runErr = errors.Join(runErr, finishErr)
-		}
-	}()
 	if err := action.Log(budget.Context(), "Starting managed login"); err != nil {
 		return action.Result{}, err
 	}
+	if err := a.runner.WithSession(budget.Context(), func(ctx context.Context) error {
+		return checkpoints.Start(ctx, browsing.HermesCheckpointLimits{TimeoutSeconds: input.TimeoutSeconds})
+	}); err != nil {
+		return action.Result{}, loginActionError(budget.Context(), err)
+	}
+	var outcome browserlogin.Result
 	var snapshot sessions.Session
-	snapshot, runErr = a.runner.Run(budget.Context(), browserruntime.Options{Engine: browserruntime.Lightpanda, Executable: configuration.Executable()}, func(ctx context.Context) error {
-		if err := checkpoints.Start(ctx, browsing.CheckpointLimits{TimeoutSeconds: input.TimeoutSeconds}, "login"); err != nil {
-			return err
-		}
+	snapshot, runErr = a.runner.RunHermes(budget.Context(), *configuration, func(ctx context.Context) error {
 		request := func(ctx context.Context, name string, secretType action.SecretType) ([]byte, error) {
 			budget.Pause()
 			defer budget.Resume()
@@ -214,7 +169,7 @@ func (a *Login) Run(ctx context.Context, raw json.RawMessage) (result action.Res
 			return action.RequestReusableSecret(waiting, name)
 		}
 		var err error
-		outcome, err = browserlogin.Run(ctx, browserlogin.Request{
+		outcome, err = browserlogin.RunHermes(ctx, browserlogin.Request{
 			URL: input.URL, VerificationURL: input.VerificationURL, ExpectedText: input.ExpectedText,
 			OneTimeCode: func(ctx context.Context) ([]byte, error) {
 				return request(ctx, codeName, action.SecretTransient)
@@ -234,30 +189,53 @@ func (a *Login) Run(ctx context.Context, raw json.RawMessage) (result action.Res
 		return err
 	})
 	result = action.Result{Session: &snapshot}
-	if err := budget.Err(); err != nil {
-		return result, err
+	var encoded []byte
+	finishErr := a.runner.WithSession(budget.Context(), func(ctx context.Context) error {
+		status := "failed"
+		var outputErr error
+		if runErr == nil {
+			output := LoginOutput{Engine: browserruntime.Lightpanda, Result: outcome}
+			output.Status = sensitive.Redact(ctx, output.Status)
+			output.Reason = sensitive.Redact(ctx, output.Reason)
+			encoded, outputErr = json.Marshal(output)
+			if outputErr == nil {
+				outputErr = validateBrowseJSON(a.validateOutput, encoded)
+			}
+			if outputErr == nil {
+				outputErr = action.Log(ctx, "Managed login finished; inspect its verification status")
+			}
+			if outputErr == nil {
+				status = output.Status
+			}
+		}
+		if err := checkpoints.Finish(ctx, status, 0, outcome.Submitted); err != nil {
+			return err
+		}
+		return outputErr
+	})
+	runErr = errors.Join(runErr, finishErr)
+	if budget.Context().Err() != nil {
+		runErr = errors.Join(runErr, budget.Err(), context.Cause(budget.Context()))
 	}
 	if runErr != nil {
-		if errors.Is(runErr, context.Canceled) {
-			return result, context.Canceled
-		}
-		if errors.Is(runErr, context.DeadlineExceeded) {
-			return result, context.DeadlineExceeded
-		}
-		return result, errors.New("managed login could not be completed; inspect the session before retrying")
-	}
-	encoded, err := json.Marshal(LoginOutput{Engine: browserruntime.Lightpanda, Result: outcome})
-	if err != nil || validateBrowseJSON(a.validateOutput, encoded) != nil {
-		return result, errors.New("login result does not match its schema")
-	}
-	if err := action.Log(budget.Context(), "Managed login finished; inspect its verification status"); err != nil {
-		return result, err
-	}
-	if err := budget.Err(); err != nil {
-		return result, err
+		clear(encoded)
+		return result, loginActionError(budget.Context(), runErr)
 	}
 	result.Output = encoded
 	return result, nil
+}
+
+func loginActionError(ctx context.Context, err error) error {
+	if ctx.Err() != nil {
+		return errors.Join(ctx.Err(), context.Cause(ctx))
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return context.DeadlineExceeded
+	}
+	if errors.Is(err, context.Canceled) {
+		return context.Canceled
+	}
+	return errors.New("managed login could not be completed; inspect the session before an explicit continuation")
 }
 
 func (input LoginInput) validate() error {

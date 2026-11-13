@@ -52,11 +52,21 @@
   The browser needs no managed-secret decryption key.
 - For direct development, run
   `BUS_URL=/shared/bus STORAGE_URL=/shared/storage go run ./cmd` against the
-  controller's bus and artifact storage. FS providers require the same shared
-  directories in both processes. Use `go run ./cmd --help` for host settings.
+  controller's bus and artifact storage with the packaged Hermes and Lightpanda
+  runtimes installed locally. Model choices and keys use Commander.
+  FS providers require the same shared directories in both processes. Use
+  `go run ./cmd --help` for the remaining host settings.
 
 ## Browser runtime
 
+- Deploy one agent container with the Go host, Hermes and Lightpanda running as
+  separate processes. Each Commander session owns its Hermes worker and browser
+  state inside that container. No Docker daemon access, image selection or
+  additional session containers are required by the agent.
+- Default action discovery checks the local [Hermes](browser/hermes/) runtime
+  and [Lightpanda](browser/lightpanda/) executable through the environment
+  abstraction. Honor executable scopes for both, return fresh zero configuration
+  on failure, and never start an agent, browser or model request during discovery.
 - [Lightpanda discovery](browser/lightpanda/) uses the environment abstraction.
   `LIGHTPANDA_PATH` is absolute; explicit discovery scope wins. Return fresh
   configuration, check the exact 1.0.2 version with a bounded context, and report
@@ -83,18 +93,18 @@
   renderer in output/artifact metadata; desktop/mobile refer to viewport sizes,
   not pixel-accurate page design or full mobile-device emulation. Do not restore
   the old capture/accessibility actions to supply this capability.
-- The image also stages unmodified Hermes v0.23.1 at commit
+- The agent image packages unmodified Hermes v0.23.1 at commit
   `3b421578588243f920886e6fe79a6faa87ea026e` under `/opt/hermes`, with CPython
-  3.14.10 and the frozen core lockfile (browser-harness 0.1.13). This packaging
-  does not activate a Hermes action backend. Keep model configuration and keys
-  out of image settings. No runtime dependency downloads or lazy installs.
+  3.14.10 and the frozen core lockfile (browser-harness 0.1.13). Default actions
+  use its native browser tools through local child processes. Keep model configuration
+  and keys out of image settings. No runtime dependency downloads or lazy installs.
   [docker/fetch-hermes.sh](docker/fetch-hermes.sh) pins the archive and both uv
   binaries; preserve the license and attribution in [third_party/hermes/](third_party/hermes/).
   The offline readiness command is `/opt/hermes/.venv/bin/python -I -S
   /usr/local/lib/commander-browser/hermes/check.py`. It checks the packaged
   identity and imports using a temporary private home, without starting an
-  agent, browser or model request. Native Go release binaries do not embed this
-  Python runtime; packaged prerequisites must be installed independently.
+  agent, browser or model request. Native Go host binaries require those packaged
+  dependencies installed independently; they do not embed the Python runtime.
 - [Hermes discovery](browser/hermes/) checks `HERMES_INSTALL_ROOT` (default
   `/opt/hermes`) through the environment abstraction. The package directory is
   trusted absolute host configuration; derive `.venv/bin/python` and preserve
@@ -111,20 +121,22 @@
   Supply private temporary directories to avoid upstream's detached scratch
   pruning. Decline urllib3's optional IPv6 bind probe without opening a socket;
   other caught runtime-activity attempts still refuse readiness.
-  The audit hook is not an OS sandbox. Runtime readiness does not satisfy the
-  deployment-isolation cutover gate or activate native actions.
-- Local validation must stay within a combined 3 CPUs and 3,000,000,000 bytes
-  of RAM, with swap disabled. Use a resource-limited Docker-container Buildx
-  builder and stop it before running a container with the full allowance.
-- The approved isolation deployment uses separate Docker worker containers.
-  [internal/hermes/containers/](internal/hermes/containers/) is a staged launcher
+  The audit hook is not an OS sandbox. Default actions use these same offline
+  checks before reporting readiness.
+- Local validation must stay within a combined 4 CPUs and 4,000,000,000 bytes
+  of RAM, with swap disabled. Prefer smaller limits when practical. Use a
+  resource-limited Docker-container Buildx builder for image builds and stop it
+  before running a container with the full allowance.
+- The earlier separate-container transport remains private infrastructure for
+  its existing tests, pending cleanup; default actions do not select it.
+  [internal/hermes/containers/](internal/hermes/containers/) is a launcher
   through a trusted local Unix daemon socket, using Docker API 1.47 and a
   preloaded immutable `sha256:` image ID. It never pulls an image, accepts action
   inputs or mounts the daemon socket into a worker. Docker access gives the
   trusted launcher control beyond this project; it is not a worker capability.
-  Model and protected screenshot relays are staged through
-  `hermes.StartContainer` and the session manager's explicit container options.
-  This launcher does not activate a default action backend.
+  Model and protected screenshot relays use `hermes.StartContainer` and the
+  session manager's explicit container options. Neither this launcher nor its
+  Docker settings are used by the production catalog or Compose demo.
 - Each container uses UID1000, a read-only root, private PID/IPC/network/cgroup
   namespaces, bridge egress, no published ports, dropped capabilities and
   `no-new-privileges`. Fix its allowance to one CPU, 1,000,000,000 bytes of memory
@@ -148,7 +160,7 @@
   retry only the pinned volume. Missing receipts retain uncertain ownership.
   The [Docker Engine API](https://docs.docker.com/reference/api/engine/version/v1.47/)
   is the launcher protocol, not human-readable CLI output.
-- Container isolation separates the trusted Go host and sibling workers. Native
+- This unused transport separates the trusted Go host and sibling workers. Native
   Python, its bridge and its browser still share one worker's resources; this
   step does not create a sandbox between them or attest every website effect.
   Keep managed-secret/redaction and checkpoint admission boundaries independent.
@@ -192,8 +204,8 @@
   configuration, never action inputs. A claim cannot switch between the Go and
   Hermes backends or change its pinned paths. `RunHermes` lends a callback-scoped
   bridge through [internal/hermes/session.go](internal/hermes/session.go); retained
-  or detached contexts cannot start later work. This infrastructure does not
-  change the default action catalog or move an existing Go session to Hermes.
+  or detached contexts cannot start later work. Default actions use this bridge
+  on local child processes; existing Go sessions cannot move to Hermes.
 - `HermesOptions` selects exactly one trusted runtime: absolute local paths or
   `HermesContainerOptions` with an absolute local Docker socket and a preloaded
   immutable `sha256:` image ID. Refuse incomplete or mixed configuration before
@@ -202,7 +214,8 @@
   claim is allowed. Constructors and preparation still open no runtime. The
   manager retains partial container starts for honest cleanup and uses the same
   health, inventory, cancellation and close controls for both transports.
-  Deployment configuration and the default action switch remain separate work.
+  Default action discovery supplies only the verified local runtime paths.
+  Container options remain a private adapter path pending cleanup.
 - A ready Hermes worker remains `starting` until native automation has opened and
   verified its browser. Pin the owned Lightpanda process, harness daemon, retained
   target and original connection; health controls must not create or reconnect
@@ -240,15 +253,19 @@
 
 ## Intelligence and model access
 
-- The approved migration uses Hermes's native Python browser tools for reasoning
+- The default actions use Hermes's native Python browser tools for reasoning
   and automation, with a thin [private host bridge](internal/hermes/). This
   deliberately broadens the old typed-command policy: Python has filesystem,
   network and raw CDP capabilities. The worker is not an OS sandbox. Dedicated
   homes and exact tool routing do not isolate hostile Python from other resources
-  accessible to the same OS user; deployment isolation remains a cutover gate.
+  accessible to the same OS user. The approved single-container deployment
+  shares files, permissions and process visibility between the Go host and
+  native Python. Separate profiles isolate ordinary cookie state, not hostile
+  Python execution. Keep redaction and checkpoint boundaries independent of this
+  deployment choice.
   Do not add a second reasoning loop, fork upstream, parse terminal traces, or
   restore the discarded evaluation files.
-- The approved native browse contract is staged in
+- The public native browse contract is defined in
   [internal/browsing/hermes_contract.go](internal/browsing/hermes_contract.go)
   and [hermes_browse.go](internal/browsing/hermes_browse.go). It reports protected
   final text, runtime status and Hermes's `api_calls` counter, which can omit
@@ -267,12 +284,11 @@
   still win. Cancellation/ownership cleanup can require an additional bounded
   join. Load the replay fence before setup, save start before worker startup,
   and publish only validated protected `browse.json` after native quiescence,
-  manager health checks and the final checkpoint receipt. The staged helper uses
-  the same managed setup and host runner; default actions remain unchanged.
-- Keep the current Go actions active until the new integration passes its
-  Commander-bound session, managed-secret, screenshot and checkpoint workflows.
-  The private bridge is migration infrastructure, not an additional action or an
-  activated fallback. Use public plugin overrides with explicit grants; refuse
+  manager health checks and the final checkpoint receipt. The action delegates
+  to the shared helper and this host's session runner.
+- The default catalog runs the verified native integration for Commander-bound
+  sessions, managed secrets, screenshots and checkpoints. There is no Go action
+  fallback. Use public plugin overrides with explicit grants; refuse
   startup if required wrappers or the advertised catalog do not match. Admission
   checks belong inside the wrapper handler before native dispatch, since
   middleware exceptions can fail open. A native Python call is a batch: its
@@ -312,13 +328,13 @@
   execution gate. Join HTTP work before clearing owned key/token bytes and before
   confirming session closure. Keep worker fingerprints as well as manager-owned
   protection so changing a trusted caller's context cannot forget earlier keys.
-- [internal/hermes/container.go](internal/hermes/container.go) stages the same
+- The unused [internal/hermes/container.go](internal/hermes/container.go) binds the same
   worker API on a pinned container and its exact full creation claim. Require
   the advertised `model_relay: 1` capability before accepting work; an old image
   must fail startup instead of attempting a host-loopback endpoint. Its Docker
   wait has an independent cancellable lifetime. Cancelling that wait is not a
   stopped receipt, and partial starts retain their uncertain resource reference.
-- [model_relay.py](internal/hermes/model_relay.py) gives unchanged Hermes a fresh
+- The unused container [model_relay.py](internal/hermes/model_relay.py) gives unchanged Hermes a fresh
   authenticated loopback HTTP adapter inside the worker for each run. Only
   `/v1/models` and nonstreaming `/v1/chat/completions` cross the separate private
   `model`/`model_reply` channel. The selected endpoint and real key stay in Go;
@@ -340,8 +356,9 @@
   Container rendering uses the separate namespace-local Go helper described
   below; never interpret its private CDP loopback address in the Go host's
   namespace.
-- [browser/intelligence/](browser/intelligence/) implements an in-process Go loop
-  on the existing session context. Do not launch the native Lightpanda agent or
+- [browser/intelligence/](browser/intelligence/) retains the unused legacy Go loop
+  until the separate cleanup commit; default actions do not invoke it. Do not
+  launch the native Lightpanda agent or
   attach another CDP connection for automation. Screenshot rendering has the
   isolated, unauthenticated connection described below. The pinned native agent has a fixed tool catalog,
   creates its own browser/session and exposes environment values through `getEnv`;
@@ -359,12 +376,12 @@
   browser model answer its own setup. Custom endpoints are a further non-secret
   question, never a secret request. Do not fetch a live model catalog before keys.
 - [internal/browsing/hermes.go](internal/browsing/hermes.go) uses the same setup
-  cache and creation claims. Its staged native path offers OpenAI and explicitly
+  cache and creation claims. Its native path offers OpenAI and explicitly
   selected Other only; reject unverified profiles before requesting credentials.
   Keep the exact selected endpoint for both fixed transport routing and custom
   secret naming. Reuse resolves managed credentials again and honors Commander's
   delivery lease; it does not force a sync or bypass the managed-secret provider.
-  The current public Go actions retain their existing provider catalog.
+  The default catalog offers these two verified provider selections.
 - Model configuration and API keys must not come from the agent's environment.
   New sessions obtain provider/model choices through questions; Other also asks
   for its exact endpoint. Do not retain removed model-environment shortcuts or
@@ -399,7 +416,7 @@
   Managed browser sessions must not inherit provider keys. Send the key only in the
   model authentication header and redact known values from observations, output
   and artifacts. Suppress raw provider/browser errors and protocol output.
-- The current Go loop exposes typed browser commands only, with one model command per turn and no
+- The unused legacy Go loop exposes typed browser commands only, with one model command per turn and no
   model-supplied JavaScript, selectors, credentials or raw CDP. Keep safe bounded
   observations, evidence references and static execution logs. Document navigation
   allows all HTTP(S) hostnames by default: omitted/empty `allowed_hosts` normalizes
@@ -415,7 +432,8 @@
   Preserve explicitly empty catalogs; do not create a second manager inside an
   action. Return artifact bytes through action results for ArtifactFileStore
   upload; never write raw DOM, model transcripts or credentials to artifacts.
-- The typed `ask` command bridges to `action.Question` using execution-local keys
+- The unused legacy loop's typed `ask` command bridges to `action.Question` using
+  execution-local keys
   `browser_clarification_1` through `_4`. Commander owns operator waiting, fallback
   eligibility and saved answers; do not ask the browser model to answer itself or
   retry browser operations while a question is pending. Validate bounded nonblank
@@ -434,7 +452,7 @@
 
 ## Managed login
 
-- [browser/login/hermes.go](browser/login/hermes.go) stages the same deterministic
+- [browser/login/hermes.go](browser/login/hermes.go) runs the deterministic
   login executor on the retained Hermes session without model setup or an agent
   invocation. [internal/hermes/browser.go](internal/hermes/browser.go) grants
   callback-scoped, serialized host access to the original harness connection
@@ -444,7 +462,7 @@
   original attachment. Reject a changed daemon route instead of adopting it.
   Do not open another automation WebSocket,
   record credential operations as native agent tools, or patch upstream. This
-  remains private migration infrastructure; the default actions still use Go.
+  is the private host path used by the default login action.
 - The private native lease pins its original attachment, bounds RPCs and drains
   filtered events concurrently with intercepted requests. Only request routing,
   resource/frame identity, response status and completion/failure IDs cross this
@@ -522,7 +540,7 @@
 
 ## Protected text screenshots
 
-- [browser/screenshot/hermes.go](browser/screenshot/hermes.go) stages capture on
+- [browser/screenshot/hermes.go](browser/screenshot/hermes.go) captures on
   the existing native session with an exact framework `use` binding. Its
   `WithExistingBrowser` lease cannot bootstrap a browser. Read the same fixed
   snapshot function through the original automation attachment, protect text
@@ -561,7 +579,7 @@
   bounded to 128 KiB for Unicode text and redaction overlap; command parameters
   and filtered event batches retain their separate 32 KiB limits. PNG bytes use
   the isolated Go renderer connection, never the worker JSON protocol.
-- Isolated workers run the fixed packaged Go helper
+- The unused container transport runs the fixed packaged Go helper
   `/usr/local/lib/commander-browser/render-text` through the trusted launcher's
   Docker exec transport. Send only bounded protected plain text, dimensions and
   the validated owned loopback endpoint over its private input; never include
@@ -573,8 +591,8 @@
   cleanup and a stopped successful exec receipt before returning bytes. Retain
   ownership through cancellation and source shutdown; a missing cleanup receipt
   loses the source rather than enabling reuse. Reconfirm the retained source
-  identity after rendering. This staged helper does not activate a default
-  action backend or change session-manager routing.
+  identity after rendering. The default screenshot action renders
+  through the in-process Go adapter on the local worker's scoped endpoint.
 - Use native PNG output, validate its byte/pixel bounds and actual dimensions,
   and upload through ArtifactFileStore via action results. Renderer metadata
   belongs in output and `screenshot.json` beside `screenshot.png`; never include
@@ -585,11 +603,11 @@
 ## Browsing checkpoints
 
 - [internal/browsing/hermes_checkpoint.go](internal/browsing/hermes_checkpoint.go)
-  stages native execution facts separately from typed Go progress. Load through
+  records native execution facts separately from legacy typed Go progress. Load through
   `Manager.WithSession` before model setup, secrets or worker startup; save the
   start fence before `RunHermes`, including deterministic login bootstrap. Keep
   `browse_started`/`login_started` as replay gates so any saved version blocks
-  automatic replay. Default actions remain on the Go backend until cutover.
+  automatic replay. Default browse and login use these native facts.
 - Native version-3 facts contain the original full creation claim, fixed runtime
   and limits, shared fence ordinals, native batch sequences and fixed counters.
   Bind the helper to the current framework execution as well as the original
@@ -622,7 +640,8 @@
   questions inside the session lifetime. An existing fence refuses automatic
   replay before questions, secrets or browser work. Checkpoints belong to one
   execution, not to a transferable browser snapshot or a session-global history.
-- Persist `browse_started` before initial page navigation and `login_started`
+- The unused Go checkpoint helper persists `browse_started` before initial page
+  navigation and `login_started`
   before deterministic login, covering both password and code work. Each
   `browse_step_01` through `_30` is saved after
   model command validation and before executing that command, including question
@@ -630,7 +649,8 @@
   and preceding completed steps; it does not prove whether the pending effect ran.
   One start, thirty command fences and one final fact fit the framework's limit
   of thirty-two immutable names. Never overwrite a named fact with new content.
-- Persist only version/action/engine, exact session reference and original
+- Legacy Go facts persist only version/action/engine, exact session reference and
+  original
   creation claim, configured limits, progress counters, fixed step outcomes and
   evidence IDs with SHA256 of already-redacted canonical evidence JSON. Do not
   persist objective text, URLs, DOM, full model commands/transcripts, question text or
@@ -665,12 +685,26 @@
   and optional Playground using the same `COMMANDER_VERSION` (default `v0.4.1`).
   Commander host images explicitly use linux/amd64; the agent image supports
   linux/amd64 and linux/arm64. Never run demo Playground with `--all-in-one`.
-- Start the local demo with `docker compose up --build --wait`, then
-  `docker compose run --rm --no-deps playground`. Browser Admin is at
-  `http://localhost:4285`; add API `http://localhost:4284` and obtain its login with
+- Start the local demo with its packaged runtimes:
+
+  ```sh
+  docker compose up --build --wait
+  docker compose run --rm --no-deps playground
+  ```
+
+  The agent, Hermes and Lightpanda run as separate processes inside the same
+  agent service container. Each session retains its own worker and browser
+  profile until close or owner shutdown. Rebuilding/restarting the agent loses
+  those live sessions; do not claim restoration from runtime files.
+  Browser Admin is at `http://localhost:4285`; add API `http://localhost:4284` and obtain its login with
   `docker compose exec api commander-api credentials`. Enter model keys through
   Playground's masked setup. Use `/exit` to leave Playground and
   `docker compose down` to stop the stack.
+- The agent receives the shared bus/storage mounts and no Docker socket. Native
+  Python has the same container filesystem permissions as the Go host, including
+  these mounts; process environment scrubbing and private homes do not create an
+  OS security boundary. Model choices and provider keys still use the managed
+  bridge rather than environment or action input.
 - Do not pass model settings or keys into the demo agent: use questions and
   managed secrets. Do not automatically pass host provider keys into Playground.
   It accepts masked key entry or one explicitly forwarded provider key and shares
@@ -734,24 +768,12 @@ go test -race -count=1 -timeout=3m ./... ./.github/tests
 go vet ./... ./.github/scripts ./.github/tests
 ```
 
-Real session/browse tests use `-tags=browserintegration` and require absolute
-`LIGHTPANDA_PATH`. They exercise the production agent's actions with Lightpanda
-through Commander dispatch, inventory and session controls over the FS bus, without an
-external model or demo stack. A local fake model uses the actual HTTP protocol;
-the harness answers setup/clarification questions and delivers synthetic managed
-secrets. Retain the main login → clarification → interact/extract → screenshot →
-reuse → close workflow, two-account isolation, checkpoint receipt retries and
-navigation uncertainty, challenge/credential-wait cancellation, execution budgets
-and grounded completion. Screenshot checks compare decoded pixels, source state
-and renderer cleanup. Focused tests cover catalog/ownership, managed setup/reuse,
-saved-checkpoint rejection and each supported provider's wire/secret boundaries.
-Session regressions cover routing-free root allocation, exact direct-parent
-continuation binding, standalone flat claims, fresh browse cookie continuity,
-and rejection of unbound/foreign/closed dispatches before browser or model work.
-OTP workflows cover transient delivery, password-to-code and retained-page
-continuation, expiry/rejection without automatic retry, stale-response isolation,
-form mutation, uncertain submission, pending close and subsequent model/screenshot
-redaction.
+The production catalog workflow uses the `hermesintegration` tag. It exercises
+the actual default actions over
+the FS bus with managed secret delivery, checkpoint receipts and artifact upload.
+Its fake model uses the real SDK HTTP boundary; no external model or demo stack
+is required. The remaining `browserintegration` tag supports legacy Go model
+fixtures until their separate cleanup, not a production action backend.
 The production manager owns browser lifecycle; fixtures own HTTP pages only.
 CI compiles the race-enabled test binary in the Go bookworm image to match the
 runtime's glibc, then executes it as the runtime image's UID1000 with no external
@@ -776,7 +798,7 @@ source state and cookie continuity, and exercise allocated-renderer interruption
 Native checkpoint scenarios hold and retry actual persistence receipts before
 start, clarification, batch dispatch and final output; reject old fences, failed
 loads and saves; and verify cancellation, late receipts and explicit continuation.
-The staged native browse scenario combines managed setup, native observations,
+The private native browse scenario combines managed setup, native observations,
 clarification, protected artifact upload, retained-page reuse, refused final
 persistence and a clarification consuming its wall allowance. Response-allowance
 tests exercise native truncation recovery without equating Hermes's reported
@@ -806,21 +828,19 @@ The container session scenario dispatches through the real FS bus and manager:
 unopened `use` refusal, direct-parent reuse, independent same-origin cookie jars,
 private inventory, pinned-runtime/creation-claim rejection, clean cancellation
 with reuse, and confirmed close with retained tombstones.
-The combined container workflow uses a loopback HTTP fixture inside one worker:
-managed model setup, native browse/clarification, reusable login credentials,
-transient OTP, authenticated browse reuse, and protected screenshot artifacts.
-It holds login's start receipt before website submissions, rejects output after
-refused final persistence, and refuses an independent saved replay fence before
-setup or container startup. Its fixture bootstrap uses an already prepared
-worker, so the successful path does not independently prove first-start ordering.
-The provider fixture listens only in the trusted parent namespace,
-so these scenarios require the private relay. Test settings are not agent model
-settings.
+The default-catalog workflow uses a loopback HTTP fixture in the same test
+container: managed model setup, native browse/clarification, reusable login
+credentials, transient OTP, authenticated browse reuse and protected screenshot
+artifacts. It holds the first browse start receipt before any worker starts and
+login's start receipt before website submissions, rejects output after refused
+final persistence, and refuses an independent saved replay fence before setup
+or worker startup. It runs without a Docker socket or external model. Private
+container-transport settings are not production agent settings.
 The bridge currently supports the OpenAI Chat Completions wire profile for
 OpenAI and explicitly selected Other. Tests include escaped provider echoes,
 native observations, key rotation, exact reusable-secret requests, private worker
-files/environments and redirect refusal. Other provider profiles and Commander
-action activation remain separate migration work.
+files/environments and redirect refusal. Other provider wire profiles remain
+separate work; default actions already use the verified native profile.
 
 Future API workflow tests that invoke global cleanup must use a dedicated stack,
 with Docker lifecycle owned by setup/CI outside Go tests. Keep fixtures under
