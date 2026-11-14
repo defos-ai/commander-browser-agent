@@ -11,7 +11,7 @@ import (
 	"syscall"
 
 	browser "github.com/defos-ai/commander-browser-agent"
-	browserruntime "github.com/defos-ai/commander-browser-agent/browser"
+	"github.com/defos-ai/commander-browser-agent/internal/commander"
 	agents "github.com/defos-ai/commander/framework/agent"
 	"github.com/defos-ai/commander/framework/agent/action"
 	"github.com/defos-ai/commander/framework/host"
@@ -59,7 +59,7 @@ func Run(ctx context.Context, args []string, stderr io.Writer) (result error) {
 		return err
 	}
 	defer func() { result = errors.Join(result, dependencies.Close()) }()
-	sessions, err := browserruntime.New(agentID)
+	sessions, err := commander.NewSessionManager(agentID)
 	if err != nil {
 		return err
 	}

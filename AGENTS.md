@@ -133,11 +133,10 @@
 ## Reusable browser sessions
 
 - [browser/contracts/](browser/contracts/) defines the Commander-independent
-  `BrowserAgent`, `Browser`, request/result types and hooks. The separate leaf
-  package avoids cycles while the existing session manager is moved in later
-  refactoring steps. Keep model keys outside browse requests/hooks; Go-only
-  factory configuration and deterministic login
-  credential callbacks retain explicit buffer ownership and safe formatting.
+  `BrowserAgent`, `Browser`, request/result types and hooks. Keep these separate
+  from the Commander session adapter. Keep model keys outside browse requests/hooks;
+  Go-only factory configuration and deterministic login credential callbacks
+  retain explicit buffer ownership and safe formatting.
 - [cli/factory.go](cli/factory.go) supplies `actions.Dependencies` for Hermes reasoning
   and retained Lightpanda login/screenshots. Actions receive factories rather
   than constructing implementations. Missing factories refuse discovery before
@@ -148,7 +147,7 @@
   Library callers pass these dependencies to `NewActions`/`NewAgent`; the agent
   and action packages do not select concrete backends.
 
-- [agent.go](agent.go) supplies one [session manager](browser/manager.go)
+- [agent.go](agent.go) supplies one [session manager](internal/commander/sessions.go)
   per agent unless the caller provides a Commander sessions provider. Constructors
   and `Prepare` open no browsers. `Run` requires the exact framework-owned session
   binding and creation claim from `action.SessionFromContext`.
@@ -180,8 +179,9 @@
   Serialize work within a session while allowing independent inspect/verify/close
   controls. Close must interrupt work and join startup/cleanup before reporting
   `closed`; uncertain cleanup and owner shutdown retain `lost` references.
-- [browser/hermes.go](browser/hermes.go) binds a private Hermes worker to that same
-  manager and exact creation claim. Its trusted absolute runtime paths are host
+- [internal/commander/hermes_sessions.go](internal/commander/hermes_sessions.go)
+  binds a private Hermes runtime to that same manager and exact creation claim.
+  Its trusted absolute runtime paths are host
   configuration, never action inputs. A claim cannot switch between the Go and
   Hermes backends or change its pinned paths. `RunHermes` lends a callback-scoped
   bridge through [internal/hermes/session.go](internal/hermes/session.go); retained
@@ -190,8 +190,16 @@
 - `HermesOptions` contains the discovered absolute Python, Hermes source and
   Lightpanda paths. Refuse incomplete configuration before startup and pin the
   complete selection to the original creation claim. A retained session cannot
-  change runtime paths. Constructors and preparation open no runtime; the manager
-  owns child-process startup, health, cancellation and cleanup.
+  change runtime paths. Constructors and preparation open no runtime.
+- [browser/runtime.go](browser/runtime.go) exposes only retained runtime lifecycle:
+  completion, independent verification, scoped callback access and cleanup.
+  The Commander adapter owns full creation claims, binding/mode validation,
+  serialization, public inventory/revisions, tombstones and close receipts.
+  [browser/hermes.go](browser/hermes.go) and the Lightpanda runtime own process/CDP
+  startup, private callback grants, health checks and cleanup. Preserve partial
+  starts returned with an error so the manager can retain uncertain ownership.
+  Native workers receive only the original opaque session ID for correlation;
+  it grants no authority and never substitutes for the manager's full claim check.
 - A ready Hermes worker remains `starting` until native automation has opened and
   verified its browser. Pin the owned Lightpanda process, harness daemon, retained
   target and original connection; health controls must not create or reconnect
@@ -480,7 +488,8 @@
 ## Protected text screenshots
 
 - [browser/screenshot/hermes.go](browser/screenshot/hermes.go) captures on
-  the existing native session with an exact framework `use` binding. Its
+  the existing native session through a scoped runtime grant. The Commander
+  screenshot action enforces the exact framework `use` binding. Its
   `WithExistingBrowser` lease cannot bootstrap a browser. Read the same fixed
   snapshot function through the original automation attachment, protect text
   using both manager and worker fingerprints before truncation, and retain the
@@ -506,8 +515,8 @@
 - [browser/render.go](browser/render.go) and the private native bridge share
   [internal/textrender/](internal/textrender/) for temporary renderer connections
   and target/allocator/socket cleanup, including on action cancellation and
-  session close. Bind the private renderer handle to the original `Manager.Run`
-  lifetime; detached contexts cannot render after that callback ends. Source
+  session close. Bind the private renderer handle to the original
+  `Runtime.WithContext` lifetime; detached contexts cannot render after that callback ends. Source
   shutdown stops admission and waits for render borrows.
   Return PNG bytes only after confirmed cleanup; uncertain cleanup retains
   ownership and marks the source runtime lost rather than silently reconnecting.
@@ -532,8 +541,8 @@
 
 - [internal/commander/checkpoints.go](internal/commander/checkpoints.go)
   records native execution facts. Load through
-  `Manager.WithSession` before model setup, secrets or worker startup; save the
-  start fence before `RunHermes`, including deterministic login bootstrap. Keep
+  `SessionManager.WithSession` before model setup, secrets or worker startup;
+  save the start fence before `RunHermes`, including deterministic login bootstrap. Keep
   `browse_started`/`login_started` as replay gates so any saved version blocks
   automatic replay. Default browse and login use these native facts.
 - Native version-3 facts contain the original full creation claim, fixed runtime

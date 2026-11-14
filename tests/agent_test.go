@@ -17,6 +17,7 @@ import (
 	"github.com/defos-ai/commander-browser-agent/browser/contracts"
 	hermesagent "github.com/defos-ai/commander-browser-agent/browser/hermes"
 	"github.com/defos-ai/commander-browser-agent/browser/lightpanda"
+	"github.com/defos-ai/commander-browser-agent/internal/commander"
 	"github.com/defos-ai/commander-browser-agent/internal/sensitive"
 	"github.com/defos-ai/commander/framework/agent"
 	"github.com/defos-ai/commander/framework/agent/action"
@@ -59,7 +60,7 @@ func TestAgentCatalogMatchesMetadataAndPreservesEmptySelection(t *testing.T) {
 
 func TestSessionClaimsAndDelayedCloseKeepIdentitiesIsolated(t *testing.T) {
 	binding := unitBinding()
-	manager, err := runtime.New(binding.OwnerAgentID)
+	manager, err := commander.NewSessionManager(binding.OwnerAgentID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,7 +104,7 @@ func TestStandaloneSessionClaimsRetainExactFlatCreation(t *testing.T) {
 		if withoutOperation {
 			binding.OperationID, binding.TaskID = "", ""
 		}
-		manager, err := runtime.New(binding.OwnerAgentID)
+		manager, err := commander.NewSessionManager(binding.OwnerAgentID)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -177,6 +178,22 @@ func TestActionsRejectSessionSelectorsBeforeSideEffects(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestScreenshotRejectsOpenBindingBeforeSideEffects(t *testing.T) {
+	requireHermesDiscoveryPlatform(t)
+	probe := &unitSetup{t: t}
+	executor := unitAction(probe, "screenshot")
+	if status, err := executor.Discover(t.Context(), unitEnvironment{probe}, nil); err != nil || status != action.Ready {
+		t.Fatal("screenshot binding regression could not discover its action")
+	}
+	binding := unitBinding()
+	ctx := action.WithQuestions(action.WithSecrets(action.WithSession(t.Context(), &binding), probe), probe)
+	ctx = action.WithLogs(ctx, probe)
+	result, err := executor.Run(ctx, json.RawMessage(`{}`))
+	if err == nil || len(probe.events) != 0 || probe.runs != 0 || len(result.Output) != 0 || len(result.Artifacts) != 0 {
+		t.Fatal("screenshot accepted an open binding or reached logs, setup or browser work")
 	}
 }
 
@@ -326,6 +343,10 @@ func (p *unitSetup) RequestSecret(_ context.Context, name string) ([]byte, error
 	value := []byte(p.key)
 	p.returned = append(p.returned, value)
 	return value, nil
+}
+func (p *unitSetup) Log(ctx context.Context, _ string) error {
+	p.events = append(p.events, "execution-log")
+	return ctx.Err()
 }
 func (p *unitSetup) WithSession(ctx context.Context, work func(context.Context) error) error {
 	if p.values == nil {

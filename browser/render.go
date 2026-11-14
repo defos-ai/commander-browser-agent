@@ -21,7 +21,7 @@ func withRendererRuntime(ctx context.Context, runtime *browserRuntime) context.C
 }
 
 // RenderText renders protected text with the native Lightpanda PNG renderer.
-// It requires Manager.Run's retained-session context. A separate CDP connection
+// It requires the Go runtime's scoped execution context. A separate CDP connection
 // to that same owned process isolates the renderer's cookies, page and viewport;
 // it receives no authenticated browser state and never navigates to a website.
 func RenderText(ctx context.Context, text string, width, height int) ([]byte, error) {

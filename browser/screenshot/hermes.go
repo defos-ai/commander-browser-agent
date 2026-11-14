@@ -5,15 +5,11 @@ import (
 
 	"github.com/defos-ai/commander-browser-agent/internal/hermes"
 	"github.com/defos-ai/commander-browser-agent/internal/sensitive"
-	"github.com/defos-ai/commander/framework/agent/action"
 )
 
 // CaptureHermes reads an existing native session without an agent invocation.
 // Its temporary renderer receives only protected text, never source DOM or state.
 func CaptureHermes(ctx context.Context, width, height int) (image Image, captureErr error) {
-	if _, err := action.UseSession(ctx); err != nil {
-		return Image{}, err
-	}
 	if !sensitive.HasValues(ctx) {
 		return Image{}, errCapture
 	}

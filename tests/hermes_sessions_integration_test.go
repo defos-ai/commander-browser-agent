@@ -75,7 +75,7 @@ type hermesSessionOutput struct {
 type hermesSessionHost struct {
 	t                      *testing.T
 	host                   *agent.Agent
-	manager                *browserruntime.Manager
+	manager                *commander.SessionManager
 	options                browserruntime.HermesOptions
 	production             bool
 	files                  *fsartifacts.ArtifactFileFsStore
@@ -104,7 +104,7 @@ func newHermesSessionHostWithOptions(t *testing.T, cases map[string]hermesSessio
 	h := &hermesSessionHost{t: t, options: options, claims: map[string]sessions.CreationClaim{}, accepted: map[string]messages.Message{}, checkpoints: map[string]executions.Execution{}}
 	owner, err := id.AgentID("browser-agent")
 	hermesSessionCheck(t, err)
-	h.manager, err = browserruntime.New(owner)
+	h.manager, err = commander.NewSessionManager(owner)
 	hermesSessionCheck(t, err)
 	var executors []action.Executor
 	for _, mode := range []sessions.Mode{sessions.Open, sessions.Use} {
@@ -231,7 +231,7 @@ func newDefaultHermesSessionHost(t *testing.T) *hermesSessionHost {
 		accepted: map[string]messages.Message{}, checkpoints: map[string]executions.Execution{}}
 	owner, err := id.AgentID("browser-agent")
 	hermesSessionCheck(t, err)
-	h.manager, err = browserruntime.New(owner)
+	h.manager, err = commander.NewSessionManager(owner)
 	hermesSessionCheck(t, err)
 	return startHermesSessionHost(h, owner, nil, hermesSessionProfiles(t))
 }
@@ -603,6 +603,22 @@ func TestHermesSessionsFrameworkDispatchReuseAndIsolation(t *testing.T) {
 	}, func(context.Context) error { legacyCalled = true; return nil })
 	if legacyErr == nil || legacyCalled || firstModel.Calls() != 2 {
 		t.Fatal("the same claim mixed legacy and native browser automation")
+	}
+	for _, path := range []string{"python", "source", "lightpanda"} {
+		changed := h.options
+		switch path {
+		case "python":
+			changed.Python += "-changed"
+		case "source":
+			changed.Source += "-changed"
+		case "lightpanda":
+			changed.Executable += "-changed"
+		}
+		called := false
+		view, err := h.manager.RunHermes(action.WithSession(t.Context(), &binding), changed, func(context.Context) error { called = true; return nil })
+		if err == nil || called || view.Reference != binding.Reference || view.State != "connected" || firstModel.Calls() != 2 {
+			t.Fatal("a retained claim changed runtime paths or lost its original browser")
+		}
 	}
 	retainedScope := <-scope
 	if _, err := hermes.Run(retainedScope.ctx, first, nil); err == nil || firstModel.Calls() != 2 {

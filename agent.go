@@ -4,7 +4,7 @@ import (
 	"errors"
 
 	agentactions "github.com/defos-ai/commander-browser-agent/actions"
-	browserruntime "github.com/defos-ai/commander-browser-agent/browser"
+	"github.com/defos-ai/commander-browser-agent/internal/commander"
 	agents "github.com/defos-ai/commander/framework/agent"
 	"github.com/defos-ai/commander/framework/id"
 )
@@ -23,7 +23,7 @@ func NewAgent(config agents.AgentConfig, dependencies agentactions.Dependencies)
 				return nil, err
 			}
 		}
-		provider, err := browserruntime.New(config.ID)
+		provider, err := commander.NewSessionManager(config.ID)
 		if err != nil {
 			return nil, err
 		}

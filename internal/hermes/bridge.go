@@ -58,8 +58,8 @@ type protection struct {
 	Text     string `json:"text"`
 }
 
-// Worker owns one private host bridge and its original creation claim. A lost
-// worker cannot be restarted or rebound; the manager must allocate a new one.
+// Worker owns one private host bridge and its pinned runtime selection. A lost
+// worker cannot be restarted or rebound; the owner must allocate a new one.
 type Worker struct {
 	config Config
 	work   string
@@ -109,7 +109,7 @@ func Start(ctx context.Context, config Config) (*Worker, error) {
 	if err := requireProcessOwnership(); err != nil {
 		return nil, err
 	}
-	if config.Claim.Validate() != nil || !validPath(config.Python, false) ||
+	if !validSessionID(config.SessionID) || !validPath(config.Python, false) ||
 		!validPath(config.Source, true) || !validPath(config.Lightpanda, false) {
 		return nil, ErrUnavailable
 	}
@@ -143,7 +143,7 @@ func Start(ctx context.Context, config Config) (*Worker, error) {
 		return nil, ErrUnavailable
 	}
 	command := exec.Command(config.Python, "-I", filepath.Join(work, "worker.py"),
-		"--source", config.Source, "--session", config.Claim.ID,
+		"--source", config.Source, "--session", config.SessionID,
 		"--lightpanda", config.Lightpanda, "--home", home)
 	command.Dir = work
 	command.Env = []string{
@@ -196,6 +196,21 @@ func newWorker(config Config) *Worker {
 		procDone: make(chan struct{}), readDone: make(chan struct{}), closedAck: make(chan struct{}), closeDone: make(chan struct{})}
 	w.render = textrender.New(lifetime, func() { w.fail(ErrUncertain) })
 	return w
+}
+
+// A session label is an opaque process argument, never an authorization claim.
+// Keep it bounded and unambiguous without imposing a framework UUID policy.
+func validSessionID(value string) bool {
+	if len(value) == 0 || len(value) > 128 {
+		return false
+	}
+	for i, ch := range value {
+		alphanumeric := ch >= 'a' && ch <= 'z' || ch >= 'A' && ch <= 'Z' || ch >= '0' && ch <= '9'
+		if !alphanumeric && (i == 0 || ch != '-' && ch != '_') {
+			return false
+		}
+	}
+	return true
 }
 
 func validPath(path string, directory bool) bool {

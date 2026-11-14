@@ -24,6 +24,7 @@ import (
 	"github.com/defos-ai/commander-browser-agent/actions"
 	browserruntime "github.com/defos-ai/commander-browser-agent/browser"
 	browserscreenshot "github.com/defos-ai/commander-browser-agent/browser/screenshot"
+	"github.com/defos-ai/commander-browser-agent/internal/commander"
 	"github.com/defos-ai/commander-browser-agent/internal/hermes"
 	"github.com/defos-ai/commander-browser-agent/tests/fixtures"
 	"github.com/defos-ai/commander/framework/agent"
@@ -42,11 +43,11 @@ import (
 // workflow separately exercises the default production catalog and its uploads.
 type hermesScreenshot struct {
 	*action.Base
-	manager *browserruntime.Manager
+	manager *commander.SessionManager
 	options browserruntime.HermesOptions
 }
 
-func newHermesScreenshot(manager *browserruntime.Manager) *hermesScreenshot {
+func newHermesScreenshot(manager *commander.SessionManager) *hermesScreenshot {
 	return &hermesScreenshot{Base: action.NewBase(actionmodel.Action{
 		Name: "native-capture", Description: "Capture the retained native fixture.", SessionMode: "use",
 		InputSchema: json.RawMessage(`{"type":"object","additionalProperties":false,"properties":{"viewport":{"type":"string","enum":["desktop","mobile"]}}}`),
@@ -303,12 +304,6 @@ func checkHermesScreenshotScopes(t *testing.T, h *hermesSessionHost, binding ses
 		image, err := browserscreenshot.CaptureHermes(context.WithoutCancel(ctx), 1280, 720)
 		if err == nil || len(image.PNG) != 0 {
 			return errors.New("detached native screenshot retained its private lease")
-		}
-		open := binding
-		open.Mode = sessions.Open
-		image, err = browserscreenshot.CaptureHermes(action.WithSession(ctx, &open), 1280, 720)
-		if err == nil || len(image.PNG) != 0 {
-			return errors.New("native screenshot accepted an open binding")
 		}
 		return nil
 	})

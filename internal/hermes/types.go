@@ -2,18 +2,16 @@
 // implement a model loop or expose a Commander action catalog.
 package hermes
 
-import (
-	"github.com/defos-ai/commander-browser-agent/browser/contracts"
-	"github.com/defos-ai/commander/framework/domain/sessions"
-)
+import "github.com/defos-ai/commander-browser-agent/browser/contracts"
 
-// Config binds one private worker to a framework-issued creation claim.
-// Paths come from trusted runtime discovery, never model arguments.
+// Config selects one private worker's trusted runtime paths and opaque session
+// label. Its owner retains the full creation identity and authorizes access;
+// SessionID itself grants no authority. Paths never come from model arguments.
 type Config struct {
 	Python     string
 	Source     string
 	Lightpanda string
-	Claim      sessions.CreationClaim
+	SessionID  string
 }
 
 // Request describes one execution. Endpoint is the exact selected completion

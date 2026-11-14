@@ -21,18 +21,13 @@ import (
 
 	"github.com/defos-ai/commander-browser-agent/internal/hermes"
 	"github.com/defos-ai/commander-browser-agent/tests/fakes"
-	"github.com/defos-ai/commander/framework/domain/sessions"
 	"github.com/defos-ai/commander/framework/id"
 )
 
 func hermesConfig() hermes.Config {
-	session := id.New()
 	return hermes.Config{
 		Python: "/opt/hermes/.venv/bin/python", Source: "/opt/hermes", Lightpanda: "/usr/local/bin/lightpanda",
-		Claim: sessions.CreationClaim{
-			Reference: sessions.Reference{ID: session, ScopeID: session, OwnerAgentID: "browser-agent-0123abcd"},
-			CommandID: id.New(), OperationID: id.OperationID(), TaskID: id.TaskID(),
-		},
+		SessionID: id.New(),
 	}
 }
 

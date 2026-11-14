@@ -1,4 +1,4 @@
-// Package browser owns process-local browsers bound to Commander sessions.
+// Package browser owns browser runtime processes and scoped execution contexts.
 package browser
 
 import (
@@ -36,7 +36,8 @@ type Options struct {
 	Executable string
 }
 
-func (o Options) validate() error {
+// Validate rejects unsupported engines and incomplete discovered paths.
+func (o Options) Validate() error {
 	if o.Engine != Lightpanda {
 		return errors.New("select lightpanda explicitly; other browser engines are not supported")
 	}
@@ -44,13 +45,6 @@ func (o Options) validate() error {
 		return errors.New("browser executable must be an absolute discovered path")
 	}
 	return nil
-}
-
-func engineLabel(engine Engine) string {
-	if engine == Lightpanda {
-		return "Lightpanda browser session"
-	}
-	return "Browser session"
 }
 
 const startupTimeout = 15 * time.Second
@@ -246,8 +240,7 @@ func awaitEndpoint(ctx context.Context, address string) (string, error) {
 	}
 }
 
-func (r *browserRuntime) Context() context.Context { return r.page }
-func (r *browserRuntime) Done() <-chan struct{}    { return r.ctx.Done() }
+func (r *browserRuntime) Done() <-chan struct{} { return r.ctx.Done() }
 
 func (r *browserRuntime) Verify(ctx context.Context) error {
 	if r.ctx.Err() != nil {

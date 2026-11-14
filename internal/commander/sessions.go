@@ -1,5 +1,4 @@
-// Package browser owns browser state for one agent process.
-package browser
+package commander
 
 import (
 	"context"
@@ -8,23 +7,16 @@ import (
 	"sync"
 	"time"
 
+	browserruntime "github.com/defos-ai/commander-browser-agent/browser"
 	"github.com/defos-ai/commander-browser-agent/internal/sensitive"
 	"github.com/defos-ai/commander/framework/agent/action"
 	"github.com/defos-ai/commander/framework/domain/sessions"
 	"github.com/defos-ai/commander/framework/id"
 )
 
-// sessionRuntime is retained independently of an individual action. The two
-// adapters have separate automation connections and can never share a claim.
-type sessionRuntime interface {
-	Done() <-chan struct{}
-	Verify(context.Context) error
-	Close() error
-}
-
-// Manager implements Commander session inventory and controls. Runtime work
+// SessionManager implements Commander session inventory and controls. Runtime work
 // starts only inside session callbacks after the framework prepares identity.
-type Manager struct {
+type SessionManager struct {
 	owner     string
 	mu        sync.Mutex
 	items     map[string]*entry
@@ -37,16 +29,16 @@ type Manager struct {
 type entry struct {
 	claim         sessions.CreationClaim
 	view          sessions.Session
-	engine        Engine
+	engine        browserruntime.Engine
 	backend       string
-	resource      sessionRuntime
-	hermesOptions HermesOptions
+	resource      browserruntime.Runtime
+	hermesOptions browserruntime.HermesOptions
 	gate          chan struct{}
 	stopping      chan struct{}
 	lifetime      context.Context
 	cancel        context.CancelFunc
 	startDone     chan struct{}
-	browser       *browserRuntime
+	browser       browserruntime.Runtime
 	closing       bool
 	explicit      bool
 	cleanupDone   chan struct{}
@@ -55,19 +47,19 @@ type entry struct {
 	values        *sensitive.Values
 }
 
-var _ sessions.Provider = (*Manager)(nil)
+var _ sessions.Provider = (*SessionManager)(nil)
 
-func New(ownerAgentID string) (*Manager, error) {
+func NewSessionManager(ownerAgentID string) (*SessionManager, error) {
 	if !id.ValidAgent(ownerAgentID) {
 		return nil, errors.New("browser sessions require an exact owning agent ID")
 	}
-	return &Manager{owner: ownerAgentID, items: map[string]*entry{}, changes: make(chan struct{}, 1)}, nil
+	return &SessionManager{owner: ownerAgentID, items: map[string]*entry{}, changes: make(chan struct{}, 1)}, nil
 }
 
 // Prepare retains an unstarted framework-issued claim. Commander owns scope
 // admission; distinct identities remain independent even with the same ScopeID.
 // Closed identities remain tombstoned for this manager's lifetime.
-func (m *Manager) Prepare(ctx context.Context, claim sessions.CreationClaim) error {
+func (m *SessionManager) Prepare(ctx context.Context, claim sessions.CreationClaim) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -80,7 +72,7 @@ func (m *Manager) Prepare(ctx context.Context, claim sessions.CreationClaim) err
 	return err
 }
 
-func (m *Manager) prepareLocked(claim sessions.CreationClaim) (*entry, error) {
+func (m *SessionManager) prepareLocked(claim sessions.CreationClaim) (*entry, error) {
 	if claim.OwnerAgentID != m.owner {
 		return nil, sessions.ErrConflict
 	}
@@ -104,7 +96,7 @@ func (m *Manager) prepareLocked(claim sessions.CreationClaim) (*entry, error) {
 
 // Snapshot returns public metadata only, without probing or exposing browser
 // endpoints, profile paths, page contents, cookies or credentials.
-func (m *Manager) Snapshot() []sessions.Session {
+func (m *SessionManager) Snapshot() []sessions.Session {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	items := make([]sessions.Session, 0, len(m.items))
@@ -114,11 +106,11 @@ func (m *Manager) Snapshot() []sessions.Session {
 	return items
 }
 
-func (m *Manager) Changes() <-chan struct{} { return m.changes }
+func (m *SessionManager) Changes() <-chan struct{} { return m.changes }
 
 // WithSession binds preparation work to an already prepared identity without
 // starting a browser. Closing the session also cancels questions or secret waits.
-func (m *Manager) WithSession(ctx context.Context, work func(context.Context) error) error {
+func (m *SessionManager) WithSession(ctx context.Context, work func(context.Context) error) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -181,11 +173,11 @@ func (m *Manager) WithSession(ctx context.Context, work func(context.Context) er
 
 // Run uses the exact framework binding and an explicitly selected engine.
 // Action cancellation interrupts this work without closing a connected session.
-func (m *Manager) Run(ctx context.Context, options Options, work func(context.Context) error) (view sessions.Session, runErr error) {
+func (m *SessionManager) Run(ctx context.Context, options browserruntime.Options, work func(context.Context) error) (view sessions.Session, runErr error) {
 	if err := ctx.Err(); err != nil {
 		return view, err
 	}
-	if err := options.validate(); err != nil {
+	if err := options.Validate(); err != nil {
 		return view, err
 	}
 	if work == nil {
@@ -234,12 +226,9 @@ func (m *Manager) Run(ctx context.Context, options Options, work func(context.Co
 	}
 	workCtx, cancel := context.WithCancel(ctx)
 	workCtx = sensitive.WithValues(workCtx, item.values)
-	workCtx = withRendererRuntime(workCtx, browser)
-	stopBrowser := context.AfterFunc(browser.Context(), cancel)
 	stopLifetime := context.AfterFunc(item.lifetime, cancel)
-	defer func() { stopBrowser(); stopLifetime(); cancel() }()
-	merged := browserContext{Context: workCtx, browser: context.WithoutCancel(browser.Context())}
-	runErr = work(merged)
+	defer func() { stopLifetime(); cancel() }()
+	runErr = browser.WithContext(workCtx, work)
 	if ctx.Err() != nil {
 		runErr = ctx.Err()
 	} else if runErr == nil {
@@ -248,21 +237,7 @@ func (m *Manager) Run(ctx context.Context, options Options, work func(context.Co
 	return view, runErr
 }
 
-// The browser context supplies chromedp's private target key; execution values
-// remain available from the action context. Cancellation belongs to this call.
-type browserContext struct {
-	context.Context
-	browser context.Context
-}
-
-func (ctx browserContext) Value(key any) any {
-	if value := ctx.browser.Value(key); value != nil {
-		return value
-	}
-	return ctx.Context.Value(key)
-}
-
-func (m *Manager) browser(ctx context.Context, item *entry, mode sessions.Mode, options Options) (*browserRuntime, error) {
+func (m *SessionManager) browser(ctx context.Context, item *entry, mode sessions.Mode, options browserruntime.Options) (browserruntime.Runtime, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -280,7 +255,7 @@ func (m *Manager) browser(ctx context.Context, item *entry, mode sessions.Mode, 
 		return nil, errors.New("browser engine differs from the session's engine")
 	}
 	if item.browser != nil {
-		if item.view.State != "connected" || item.browser.Context().Err() != nil {
+		if item.view.State != "connected" || runtimeStopped(item.browser) {
 			m.mu.Unlock()
 			return nil, errors.New("browser session is not connected")
 		}
@@ -303,7 +278,7 @@ func (m *Manager) browser(ctx context.Context, item *entry, mode sessions.Mode, 
 	m.mu.Unlock()
 
 	stopStartup := context.AfterFunc(ctx, item.cancel)
-	browser, err := launchBrowser(item.lifetime, options)
+	browser, err := browserruntime.Start(item.lifetime, options)
 	stopStartup()
 	m.mu.Lock()
 	item.browser = browser
@@ -337,7 +312,7 @@ func (m *Manager) browser(ctx context.Context, item *entry, mode sessions.Mode, 
 	return browser, nil
 }
 
-func (m *Manager) monitor(item *entry, browser sessionRuntime) {
+func (m *SessionManager) monitor(item *entry, browser browserruntime.Runtime) {
 	<-browser.Done()
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -348,7 +323,7 @@ func (m *Manager) monitor(item *entry, browser sessionRuntime) {
 	}
 }
 
-func (m *Manager) Control(ctx context.Context, request sessions.Control) (sessions.Session, error) {
+func (m *SessionManager) Control(ctx context.Context, request sessions.Control) (sessions.Session, error) {
 	if err := ctx.Err(); err != nil {
 		return sessions.Session{}, err
 	}
@@ -453,7 +428,7 @@ func (m *Manager) Control(ctx context.Context, request sessions.Control) (sessio
 
 // cleanupLocked revokes access immediately. Resource cleanup continues if a
 // control's waiting context ends; only confirmed explicit closure reports closed.
-func (m *Manager) cleanupLocked(item *entry, explicit bool) <-chan struct{} {
+func (m *SessionManager) cleanupLocked(item *entry, explicit bool) <-chan struct{} {
 	if explicit {
 		item.explicit = true
 	}
@@ -503,7 +478,7 @@ func (m *Manager) cleanupLocked(item *entry, explicit bool) <-chan struct{} {
 	return done
 }
 
-func (m *Manager) cleanedLocked(item *entry, err error) {
+func (m *SessionManager) cleanedLocked(item *entry, err error) {
 	item.cleaned, item.cleanupErr, item.view.Busy, item.view.VerifiedAt = true, err, false, nil
 	if err != nil {
 		item.view.State, item.view.Reason = "lost", "Browser cleanup could not be confirmed"
@@ -519,7 +494,7 @@ func (m *Manager) cleanedLocked(item *entry, err error) {
 }
 
 // Close stops owned browsers without publishing explicit-close evidence.
-func (m *Manager) Close() error {
+func (m *SessionManager) Close() error {
 	m.closeOnce.Do(func() {
 		m.mu.Lock()
 		m.stopped = true
@@ -560,7 +535,7 @@ func (m *Manager) Close() error {
 	return m.closeErr
 }
 
-func (m *Manager) availableLocked(item *entry) error {
+func (m *SessionManager) availableLocked(item *entry) error {
 	if item.view.State == "closed" {
 		return sessions.ErrSessionClosed
 	}
@@ -576,15 +551,31 @@ func (m *Manager) availableLocked(item *entry) error {
 	return nil
 }
 
-func (m *Manager) touchLocked(item *entry) {
+func (m *SessionManager) touchLocked(item *entry) {
 	item.view.Revision++
 	item.view.UpdatedAt = time.Now().UTC()
 	m.notifyLocked()
 }
 
-func (m *Manager) notifyLocked() {
+func (m *SessionManager) notifyLocked() {
 	select {
 	case m.changes <- struct{}{}:
 	default:
 	}
+}
+
+func runtimeStopped(runtime browserruntime.Runtime) bool {
+	select {
+	case <-runtime.Done():
+		return true
+	default:
+		return false
+	}
+}
+
+func engineLabel(engine browserruntime.Engine) string {
+	if engine == browserruntime.Lightpanda {
+		return "Lightpanda browser session"
+	}
+	return "Browser session"
 }
