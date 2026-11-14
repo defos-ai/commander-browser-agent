@@ -1,3 +1,4 @@
+// Package lightpanda adapts deterministic work to retained browser sessions.
 package lightpanda
 
 import (

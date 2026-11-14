@@ -76,7 +76,7 @@ func (a *Login) Discover(ctx context.Context, env environment.Environment, scope
 		a.SetUnavailable("The host must provide its browser factory", actionmodel.Requirement{Kind: actionmodel.ConfigurationRequirement, Name: "browser-factory"})
 		return action.Unavailable, nil
 	}
-	configuration, status, err := discoverRuntime(ctx, a.Base, a.runner, env, scope)
+	configuration, status, err := commander.DiscoverRuntime(ctx, a.Base, a.runner, env, scope)
 	if err == nil && status == action.Ready {
 		a.configuration.Store(configuration)
 	}

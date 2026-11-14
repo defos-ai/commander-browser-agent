@@ -1,18 +1,19 @@
-package actions
+package commander
 
 import (
 	"context"
 	"errors"
 
 	browserruntime "github.com/defos-ai/commander-browser-agent/browser"
-	hermesruntime "github.com/defos-ai/commander-browser-agent/browser/hermes"
-	"github.com/defos-ai/commander-browser-agent/browser/lightpanda"
+	hermesruntime "github.com/defos-ai/commander-browser-agent/internal/commander/discovery/hermes"
+	"github.com/defos-ai/commander-browser-agent/internal/commander/discovery/lightpanda"
 	"github.com/defos-ai/commander/framework/agent/action"
 	"github.com/defos-ai/commander/framework/agent/environment"
 	actionmodel "github.com/defos-ai/commander/framework/domain/actions"
 )
 
-func discoverRuntime(ctx context.Context, base *action.Base, runner BrowserRunner, env environment.Environment, scope *environment.DiscoveryScope) (*browserruntime.HermesOptions, action.Status, error) {
+// DiscoverRuntime checks host dependencies without opening a browser or agent.
+func DiscoverRuntime(ctx context.Context, base *action.Base, runner HermesBrowseRunner, env environment.Environment, scope *environment.DiscoveryScope) (*browserruntime.HermesOptions, action.Status, error) {
 	base.SetStatus(action.Unknown)
 	if ctx.Err() != nil {
 		return nil, action.Unknown, errors.Join(ctx.Err(), context.Cause(ctx))

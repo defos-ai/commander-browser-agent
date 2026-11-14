@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	hermesruntime "github.com/defos-ai/commander-browser-agent/browser/hermes"
+	hermesruntime "github.com/defos-ai/commander-browser-agent/internal/commander/discovery/hermes"
 	"github.com/defos-ai/commander/framework/agent/environment"
 )
 

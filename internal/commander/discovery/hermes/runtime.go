@@ -1,4 +1,4 @@
-// Package hermes adapts the pinned native browser agent and discovers its runtime.
+// Package hermes discovers the pinned native browser agent runtime for Commander.
 // Discovery starts no agent, model request or browser session.
 package hermes
 

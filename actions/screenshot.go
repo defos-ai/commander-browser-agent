@@ -10,6 +10,7 @@ import (
 	browserruntime "github.com/defos-ai/commander-browser-agent/browser"
 	"github.com/defos-ai/commander-browser-agent/browser/contracts"
 	browserscreenshot "github.com/defos-ai/commander-browser-agent/browser/screenshot"
+	"github.com/defos-ai/commander-browser-agent/internal/commander"
 	"github.com/defos-ai/commander/framework/agent/action"
 	"github.com/defos-ai/commander/framework/agent/environment"
 	actionmodel "github.com/defos-ai/commander/framework/domain/actions"
@@ -74,7 +75,7 @@ func (a *Screenshot) Discover(ctx context.Context, env environment.Environment, 
 		a.SetUnavailable("The host must provide its browser factory", actionmodel.Requirement{Kind: actionmodel.ConfigurationRequirement, Name: "browser-factory"})
 		return action.Unavailable, nil
 	}
-	configuration, status, err := discoverRuntime(ctx, a.Base, a.runner, env, scope)
+	configuration, status, err := commander.DiscoverRuntime(ctx, a.Base, a.runner, env, scope)
 	if err == nil && status == action.Ready {
 		a.configuration.Store(configuration)
 	}

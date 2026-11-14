@@ -1,4 +1,4 @@
-// Package lightpanda adapts retained sessions and discovers the supported executable.
+// Package lightpanda discovers the supported executable through Commander environments.
 package lightpanda
 
 import (

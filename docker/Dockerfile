@@ -53,7 +53,7 @@ COPY --from=build /out/commander-browser-agent /usr/local/bin/commander-browser-
 COPY --from=build /out/lightpanda /usr/local/bin/lightpanda
 COPY third_party/lightpanda/ /usr/share/doc/lightpanda/
 COPY third_party/hermes/ /usr/share/doc/hermes/
-COPY browser/hermes/check.py /usr/local/lib/commander-browser/hermes/check.py
+COPY internal/commander/discovery/hermes/check.py /usr/local/lib/commander-browser/hermes/check.py
 COPY internal/hermes/*.py /usr/local/lib/commander-browser/hermes/
 COPY internal/hermes/plugin/ /usr/local/lib/commander-browser/hermes/plugin/
 ENV HOME=/home/commander \

@@ -65,11 +65,12 @@
   separate processes. Each Commander session owns its Hermes worker and browser
   state inside that container. No Docker daemon access, image selection or
   additional session containers are required by the agent.
-- Default action discovery checks the local [Hermes](browser/hermes/) runtime
-  and [Lightpanda](browser/lightpanda/) executable through the environment
+- Default action discovery checks the local
+  [Hermes](internal/commander/discovery/hermes/) runtime and
+  [Lightpanda](internal/commander/discovery/lightpanda/) executable through the environment
   abstraction. Honor executable scopes for both, return fresh zero configuration
   on failure, and never start an agent, browser or model request during discovery.
-- [Lightpanda discovery](browser/lightpanda/) uses the environment abstraction.
+- [Lightpanda discovery](internal/commander/discovery/lightpanda/) uses the environment abstraction.
   `LIGHTPANDA_PATH` is absolute; explicit discovery scope wins. Return fresh
   configuration, check the exact 1.0.2 version with a bounded context, and report
   structured readiness requirements without echoing subprocess output. Never
@@ -107,7 +108,7 @@
   identity and imports using a temporary private home, without starting an
   agent, browser or model request. Native Go host binaries require those packaged
   dependencies installed independently; they do not embed the Python runtime.
-- [Hermes discovery](browser/hermes/) checks `HERMES_INSTALL_ROOT` (default
+- [Hermes discovery](internal/commander/discovery/hermes/) checks `HERMES_INSTALL_ROOT` (default
   `/opt/hermes`) through the environment abstraction. The package directory is
   trusted absolute host configuration; derive `.venv/bin/python` and preserve
   that invocation path, since resolving its symlink loses virtualenv identity.
@@ -125,6 +126,9 @@
   other caught runtime-activity attempts still refuse readiness.
   The audit hook is not an OS sandbox. Default actions use these same offline
   checks before reporting readiness.
+  The checker source lives beside its Go embed in
+  [internal/commander/discovery/hermes/](internal/commander/discovery/hermes/);
+  Docker installs those same bytes at the unchanged offline readiness path.
 - Local validation must stay within a combined 4 CPUs and 4,000,000,000 bytes
   of RAM, with swap disabled. Prefer smaller limits when practical. Use a
   resource-limited Docker-container Buildx builder for image builds and stop it
@@ -383,10 +387,14 @@
   out of results, logs and artifacts. Each wait is bounded to three minutes and
   the browse wall deadline still wins. In Commander v0.4.1, canceling a waiter
   does not retract its saved pending question; do not promise automatic cleanup.
-- [internal/commander/](internal/commander/) owns model setup, clarification,
-  managed login secret delivery and checkpoint orchestration. These are private
+- [internal/commander/](internal/commander/) owns runtime readiness, model setup,
+  clarification, managed login secret delivery and checkpoint orchestration. These are private
   integration details, not public library contracts or additional actions.
-  Actions retain discovery, validation and result/artifact handling. Each browse
+  Actions retain discovery entry points, validation and result/artifact handling.
+  [discovery.go](internal/commander/discovery.go) checks the shared session runner,
+  both runtime prerequisites and actionable readiness requirements without
+  constructing a browser or agent. Keep Commander environment and requirement
+  types in these adapters rather than the browser implementation packages. Each browse
   action owns one setup instance; preserve its serialization and exact creation
   claims. [internal/browsing/](internal/browsing/) contains only shared URL-origin,
   credential-in-URL and active-time budget helpers without Commander imports.

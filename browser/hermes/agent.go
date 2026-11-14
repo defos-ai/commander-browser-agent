@@ -1,3 +1,4 @@
+// Package hermes adapts the pinned native browser agent to scoped capabilities.
 package hermes
 
 import (
