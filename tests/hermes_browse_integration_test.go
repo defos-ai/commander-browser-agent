@@ -17,7 +17,7 @@ import (
 
 	"github.com/defos-ai/commander-browser-agent/browser/contracts"
 	hermesagent "github.com/defos-ai/commander-browser-agent/browser/hermes"
-	"github.com/defos-ai/commander-browser-agent/internal/browsing"
+	"github.com/defos-ai/commander-browser-agent/internal/commander"
 	"github.com/defos-ai/commander-browser-agent/tests/fakes"
 	"github.com/defos-ai/commander/framework/agent/action"
 	controllerevents "github.com/defos-ai/commander/framework/comms/clients/controller/events"
@@ -38,7 +38,7 @@ type hermesBrowseFixture struct {
 func newHermesBrowseFixture(h *hermesSessionHost) action.Executor {
 	return &hermesBrowseFixture{Base: action.NewBase(actionmodel.Action{
 		Name: "native-browse", Description: "Exercise the native browse contract.", SessionMode: "open",
-		InputSchema: json.RawMessage(browsing.HermesBrowseInputSchema), OutputSchema: json.RawMessage(browsing.HermesBrowseOutputSchema),
+		InputSchema: json.RawMessage(commander.HermesBrowseInputSchema), OutputSchema: json.RawMessage(commander.HermesBrowseOutputSchema),
 	}), host: h}
 }
 
@@ -53,7 +53,7 @@ func (fixture *hermesBrowseFixture) Run(ctx context.Context, raw json.RawMessage
 	return result, err
 }
 
-func (h *hermesSessionHost) nativeBrowseTask(parent *operations.Task, input browsing.HermesBrowseInput) operations.Task {
+func (h *hermesSessionHost) nativeBrowseTask(parent *operations.Task, input commander.HermesBrowseInput) operations.Task {
 	h.t.Helper()
 	raw, err := json.Marshal(input)
 	hermesSessionCheck(h.t, err)
@@ -128,7 +128,7 @@ func TestHermesBrowseNativeContractDispatchReuseAndWallTime(t *testing.T) {
 		fixture.returned = returned
 		return fixture
 	})
-	input := browsing.HermesBrowseInput{Objective: "Read the study and report its sample count.", URL: site.URL, MaxIterations: 4, MaxTokensPerResponse: 512, TimeoutSeconds: 30}
+	input := commander.HermesBrowseInput{Objective: "Read the study and report its sample count.", URL: site.URL, MaxIterations: 4, MaxTokensPerResponse: 512, TimeoutSeconds: 30}
 	root := h.nativeBrowseTask(nil, input)
 	binding := h.binding(root)
 	command := h.dispatch(root, &binding)
@@ -147,7 +147,7 @@ func TestHermesBrowseNativeContractDispatchReuseAndWallTime(t *testing.T) {
 	h.replyCheckpoint(final, h.persistCheckpoint(final))
 	first, ok := h.screenshotResult(command)
 	<-returned
-	var output browsing.HermesBrowseOutput
+	var output commander.HermesBrowseOutput
 	if !ok || json.Unmarshal(first.Output, &output) != nil || output.Validate() != nil || output.Status != "completed" || output.ModelRequests != 3 ||
 		!strings.Contains(output.Text, "42 samples") || !strings.Contains(output.Text, "[REDACTED]") || bytes.Contains(first.Output, []byte(key)) ||
 		first.Session == nil || first.Session.Reference != binding.Reference || len(first.Artifacts) != 1 || len(first.Artifacts[0].Files) != 1 ||

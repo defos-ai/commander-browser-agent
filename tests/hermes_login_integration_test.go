@@ -12,7 +12,7 @@ import (
 
 	browserruntime "github.com/defos-ai/commander-browser-agent/browser"
 	browserlogin "github.com/defos-ai/commander-browser-agent/browser/login"
-	"github.com/defos-ai/commander-browser-agent/internal/browsing"
+	"github.com/defos-ai/commander-browser-agent/internal/commander"
 	"github.com/defos-ai/commander-browser-agent/internal/hermes"
 	"github.com/defos-ai/commander-browser-agent/tests/fakes"
 	"github.com/defos-ai/commander-browser-agent/tests/fixtures"
@@ -44,11 +44,11 @@ func runHermesLoginFixture(ctx context.Context, fixture hermesLoginFixture) (res
 	if fixture.outcome != nil {
 		defer func() { fixture.outcome <- result }()
 	}
-	username, password, err := browsing.LoginSecretNames(fixture.request.URL, fixture.profile)
+	username, password, err := commander.LoginSecretNames(fixture.request.URL, fixture.profile)
 	if err != nil {
 		return result, err
 	}
-	codeName, err := browsing.LoginCodeSecretName(fixture.request.URL, fixture.profile)
+	codeName, err := commander.LoginCodeSecretName(fixture.request.URL, fixture.profile)
 	if err != nil {
 		return result, err
 	}
@@ -77,7 +77,7 @@ func runHermesLoginFixture(ctx context.Context, fixture hermesLoginFixture) (res
 
 func (h *hermesSessionHost) loginCredentials(command messages.Message, site *fixtures.BrowserSite, account int) {
 	h.t.Helper()
-	user, pass, err := browsing.LoginSecretNames(site.URL, site.Accounts[account].Profile)
+	user, pass, err := commander.LoginSecretNames(site.URL, site.Accounts[account].Profile)
 	hermesSessionCheck(h.t, err)
 	h.deliverModelKey(command, user, site.Accounts[account].Username, 1)
 	h.deliverModelKey(command, pass, site.Accounts[account].Password, 1)
@@ -92,7 +92,7 @@ func (h *hermesSessionHost) loginCodeRequest(command messages.Message, site *fix
 	request, err := controllerevents.DecodeSecretSyncRequested(message)
 	hermesSessionCheck(h.t, err)
 	defer clear(request.Default)
-	name, err := browsing.LoginCodeSecretName(site.URL, site.Accounts[0].Profile)
+	name, err := commander.LoginCodeSecretName(site.URL, site.Accounts[0].Profile)
 	hermesSessionCheck(h.t, err)
 	if request.Request.Key.Name != name || request.Request.EffectiveType() != secrets.SecretTransient || request.Default != nil {
 		h.t.Fatal("login code request lost its origin/profile purpose or transient type")

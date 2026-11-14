@@ -1,4 +1,4 @@
-package browsing
+package commander
 
 import (
 	"errors"

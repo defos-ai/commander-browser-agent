@@ -13,6 +13,7 @@ import (
 	"github.com/defos-ai/commander-browser-agent/browser/contracts"
 	browserlogin "github.com/defos-ai/commander-browser-agent/browser/login"
 	"github.com/defos-ai/commander-browser-agent/internal/browsing"
+	"github.com/defos-ai/commander-browser-agent/internal/commander"
 	"github.com/defos-ai/commander-browser-agent/internal/sensitive"
 	"github.com/defos-ai/commander/framework/agent/action"
 	"github.com/defos-ai/commander/framework/agent/environment"
@@ -107,24 +108,15 @@ func (a *Login) Run(ctx context.Context, raw json.RawMessage) (result action.Res
 		return action.Result{}, err
 	}
 	setup, stopSetup := context.WithTimeout(ctx, 10*time.Minute)
-	var checkpoints *browsing.HermesCheckpoints
+	var checkpoints *commander.HermesCheckpoints
 	err := a.runner.WithSession(setup, func(ctx context.Context) error {
 		var err error
-		checkpoints, err = browsing.NewHermesCheckpoints(ctx, LoginName)
+		checkpoints, err = commander.NewHermesCheckpoints(ctx, LoginName)
 		if err != nil {
 			return err
 		}
-		if input.CredentialProfile == "" {
-			question, err := action.Question(ctx, "browser_login_profile", "Which non-secret credential profile should this login use? Enter a lowercase alias such as work or personal, not a username, password or verification code.")
-			if err != nil {
-				return err
-			}
-			input.CredentialProfile = strings.TrimSpace(question.Answer)
-		}
-		if !browsing.ValidLoginProfile(input.CredentialProfile) {
-			return errors.New("login credential_profile must be a non-secret lowercase alias of at most 32 characters")
-		}
-		return nil
+		input.CredentialProfile, err = commander.ResolveLoginProfile(ctx, input.CredentialProfile)
+		return err
 	})
 	if setup.Err() != nil {
 		err = errors.Join(err, setup.Err(), context.Cause(setup))
@@ -133,11 +125,11 @@ func (a *Login) Run(ctx context.Context, raw json.RawMessage) (result action.Res
 	if err != nil {
 		return action.Result{}, err
 	}
-	usernameName, passwordName, err := browsing.LoginSecretNames(input.URL, input.CredentialProfile)
+	usernameName, passwordName, err := commander.LoginSecretNames(input.URL, input.CredentialProfile)
 	if err != nil {
 		return action.Result{}, err
 	}
-	codeName, err := browsing.LoginCodeSecretName(input.URL, input.CredentialProfile)
+	codeName, err := commander.LoginCodeSecretName(input.URL, input.CredentialProfile)
 	if err != nil {
 		return action.Result{}, err
 	}
@@ -147,33 +139,13 @@ func (a *Login) Run(ctx context.Context, raw json.RawMessage) (result action.Res
 		return action.Result{}, err
 	}
 	if err := a.runner.WithSession(budget.Context(), func(ctx context.Context) error {
-		return checkpoints.Start(ctx, browsing.HermesCheckpointLimits{TimeoutSeconds: input.TimeoutSeconds})
+		return checkpoints.Start(ctx, commander.HermesCheckpointLimits{TimeoutSeconds: input.TimeoutSeconds})
 	}); err != nil {
 		return action.Result{}, loginActionError(budget.Context(), err)
 	}
 	var outcome contracts.LoginResult
 	var snapshot sessions.Session
 	snapshot, runErr = a.runner.RunHermes(budget.Context(), *configuration, func(ctx context.Context) error {
-		request := func(ctx context.Context, name string, secretType action.SecretType) ([]byte, error) {
-			budget.Pause()
-			defer budget.Resume()
-			waiting, stop := context.WithTimeout(ctx, 3*time.Minute)
-			defer stop()
-			if secretType == action.SecretTransient {
-				if err := action.Log(waiting, "Waiting for a one-time login code"); err != nil {
-					return nil, err
-				}
-				value, err := action.RequestTransientSecret(waiting, name)
-				// Request TTL/withdrawal can end before the action's wait. Keep a
-				// live session available for explicit continuation in that case.
-				if err != nil && waiting.Err() == nil {
-					clear(value)
-					return nil, action.ErrSecretUnavailable
-				}
-				return value, err
-			}
-			return action.RequestReusableSecret(waiting, name)
-		}
 		var err error
 		var page contracts.Browser
 		page, err = a.browserFactory(ctx)
@@ -185,23 +157,7 @@ func (a *Login) Run(ctx context.Context, raw json.RawMessage) (result action.Res
 		}
 		outcome, err = page.Login(ctx, contracts.LoginRequest{
 			URL: input.URL, VerificationURL: input.VerificationURL, ExpectedText: input.ExpectedText,
-		}, contracts.CredentialSource{
-			OneTimeCode: func(ctx context.Context) ([]byte, error) {
-				return request(ctx, codeName, action.SecretTransient)
-			},
-			Credentials: func(ctx context.Context) (contracts.Credentials, error) {
-				username, err := request(ctx, usernameName, action.SecretReusable)
-				if err != nil {
-					return contracts.Credentials{}, err
-				}
-				password, err := request(ctx, passwordName, action.SecretReusable)
-				if err != nil {
-					clear(username)
-					return contracts.Credentials{}, err
-				}
-				return contracts.Credentials{Username: username, Password: password}, nil
-			},
-		})
+		}, commander.LoginCredentialSource(budget, usernameName, passwordName, codeName))
 		return err
 	})
 	result = action.Result{Session: &snapshot}
@@ -266,7 +222,7 @@ func (input LoginInput) validate() error {
 	if !utf8.ValidString(input.ExpectedText) || strings.TrimSpace(input.ExpectedText) == "" || len(input.ExpectedText) > 256 || strings.ContainsRune(input.ExpectedText, '\x00') {
 		return errors.New("expected_text must be a non-secret verification marker of at most 256 UTF-8 bytes")
 	}
-	if input.CredentialProfile != "" && !browsing.ValidLoginProfile(input.CredentialProfile) {
+	if input.CredentialProfile != "" && !commander.ValidLoginProfile(input.CredentialProfile) {
 		return errors.New("credential_profile must be a lowercase non-secret alias of at most 32 characters")
 	}
 	if input.TimeoutSeconds < 5 || input.TimeoutSeconds > 180 {

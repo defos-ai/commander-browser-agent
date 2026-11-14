@@ -134,9 +134,9 @@
 
 - [browser/contracts/](browser/contracts/) defines the Commander-independent
   `BrowserAgent`, `Browser`, request/result types and hooks. The separate leaf
-  package avoids cycles while the existing session manager and Commander
-  orchestration are moved in later refactoring steps. Keep model keys outside
-  browse requests/hooks; Go-only factory configuration and deterministic login
+  package avoids cycles while the existing session manager is moved in later
+  refactoring steps. Keep model keys outside browse requests/hooks; Go-only
+  factory configuration and deterministic login
   credential callbacks retain explicit buffer ownership and safe formatting.
 - [cli/factory.go](cli/factory.go) supplies `actions.Dependencies` for Hermes reasoning
   and retained Lightpanda login/screenshots. Actions receive factories rather
@@ -242,8 +242,8 @@
   Do not add a second reasoning loop, fork upstream, parse terminal traces, or
   restore the discarded evaluation files.
 - The public native browse contract is defined in
-  [internal/browsing/hermes_contract.go](internal/browsing/hermes_contract.go)
-  and [hermes_browse.go](internal/browsing/hermes_browse.go). It reports protected
+  [internal/commander/browse_contract.go](internal/commander/browse_contract.go)
+  and [browse.go](internal/commander/browse.go). It reports protected
   final text, runtime status and Hermes's `api_calls` counter, which can omit
   internal retries. Do not synthesize typed findings, grounded evidence,
   `final_url`, browser-operation counts or actual token/cost usage. The starting
@@ -319,12 +319,12 @@
   [ToolSession](https://github.com/lightpanda-io/browser/blob/c5f7bb29b127040c899d4e181b5709f76fc71a6f/src/ToolSession.zig),
   [Browser Use session](https://github.com/browser-use/browser-use/blob/2cc71890e65056b67fdb29d98bb407749c15bb08/browser_use/browser/session.py).
 - Model setup follows provider → exact model ID/version → provider key.
-  [internal/browsing/setup.go](internal/browsing/setup.go) uses `action.Question` for
+  [internal/commander/setup.go](internal/commander/setup.go) uses `action.Question` for
   non-secret choices, with stable keys and at most four options. Commander owns
   operator-first waiting and model eligibility; never have the unconfigured
   browser model answer its own setup. Custom endpoints are a further non-secret
   question, never a secret request. Do not fetch a live model catalog before keys.
-- [internal/browsing/hermes.go](internal/browsing/hermes.go) uses the same setup
+- [internal/commander/model.go](internal/commander/model.go) uses the same setup
   cache and creation claims. Its native path offers OpenAI and explicitly
   selected Other only; reject unverified profiles before requesting credentials.
   Keep the exact selected endpoint for both fixed transport routing and custom
@@ -338,7 +338,7 @@
   and Hermes, clears stale state, and never makes model network calls, asks
   questions or requests secrets. Require HTTPS except local HTTP; reject embedded
   credentials, URL query/fragment and redirects.
-- [Model configuration](internal/browsing/model_config.go) binds OpenAI
+- [Model configuration](internal/commander/model_config.go) binds OpenAI
   to its fixed endpoint and managed-secret name matching Playground. Do not import
   Commander apps. Always use `action.RequestReusableSecret` for the selected provider's
   canonical secret name. Other uses only the endpoint-bound managed name from
@@ -375,10 +375,14 @@
   out of results, logs and artifacts. Each wait is bounded to three minutes and
   the browse wall deadline still wins. In Commander v0.4.1, canceling a waiter
   does not retract its saved pending question; do not promise automatic cleanup.
-- Keep non-action setup and active-time budget helpers under
-  [internal/browsing/](internal/browsing/). The action owns one setup instance and
-  delegates model/session selection to it; do not expose these helpers as actions
-  or public package APIs. Preserve setup serialization and exact creation claims.
+- [internal/commander/](internal/commander/) owns model setup, clarification,
+  managed login secret delivery and checkpoint orchestration. These are private
+  integration details, not public library contracts or additional actions.
+  Actions retain discovery, validation and result/artifact handling. Each browse
+  action owns one setup instance; preserve its serialization and exact creation
+  claims. [internal/browsing/](internal/browsing/) contains only shared URL-origin,
+  credential-in-URL and active-time budget helpers without Commander imports.
+  Browser implementations must not depend on the Commander orchestration package.
 
 ## Managed login
 
@@ -407,6 +411,11 @@
   `verification_url` and bounded non-secret `expected_text`. `verified` means that
   configured check matched, including existing state without new submission; do
   not infer universal authentication/account identity from HTTP 200 or a cookie.
+- [internal/commander/login.go](internal/commander/login.go) owns the non-secret
+  profile question and managed credential callbacks. Preserve login's active-time
+  pause during bounded secret waits and cancellation/expiry classification.
+  Clear every owned value returned with an error, including partial credential
+  pairs and transient codes, before returning it to the deterministic executor.
 - Bind a lowercase non-secret credential profile to the canonical login origin
   (scheme/hostname/effective port). HTTPS is required except loopback HTTP.
   Derive stable, purpose-specific username/password names from origin and profile;
@@ -521,7 +530,7 @@
 
 ## Browsing checkpoints
 
-- [internal/browsing/hermes_checkpoint.go](internal/browsing/hermes_checkpoint.go)
+- [internal/commander/checkpoints.go](internal/commander/checkpoints.go)
   records native execution facts. Load through
   `Manager.WithSession` before model setup, secrets or worker startup; save the
   start fence before `RunHermes`, including deterministic login bootstrap. Keep

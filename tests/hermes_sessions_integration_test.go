@@ -24,7 +24,7 @@ import (
 	hermesagent "github.com/defos-ai/commander-browser-agent/browser/hermes"
 	"github.com/defos-ai/commander-browser-agent/browser/lightpanda"
 	browserlogin "github.com/defos-ai/commander-browser-agent/browser/login"
-	"github.com/defos-ai/commander-browser-agent/internal/browsing"
+	"github.com/defos-ai/commander-browser-agent/internal/commander"
 	"github.com/defos-ai/commander-browser-agent/internal/hermes"
 	"github.com/defos-ai/commander-browser-agent/tests/fakes"
 	"github.com/defos-ai/commander/framework/agent"
@@ -88,7 +88,7 @@ type hermesSessionHost struct {
 	accepted               map[string]messages.Message
 	entered                atomic.Int32
 	expectUncertainCleanup bool
-	setup                  browsing.Setup
+	setup                  commander.Setup
 	modelKeyMetadata       map[string]secrets.Metadata
 	checkpoints            map[string]executions.Execution
 }

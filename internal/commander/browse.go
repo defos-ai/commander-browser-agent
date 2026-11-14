@@ -1,4 +1,4 @@
-package browsing
+package commander
 
 import (
 	"context"
@@ -9,6 +9,7 @@ import (
 
 	browserruntime "github.com/defos-ai/commander-browser-agent/browser"
 	"github.com/defos-ai/commander-browser-agent/browser/contracts"
+	"github.com/defos-ai/commander-browser-agent/internal/browsing"
 	"github.com/defos-ai/commander-browser-agent/internal/sensitive"
 	"github.com/defos-ai/commander/framework/agent/action"
 	"github.com/defos-ai/commander/framework/domain/artifacts"
@@ -82,7 +83,7 @@ func (s *Setup) RunHermesBrowse(ctx context.Context, runner HermesBrowseRunner, 
 		if err := sensitive.Remember(ctx, model.APIKey); err != nil {
 			return errors.New("cannot protect native model credentials; use a new session")
 		}
-		if err := CheckURLCredential(input.URL, string(model.APIKey)); err != nil {
+		if err := browsing.CheckURLCredential(input.URL, string(model.APIKey)); err != nil {
 			return err
 		}
 		if sensitive.Redact(ctx, input.URL) != input.URL {

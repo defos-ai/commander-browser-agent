@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/defos-ai/commander-browser-agent/internal/browsing"
+	"github.com/defos-ai/commander-browser-agent/internal/commander"
 	"github.com/defos-ai/commander-browser-agent/internal/hermes"
 	"github.com/defos-ai/commander/framework/agent/action"
 	"github.com/defos-ai/commander/framework/comms/messages"
@@ -18,7 +18,7 @@ import (
 	"github.com/defos-ai/commander/framework/id"
 )
 
-var nativeCheckpointLimits = browsing.HermesCheckpointLimits{
+var nativeCheckpointLimits = commander.HermesCheckpointLimits{
 	MaxIterations: 30, MaxTokensPerResponse: 256, TimeoutSeconds: 60,
 }
 
@@ -29,7 +29,7 @@ const checkpointPrivateAnswer = "answer-content-never-in-checkpoints"
 
 func TestHermesCheckpointQuestionsAndNativeCallsShareImmutableBudget(t *testing.T) {
 	ctx, store, binding := nativeCheckpointContext(t)
-	checkpoints, err := browsing.NewHermesCheckpoints(ctx, "browse")
+	checkpoints, err := commander.NewHermesCheckpoints(ctx, "browse")
 	if err != nil || checkpoints.Start(ctx, nativeCheckpointLimits) != nil {
 		t.Fatal("native checkpoint start failed")
 	}
@@ -105,7 +105,7 @@ func TestHermesCheckpointQuestionsAndNativeCallsShareImmutableBudget(t *testing.
 	if err := checkpoints.Finish(ctx, "failed", 28, false); err == nil {
 		t.Fatal("the prepared final fact could be rewritten")
 	}
-	if _, err := browsing.NewHermesCheckpoints(ctx, "browse"); err == nil {
+	if _, err := commander.NewHermesCheckpoints(ctx, "browse"); err == nil {
 		t.Fatal("an execution with a start fence could be replayed")
 	}
 	if _, after := store.snapshot(); after != writes {
@@ -120,7 +120,7 @@ func TestHermesCheckpointOverflowStopsBeforePublicationAndCannotFinish(t *testin
 			if !durable {
 				ctx = action.WithCheckpoints(ctx, nil)
 			}
-			checkpoints, err := browsing.NewHermesCheckpoints(ctx, "browse")
+			checkpoints, err := commander.NewHermesCheckpoints(ctx, "browse")
 			if err != nil || checkpoints.Start(ctx, nativeCheckpointLimits) != nil {
 				t.Fatal("native checkpoint budget could not start")
 			}
@@ -164,14 +164,14 @@ func TestHermesCheckpointRejectsForeignClaimAndDifferentLeafExecution(t *testing
 				execution.CommandID, execution.TaskID = id.New(), id.New()
 				foreign = action.WithExecution(ctx, execution) // Original creation claim is unchanged.
 			}
-			checkpoints, err := browsing.NewHermesCheckpoints(ctx, "browse")
+			checkpoints, err := commander.NewHermesCheckpoints(ctx, "browse")
 			if err != nil || checkpoints.Start(foreign, nativeCheckpointLimits) == nil {
 				t.Fatal("a different claim or leaf execution started another owner's checkpoints")
 			}
 			if facts, writes := store.snapshot(); len(facts) != 0 || writes != 0 {
 				t.Fatal("identity mismatch reached checkpoint persistence")
 			}
-			checkpoints, err = browsing.NewHermesCheckpoints(ctx, "browse")
+			checkpoints, err = commander.NewHermesCheckpoints(ctx, "browse")
 			if err != nil || checkpoints.Start(ctx, nativeCheckpointLimits) != nil {
 				t.Fatal("fresh checkpoint fixture could not start")
 			}

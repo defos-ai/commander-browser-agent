@@ -11,7 +11,7 @@ import (
 	"testing"
 
 	"github.com/defos-ai/commander-browser-agent/actions"
-	"github.com/defos-ai/commander-browser-agent/internal/browsing"
+	"github.com/defos-ai/commander-browser-agent/internal/commander"
 	"github.com/defos-ai/commander-browser-agent/tests/fakes"
 	"github.com/defos-ai/commander-browser-agent/tests/fixtures"
 	"github.com/defos-ai/commander/framework/agent"
@@ -66,7 +66,7 @@ func TestHermesIntegratedManagedWorkflow(t *testing.T) {
 	secretName := modelSecretName(endpoint)
 	h := newDefaultHermesSessionHost(t)
 	profilesBefore, processesBefore := hermesSessionProfiles(t), hermesReadinessProcesses(t)
-	input := browsing.HermesBrowseInput{Objective: "Read the workflow study and report its sample count.", URL: site.URL + "/details",
+	input := commander.HermesBrowseInput{Objective: "Read the workflow study and report its sample count.", URL: site.URL + "/details",
 		MaxIterations: 4, MaxTokensPerResponse: 512, TimeoutSeconds: 35}
 	first := h.nativeBrowseTask(nil, input)
 	binding := h.binding(first)
@@ -237,7 +237,7 @@ func TestHermesIntegratedManagedWorkflow(t *testing.T) {
 
 func requireHermesWorkflowBrowse(t *testing.T, h *hermesSessionHost, output agent.ActionOutput, ok bool, binding sessions.Binding, requests int, protected ...string) {
 	t.Helper()
-	var result browsing.HermesBrowseOutput
+	var result commander.HermesBrowseOutput
 	if !ok || json.Unmarshal(output.Output, &result) != nil || result.Validate() != nil || result.Status != "completed" || result.ModelRequests != requests ||
 		!strings.Contains(result.Text, "42 samples") || !strings.Contains(result.Text, "[REDACTED]") || output.Session == nil || output.Session.Reference != binding.Reference ||
 		len(output.Artifacts) != 1 || len(output.Artifacts[0].Files) != 1 || !bytes.Equal(output.Output, h.screenshotDownload(output, "browse.json")) {

@@ -1,8 +1,6 @@
 package browsing
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"net"
 	"net/url"
@@ -64,41 +62,4 @@ func LoginOrigin(address string) (string, error) {
 		host = "[" + host + "]"
 	}
 	return u.Scheme + "://" + host, nil
-}
-
-func ValidLoginProfile(profile string) bool {
-	if len(profile) == 0 || len(profile) > 32 || profile[0] < 'a' || profile[0] > 'z' {
-		return false
-	}
-	for _, ch := range profile {
-		if ch != '-' && ch != '_' && (ch < 'a' || ch > 'z') && (ch < '0' || ch > '9') {
-			return false
-		}
-	}
-	return true
-}
-
-// LoginSecretNames addresses reusable credentials, never a verification code.
-// Names are shared in Commander; this binding is not a secret-store access policy.
-func LoginSecretNames(address, profile string) (username, password string, err error) {
-	origin, err := LoginOrigin(address)
-	if err != nil {
-		return "", "", err
-	}
-	if !ValidLoginProfile(profile) {
-		return "", "", errors.New("login credential_profile must be a non-secret lowercase alias of at most 32 characters")
-	}
-	digest := sha256.Sum256([]byte(origin + "\x00" + profile))
-	base := "browser-login-" + profile + "-" + hex.EncodeToString(digest[:])
-	return base + "-username", base + "-password", nil
-}
-
-// LoginCodeSecretName labels a transient request, never a stored code.
-// Commander binds each request to its own execution and delivery identity.
-func LoginCodeSecretName(address, profile string) (string, error) {
-	username, _, err := LoginSecretNames(address, profile)
-	if err != nil {
-		return "", err
-	}
-	return strings.TrimSuffix(username, "-username") + "-otp", nil
 }

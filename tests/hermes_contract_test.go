@@ -7,25 +7,25 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/defos-ai/commander-browser-agent/internal/browsing"
+	"github.com/defos-ai/commander-browser-agent/internal/commander"
 	"github.com/defos-ai/commander/framework/agent/action"
 )
 
 func TestHermesBrowseContractDefaultsAndWildcardScope(t *testing.T) {
 	for _, hosts := range []string{"", `,"allowed_hosts":[]`, `,"allowed_hosts":["*"]`} {
 		raw := json.RawMessage(`{"objective":"Read the 漢字 study","url":"https://example.test/study"` + hosts + `}`)
-		input, err := browsing.DecodeHermesBrowseInput(raw)
+		input, err := commander.DecodeHermesBrowseInput(raw)
 		if err != nil || input.Objective != "Read the 漢字 study" || input.MaxIterations != 12 || input.MaxTokensPerResponse != 2048 || input.TimeoutSeconds != 120 || !reflect.DeepEqual(input.AllowedHosts, []string{"*"}) {
 			t.Fatal("native browse defaults changed or empty host scope restricted browsing")
 		}
 		input.AllowedHosts[0] = "caller mutation"
-		next, err := browsing.DecodeHermesBrowseInput(raw)
+		next, err := commander.DecodeHermesBrowseInput(raw)
 		if err != nil || !reflect.DeepEqual(next.AllowedHosts, []string{"*"}) {
 			t.Fatal("native browse defaults share mutable host scope")
 		}
 	}
 	maximum := json.RawMessage(`{"objective":"Read the study","url":"http://127.0.0.1:4275/","max_iterations":30,"max_tokens_per_response":16384,"timeout_seconds":180}`)
-	if input, err := browsing.DecodeHermesBrowseInput(maximum); err != nil || input.MaxIterations != 30 || input.MaxTokensPerResponse != 16384 || input.TimeoutSeconds != 180 {
+	if input, err := commander.DecodeHermesBrowseInput(maximum); err != nil || input.MaxIterations != 30 || input.MaxTokensPerResponse != 16384 || input.TimeoutSeconds != 180 {
 		t.Fatal("native browse rejected its explicit maximum allowances")
 	}
 }
@@ -65,8 +65,8 @@ func TestHermesBrowseContractRejectsLegacyScopeAndUnsafeInput(t *testing.T) {
 			}
 			input[test.field] = test.value
 			raw, _ := json.Marshal(input)
-			decoded, err := browsing.DecodeHermesBrowseInput(raw)
-			if err == nil || !reflect.DeepEqual(decoded, browsing.HermesBrowseInput{}) || strings.Contains(err.Error(), "private-user") || strings.Contains(err.Error(), "private-password") {
+			decoded, err := commander.DecodeHermesBrowseInput(raw)
+			if err == nil || !reflect.DeepEqual(decoded, commander.HermesBrowseInput{}) || strings.Contains(err.Error(), "private-user") || strings.Contains(err.Error(), "private-password") {
 				t.Fatal("native browse accepted unsupported scope, legacy input or unsafe data")
 			}
 		})
@@ -80,14 +80,14 @@ func TestHermesBrowseContractRejectsLegacyScopeAndUnsafeInput(t *testing.T) {
 		json.RawMessage(`{"objective":"Read","url":"https://example.test/","max_iterations":30,"max_iterations":1}`),
 		append([]byte(`{"objective":"`), append([]byte{0xff}, []byte(`","url":"https://example.test/"}`)...)...),
 	} {
-		if _, err := browsing.DecodeHermesBrowseInput(raw); err == nil {
+		if _, err := commander.DecodeHermesBrowseInput(raw); err == nil {
 			t.Fatal("native browse accepted malformed or invalid UTF-8 JSON")
 		}
 	}
 }
 
 func TestHermesBrowseContractBoundsCombinedNativeTask(t *testing.T) {
-	input := browsing.HermesBrowseInput{Objective: strings.Repeat("😀", 4000), URL: "https://example.test/"}
+	input := commander.HermesBrowseInput{Objective: strings.Repeat("😀", 4000), URL: "https://example.test/"}
 	input.URL += strings.Repeat("x", 16384-len(input.ObjectiveForHermes()))
 	// The URL and objective each fit their own character and byte limits.
 	// Their native task wrapper must fit as well, before setup can ask questions.
@@ -98,7 +98,7 @@ func TestHermesBrowseContractBoundsCombinedNativeTask(t *testing.T) {
 		if err != nil {
 			t.Fatal("native task boundary fixture could not be encoded")
 		}
-		decoded, err := browsing.DecodeHermesBrowseInput(raw)
+		decoded, err := commander.DecodeHermesBrowseInput(raw)
 		if extra == "" {
 			if err != nil || len(decoded.ObjectiveForHermes()) != 16384 || decoded.ObjectiveForHermes() != "Starting URL:\n"+input.URL+"\n\nObjective:\n"+input.Objective {
 				t.Fatal("native browse rejected or changed its bounded task wrapper")
@@ -110,11 +110,11 @@ func TestHermesBrowseContractBoundsCombinedNativeTask(t *testing.T) {
 }
 
 func TestHermesBrowseResultHasHonestSchemaAndByteBounds(t *testing.T) {
-	inputSchema, err := action.ResolveSchema(json.RawMessage(browsing.HermesBrowseInputSchema))
+	inputSchema, err := action.ResolveSchema(json.RawMessage(commander.HermesBrowseInputSchema))
 	if err != nil {
 		t.Fatal("native browse input schema is invalid")
 	}
-	outputSchema, err := action.ResolveSchema(json.RawMessage(browsing.HermesBrowseOutputSchema))
+	outputSchema, err := action.ResolveSchema(json.RawMessage(commander.HermesBrowseOutputSchema))
 	if err != nil {
 		t.Fatal("native browse output schema is invalid")
 	}
@@ -126,7 +126,7 @@ func TestHermesBrowseResultHasHonestSchemaAndByteBounds(t *testing.T) {
 	if inputSchema.Validate(input) == nil {
 		t.Fatal("native browse schema advertised unsupported exact host enforcement")
 	}
-	output := browsing.HermesBrowseOutput{Runtime: "hermes", Engine: "lightpanda", Status: "completed"}
+	output := commander.HermesBrowseOutput{Runtime: "hermes", Engine: "lightpanda", Status: "completed"}
 	encoded, err := json.Marshal(output)
 	var value map[string]any
 	if err != nil || json.Unmarshal(encoded, &value) != nil || output.Validate() != nil || outputSchema.Validate(value) != nil || len(value) != 5 || !bytes.Contains(encoded, []byte(`"text":""`)) || !bytes.Contains(encoded, []byte(`"model_requests":0`)) {
@@ -142,7 +142,7 @@ func TestHermesBrowseResultHasHonestSchemaAndByteBounds(t *testing.T) {
 			t.Fatal("native browse rejected its bounded text/status result")
 		}
 	}
-	for _, test := range []browsing.HermesBrowseOutput{
+	for _, test := range []commander.HermesBrowseOutput{
 		{Runtime: "hermes", Engine: "lightpanda", Status: "budget_exhausted"},
 		{Runtime: "hermes", Engine: "lightpanda", Status: "completed", Text: strings.Repeat("漢", 21846)},
 		{Runtime: "hermes", Engine: "lightpanda", Status: "completed", Text: string([]byte{0xff})},

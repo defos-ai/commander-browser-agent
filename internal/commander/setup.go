@@ -1,4 +1,5 @@
-package browsing
+// Package commander adapts browser capabilities to Commander execution services.
+package commander
 
 import (
 	"context"

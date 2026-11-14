@@ -8,7 +8,7 @@ import (
 
 	browserruntime "github.com/defos-ai/commander-browser-agent/browser"
 	"github.com/defos-ai/commander-browser-agent/browser/contracts"
-	"github.com/defos-ai/commander-browser-agent/internal/browsing"
+	"github.com/defos-ai/commander-browser-agent/internal/commander"
 	"github.com/defos-ai/commander/framework/agent/action"
 	"github.com/defos-ai/commander/framework/agent/environment"
 	actionmodel "github.com/defos-ai/commander/framework/domain/actions"
@@ -25,15 +25,15 @@ type BrowserRunner interface {
 	RunHermes(context.Context, browserruntime.HermesOptions, func(context.Context) error) (sessions.Session, error)
 }
 
-type BrowseInput = browsing.HermesBrowseInput
-type BrowseOutput = browsing.HermesBrowseOutput
+type BrowseInput = commander.HermesBrowseInput
+type BrowseOutput = commander.HermesBrowseOutput
 
 type Browse struct {
 	*action.Base
 	runner        BrowserRunner
 	agentFactory  contracts.BrowserAgentFactory
 	configuration atomic.Pointer[browserruntime.HermesOptions]
-	setup         browsing.Setup
+	setup         commander.Setup
 }
 
 // NewBrowse creates fresh discovery/setup state without opening a runtime.
@@ -41,7 +41,7 @@ func NewBrowse(runner BrowserRunner, factory contracts.BrowserAgentFactory) *Bro
 	return &Browse{
 		Base: action.NewBase(actionmodel.Action{
 			Name: BrowseName, Description: BrowseDescription, SessionMode: "open",
-			InputSchema: json.RawMessage(browsing.HermesBrowseInputSchema), OutputSchema: json.RawMessage(browsing.HermesBrowseOutputSchema),
+			InputSchema: json.RawMessage(commander.HermesBrowseInputSchema), OutputSchema: json.RawMessage(commander.HermesBrowseOutputSchema),
 		}),
 		runner: runner, agentFactory: factory,
 	}

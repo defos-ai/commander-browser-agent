@@ -17,7 +17,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/defos-ai/commander-browser-agent/internal/browsing"
+	"github.com/defos-ai/commander-browser-agent/internal/commander"
 	"github.com/defos-ai/commander-browser-agent/internal/hermes"
 	"github.com/defos-ai/commander-browser-agent/tests/fakes"
 	"github.com/defos-ai/commander/framework/agent/action"
@@ -54,10 +54,10 @@ func (h *hermesSessionHost) runCheckpointed(ctx context.Context, binding session
 		actionName = "login"
 	}
 	request := scenario.request
-	var checkpoints *browsing.HermesCheckpoints
+	var checkpoints *commander.HermesCheckpoints
 	runErr = h.manager.WithSession(ctx, func(setupCtx context.Context) error {
 		var err error
-		checkpoints, err = browsing.NewHermesCheckpoints(setupCtx, actionName)
+		checkpoints, err = commander.NewHermesCheckpoints(setupCtx, actionName)
 		if err != nil {
 			return err
 		}
@@ -68,9 +68,9 @@ func (h *hermesSessionHost) runCheckpointed(ctx context.Context, binding session
 			}
 			request.Objective, request.MaxIterations, request.MaxTokens, request.TimeoutSeconds = "Complete the checkpoint fixture objective.", 4, 512, 25
 		}
-		limits := browsing.HermesCheckpointLimits{MaxIterations: request.MaxIterations, MaxTokensPerResponse: request.MaxTokens, TimeoutSeconds: request.TimeoutSeconds}
+		limits := commander.HermesCheckpointLimits{MaxIterations: request.MaxIterations, MaxTokensPerResponse: request.MaxTokens, TimeoutSeconds: request.TimeoutSeconds}
 		if actionName == "login" {
-			limits = browsing.HermesCheckpointLimits{TimeoutSeconds: 25}
+			limits = commander.HermesCheckpointLimits{TimeoutSeconds: 25}
 		}
 		return checkpoints.Start(setupCtx, limits)
 	})
