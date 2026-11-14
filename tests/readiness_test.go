@@ -10,10 +10,22 @@ import (
 	"github.com/defos-ai/commander/framework/agent/environment"
 )
 
+func TestActionsRequireCapabilityFactoriesBeforeDiscovery(t *testing.T) {
+	probe := &unitSetup{t: t}
+	for _, executor := range []action.Executor{
+		actions.NewBrowse(probe, nil), actions.NewLogin(probe, nil), actions.NewScreenshot(probe, nil),
+	} {
+		status, err := executor.Discover(t.Context(), unitEnvironment{probe}, nil)
+		if err != nil || status != action.Unavailable || probe.discoveryRuns != 0 || probe.runs != 0 || len(probe.events) != 0 {
+			t.Fatal("a missing capability factory reached discovery or execution setup")
+		}
+	}
+}
+
 func TestAgentRediscoveryClearsAnUnavailableBrowser(t *testing.T) {
 	requireHermesDiscoveryPlatform(t)
 	probe := &unitSetup{t: t}
-	executor := actions.NewBrowse(probe)
+	executor := unitAction(probe, "browse")
 	ready := unitEnvironment{probe}
 	if status, err := executor.Discover(t.Context(), ready, nil); err != nil || status != action.Ready {
 		t.Fatal("installed browser was not ready")
@@ -38,7 +50,7 @@ func TestAgentRediscoveryClearsAnUnavailableBrowser(t *testing.T) {
 func TestActionsRespectExecutableDiscoveryScope(t *testing.T) {
 	requireHermesDiscoveryPlatform(t)
 	probe := &unitSetup{t: t}
-	for _, executor := range []action.Executor{actions.NewBrowse(probe), actions.NewLogin(probe), actions.NewScreenshot(probe)} {
+	for _, executor := range []action.Executor{unitAction(probe, "browse"), unitAction(probe, "login"), unitAction(probe, "screenshot")} {
 		ready := unitEnvironment{probe}
 		if status, err := executor.Discover(t.Context(), ready, nil); err != nil || status != action.Ready {
 			t.Fatal("the packaged runtime was not ready before scope restriction")

@@ -16,7 +16,8 @@
   AGPL-3.0-only. Preserve third-party license notices and the README distinction
   between source and dependency licenses for combined builds.
 - [agent.go](agent.go) declares the literal `AgentType = "browser-agent"` and
-  `NewAgent`. [actions.go](actions.go) creates fresh action instances. Keep an
+  `NewAgent`. [actions.go](actions.go) creates fresh action instances with scoped
+  capability factories selected in [cli/factory.go](cli/factory.go). Keep an
   explicitly empty action catalog empty; discovery state belongs to one host.
 - Commander → Controller → Agent: actions return results/proposals, the controller
   chooses agents and mission rules control transitions. Upload bytes through
@@ -48,7 +49,8 @@
   Unset/empty generates a fresh ID. Never launch two instances with the same ID;
   the suffix provides correlation, not authorization or duplicate prevention.
 - [cli/factory.go](cli/factory.go) selects FS/RabbitMQ bus and FS/S3 artifact
-  providers. Unsupported schemes fail explicitly. Agents never connect to MongoDB.
+  providers and creates the BrowserAgent/Browser factories passed to actions.
+  Unsupported schemes fail explicitly. Agents never connect to MongoDB.
   The browser needs no managed-secret decryption key.
 - For direct development, run
   `BUS_URL=/shared/bus STORAGE_URL=/shared/storage go run ./cmd` against the
@@ -129,6 +131,22 @@
   before running a container with the full allowance.
 
 ## Reusable browser sessions
+
+- [browser/contracts/](browser/contracts/) defines the Commander-independent
+  `BrowserAgent`, `Browser`, request/result types and hooks. The separate leaf
+  package avoids cycles while the existing session manager and Commander
+  orchestration are moved in later refactoring steps. Keep model keys outside
+  browse requests/hooks; Go-only factory configuration and deterministic login
+  credential callbacks retain explicit buffer ownership and safe formatting.
+- [cli/factory.go](cli/factory.go) supplies `actions.Dependencies` for Hermes reasoning
+  and retained Lightpanda login/screenshots. Actions receive factories rather
+  than constructing implementations. Missing factories refuse discovery before
+  runtime checks or setup. Constructors and discovery never call these factories.
+  Invoke them only inside the host's current session callback; they borrow that
+  callback's exact private grant and start no extra worker or browser connection.
+  Expired, detached and later-callback contexts cannot renew retained adapters.
+  Library callers pass these dependencies to `NewActions`/`NewAgent`; the agent
+  and action packages do not select concrete backends.
 
 - [agent.go](agent.go) supplies one [session manager](browser/manager.go)
   per agent unless the caller provides a Commander sessions provider. Constructors

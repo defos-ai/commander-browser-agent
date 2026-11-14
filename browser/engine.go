@@ -20,13 +20,15 @@ import (
 	cdpruntime "github.com/chromedp/cdproto/runtime"
 	"github.com/chromedp/cdproto/target"
 	"github.com/chromedp/chromedp"
-	lpruntime "github.com/defos-ai/commander-browser-agent/browser/lightpanda"
 	"github.com/defos-ai/commander-browser-agent/internal/textrender"
 )
 
 type Engine string
 
 const Lightpanda Engine = "lightpanda"
+
+// LightpandaVersion is the release supported by discovery and session checks.
+const LightpandaVersion = "1.0.2"
 
 // Options select an engine explicitly. Executable comes from action discovery.
 type Options struct {
@@ -257,7 +259,7 @@ func (r *browserRuntime) Verify(ctx context.Context) error {
 	var version struct {
 		Version string `json:"version"`
 	}
-	if err := connection.Browser.Execute(probe, "LP.version", nil, &version); err != nil || version.Version != lpruntime.Version {
+	if err := connection.Browser.Execute(probe, "LP.version", nil, &version); err != nil || version.Version != LightpandaVersion {
 		return errors.New("cannot verify the supported Lightpanda runtime")
 	}
 	value, exception, err := cdpruntime.Evaluate("true").WithReturnByValue(true).Do(cdp.WithExecutor(probe, connection.Target))

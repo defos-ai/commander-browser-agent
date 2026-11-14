@@ -4,20 +4,30 @@ import (
 	"context"
 	"errors"
 
+	"github.com/defos-ai/commander-browser-agent/browser/contracts"
 	"github.com/defos-ai/commander-browser-agent/internal/hermes"
 	"github.com/defos-ai/commander/framework/agent/action"
 )
 
-// PrepareHermes shares the session's non-secret setup cache and managed-key
-// resolution. The caller fills execution objectives/limits and clears APIKey
-// after the worker has joined its use. No model or browser is started here.
-func (s *Setup) PrepareHermes(ctx context.Context) (hermes.Request, error) {
+// PrepareModel resolves the session's non-secret choices and current managed key.
+// The caller clears APIKey after the capability has joined its use. This starts
+// no model connection, native agent or browser.
+func (s *Setup) PrepareModel(ctx context.Context) (contracts.ModelConfig, error) {
 	selection, key, err := s.prepare(ctx)
 	if err != nil {
 		clear(key)
+		return contracts.ModelConfig{}, err
+	}
+	return contracts.ModelConfig{Provider: selection.Provider, Model: selection.Name, Endpoint: selection.URL, APIKey: key}, nil
+}
+
+// PrepareHermes retains the low-level bridge helper for native integration callers.
+func (s *Setup) PrepareHermes(ctx context.Context) (hermes.Request, error) {
+	model, err := s.PrepareModel(ctx)
+	if err != nil {
 		return hermes.Request{}, err
 	}
-	return hermes.Request{Provider: selection.Provider, Model: selection.Name, Endpoint: selection.URL, APIKey: key}, nil
+	return hermes.Request{Provider: model.Provider, Model: model.Model, Endpoint: model.Endpoint, APIKey: model.APIKey}, nil
 }
 
 func selectHermesModel(ctx context.Context) (modelConfig, error) {

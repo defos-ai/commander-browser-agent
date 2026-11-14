@@ -11,9 +11,9 @@ import (
 
 const AgentType agents.AgentType = "browser-agent"
 
-// NewAgent supplies a process-local session provider and the default action catalog
-// when they are omitted. An explicitly empty action catalog stays empty.
-func NewAgent(config agents.AgentConfig) (*agents.Agent, error) {
+// NewAgent supplies a process-local session provider and uses the injected
+// capabilities for an omitted action catalog. An explicitly empty catalog stays empty.
+func NewAgent(config agents.AgentConfig, dependencies agentactions.Dependencies) (*agents.Agent, error) {
 	config.Type = AgentType
 	if config.Sessions == nil {
 		if config.ID == "" {
@@ -37,7 +37,7 @@ func NewAgent(config agents.AgentConfig) (*agents.Agent, error) {
 		if !ok {
 			return nil, errors.New("default browser actions require a browser session runner")
 		}
-		config.Actions = NewActions(runner)
+		config.Actions = NewActions(runner, dependencies)
 	}
 	if config.Secrets == nil {
 		config.Secrets = &agents.SecretConfig{}

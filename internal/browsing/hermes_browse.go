@@ -8,7 +8,7 @@ import (
 	"time"
 
 	browserruntime "github.com/defos-ai/commander-browser-agent/browser"
-	"github.com/defos-ai/commander-browser-agent/internal/hermes"
+	"github.com/defos-ai/commander-browser-agent/browser/contracts"
 	"github.com/defos-ai/commander-browser-agent/internal/sensitive"
 	"github.com/defos-ai/commander/framework/agent/action"
 	"github.com/defos-ai/commander/framework/domain/artifacts"
@@ -25,7 +25,7 @@ type HermesBrowseRunner interface {
 // RunHermesBrowse executes the default native browse contract. Runtime options
 // are trusted discovery output, never action input.
 // The Setup receiver retains only non-secret choices for the exact creation claim.
-func (s *Setup) RunHermesBrowse(ctx context.Context, runner HermesBrowseRunner, options browserruntime.HermesOptions, raw json.RawMessage) (result action.Result, runErr error) {
+func (s *Setup) RunHermesBrowse(ctx context.Context, runner HermesBrowseRunner, options browserruntime.HermesOptions, createAgent contracts.BrowserAgentFactory, raw json.RawMessage) (result action.Result, runErr error) {
 	if ctx.Err() != nil {
 		return result, errors.Join(ctx.Err(), context.Cause(ctx))
 	}
@@ -36,10 +36,13 @@ func (s *Setup) RunHermesBrowse(ctx context.Context, runner HermesBrowseRunner, 
 	if runner == nil {
 		return result, errors.New("native browse requires the host browser session runner")
 	}
+	if createAgent == nil {
+		return result, errors.New("native browse requires the host browser agent factory")
+	}
 	if _, err := action.OpenSession(ctx); err != nil {
 		return result, err
 	}
-	var request hermes.Request
+	var model contracts.ModelConfig
 	var checkpoints *HermesCheckpoints
 	setupCtx, stopSetup := context.WithTimeout(ctx, 10*time.Minute)
 	err = runner.WithSession(setupCtx, func(ctx context.Context) error {
@@ -48,7 +51,7 @@ func (s *Setup) RunHermesBrowse(ctx context.Context, runner HermesBrowseRunner, 
 		if err != nil {
 			return err
 		}
-		request, err = s.PrepareHermes(ctx)
+		model, err = s.PrepareModel(ctx)
 		return err
 	})
 	if setupCtx.Err() != nil {
@@ -57,28 +60,29 @@ func (s *Setup) RunHermesBrowse(ctx context.Context, runner HermesBrowseRunner, 
 	stopSetup()
 	// Worker.Run joins the model transport before returning; owned key bytes
 	// cannot be cleared while its HTTP work is still using them.
-	defer clear(request.APIKey)
+	defer clear(model.APIKey)
 	if err != nil {
 		return result, err
 	}
-	if len(request.APIKey) == 0 || len(request.APIKey) > sensitive.MaxValueBytes {
+	if len(model.APIKey) == 0 || len(model.APIKey) > sensitive.MaxValueBytes {
 		return result, errors.New("native browser model credentials are invalid")
 	}
-	for _, value := range request.APIKey {
+	for _, value := range model.APIKey {
 		if value < 0x21 || value > 0x7e {
 			return result, errors.New("native browser model credentials are invalid")
 		}
 	}
-	request.MaxIterations, request.MaxTokens, request.TimeoutSeconds = input.MaxIterations, input.MaxTokensPerResponse, input.TimeoutSeconds
+	request := contracts.BrowseRequest{MaxIterations: input.MaxIterations,
+		MaxTokensPerResponse: input.MaxTokensPerResponse, TimeoutSeconds: input.TimeoutSeconds}
 	// One wall clock covers admission, startup, questions, native work and final
 	// persistence. It cannot extend the execution's existing outer deadline.
 	workCtx, stopWork := context.WithTimeout(ctx, time.Duration(input.TimeoutSeconds)*time.Second)
 	defer stopWork()
 	err = runner.WithSession(workCtx, func(ctx context.Context) error {
-		if err := sensitive.Remember(ctx, request.APIKey); err != nil {
+		if err := sensitive.Remember(ctx, model.APIKey); err != nil {
 			return errors.New("cannot protect native model credentials; use a new session")
 		}
-		if err := CheckURLCredential(input.URL, string(request.APIKey)); err != nil {
+		if err := CheckURLCredential(input.URL, string(model.APIKey)); err != nil {
 			return err
 		}
 		if sensitive.Redact(ctx, input.URL) != input.URL {
@@ -95,17 +99,17 @@ func (s *Setup) RunHermesBrowse(ctx context.Context, runner HermesBrowseRunner, 
 		return result, hermesBrowseError(workCtx, err)
 	}
 
-	var native hermes.Result
+	var native contracts.BrowseResult
 	questions := 0
 	snapshot, runErr := runner.RunHermes(workCtx, options, func(ctx context.Context) error {
-		handler := checkpoints.Handler(func(ctx context.Context, event hermes.Event) (hermes.Reply, error) {
+		handler := checkpoints.Handler(func(ctx context.Context, event contracts.Event) (contracts.Reply, error) {
 			switch event.Kind {
 			case "admit":
-				return hermes.Reply{Approved: true}, nil
+				return contracts.Reply{Approved: true}, nil
 			case "question":
 				questions++
 				if questions > 4 {
-					return hermes.Reply{}, errors.New("native browser clarification limit reached")
+					return contracts.Reply{}, errors.New("native browser clarification limit reached")
 				}
 				waiting, stop := context.WithTimeout(ctx, 3*time.Minute)
 				defer stop()
@@ -115,7 +119,7 @@ func (s *Setup) RunHermesBrowse(ctx context.Context, runner HermesBrowseRunner, 
 					options[i] = sensitive.Redact(ctx, option)
 				}
 				question, err := action.Question(waiting, fmt.Sprintf("browser_clarification_%d", questions), notice+sensitive.Redact(ctx, event.Text), options...)
-				return hermes.Reply{Answer: sensitive.Redact(ctx, question.Answer)}, err
+				return contracts.Reply{Answer: sensitive.Redact(ctx, question.Answer)}, err
 			case "progress":
 				message := "Native browser reasoning " + event.Text
 				if event.Tool != "" {
@@ -125,12 +129,18 @@ func (s *Setup) RunHermesBrowse(ctx context.Context, runner HermesBrowseRunner, 
 				if errors.Is(err, action.ErrLogsUnavailable) {
 					err = nil // Direct calls can omit execution logs.
 				}
-				return hermes.Reply{}, err
+				return contracts.Reply{}, err
 			}
-			return hermes.Reply{}, errors.New("unexpected native browser event")
+			return contracts.Reply{}, errors.New("unexpected native browser event")
 		})
-		var err error
-		native, err = hermes.Run(ctx, request, handler)
+		agent, err := createAgent(ctx, model)
+		if err != nil {
+			return err
+		}
+		if agent == nil {
+			return errors.New("browser agent factory returned no agent")
+		}
+		native, err = agent.Browse(ctx, request, handler)
 		return err
 	})
 	result.Session = &snapshot

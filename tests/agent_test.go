@@ -14,6 +14,9 @@ import (
 	browser "github.com/defos-ai/commander-browser-agent"
 	"github.com/defos-ai/commander-browser-agent/actions"
 	runtime "github.com/defos-ai/commander-browser-agent/browser"
+	"github.com/defos-ai/commander-browser-agent/browser/contracts"
+	hermesagent "github.com/defos-ai/commander-browser-agent/browser/hermes"
+	"github.com/defos-ai/commander-browser-agent/browser/lightpanda"
 	"github.com/defos-ai/commander-browser-agent/internal/sensitive"
 	"github.com/defos-ai/commander/framework/agent"
 	"github.com/defos-ai/commander/framework/agent/action"
@@ -30,7 +33,7 @@ func TestAgentCatalogMatchesMetadataAndPreservesEmptySelection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	host, err := browser.NewAgent(agent.AgentConfig{ArtifactFileStore: files})
+	host, err := browser.NewAgent(agent.AgentConfig{ArtifactFileStore: files}, realBrowserDependencies())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -38,7 +41,7 @@ func TestAgentCatalogMatchesMetadataAndPreservesEmptySelection(t *testing.T) {
 	if !slices.Equal(browser.ActionNames(), []string{"browse", "login", "screenshot"}) || len(metadata) != len(snapshot.Actions) || !reflect.DeepEqual(browser.Responsibilities(), snapshot.Responsibilities) {
 		t.Fatal("registered capabilities differ from release metadata")
 	}
-	first, second := browser.NewActions(nil), browser.NewActions(nil)
+	first, second := browser.NewActions(nil, realBrowserDependencies()), browser.NewActions(nil, realBrowserDependencies())
 	for i, registered := range snapshot.Actions {
 		if registered.Name != metadata[i].Name || registered.Description != metadata[i].Description || registered.SessionMode != metadata[i].SessionMode || len(registered.RequiredSecrets) != 0 || first[i] == second[i] {
 			t.Fatal("catalog shares readiness, requires early secrets, or differs from metadata")
@@ -48,7 +51,7 @@ func TestAgentCatalogMatchesMetadataAndPreservesEmptySelection(t *testing.T) {
 	if browser.ActionDescriptions()[0].Description == metadata[0].Description {
 		t.Fatal("metadata shares mutable state")
 	}
-	empty, err := browser.NewAgent(agent.AgentConfig{ArtifactFileStore: files, Actions: []action.Executor{}})
+	empty, err := browser.NewAgent(agent.AgentConfig{ArtifactFileStore: files, Actions: []action.Executor{}}, realBrowserDependencies())
 	if err != nil || len(empty.Describe().Actions) != 0 {
 		t.Fatal("explicitly empty catalog gained default actions")
 	}
@@ -116,7 +119,7 @@ func TestStandaloneSessionClaimsRetainExactFlatCreation(t *testing.T) {
 
 func TestSessionContractsAllocateRootIdentityAndKeepContinuations(t *testing.T) {
 	raw := json.RawMessage(`{"url":"https://example.test/","objective":"Read the page"}`)
-	for _, opener := range []action.Executor{actions.NewBrowse(nil), actions.NewLogin(nil)} {
+	for _, opener := range []action.Executor{actions.NewBrowse(nil, nil), actions.NewLogin(nil, nil)} {
 		definition := opener.Action()
 		if definition.Name == "login" {
 			raw = json.RawMessage(`{"url":"https://example.test/","verification_url":"https://example.test/account","expected_text":"Signed in"}`)
@@ -129,7 +132,7 @@ func TestSessionContractsAllocateRootIdentityAndKeepContinuations(t *testing.T) 
 		if root.SessionIntent.ID != root.ID || root.SessionIntent.ScopeID != root.ID || root.SessionIntent.Validate() != nil || string(root.Input) != string(raw) {
 			t.Fatal("root identity was not controller-allocated independently of business input")
 		}
-		for _, executor := range []action.Executor{actions.NewBrowse(nil), actions.NewLogin(nil), actions.NewScreenshot(nil)} {
+		for _, executor := range []action.Executor{actions.NewBrowse(nil, nil), actions.NewLogin(nil, nil), actions.NewScreenshot(nil, nil)} {
 			contract := executor.Action()
 			children, err := runtimeSessions.Normalize(&root, []action.NextAction{{ActionName: contract.Name, Input: json.RawMessage(`{}`)}}, nil, contract.Definition())
 			if err != nil || len(children) != 1 || children[0].SessionIntent == nil {
@@ -141,7 +144,7 @@ func TestSessionContractsAllocateRootIdentityAndKeepContinuations(t *testing.T) 
 			}
 		}
 	}
-	screenshot := actions.NewScreenshot(nil).Action()
+	screenshot := actions.NewScreenshot(nil, nil).Action()
 	next, err := runtimeSessions.Normalize(nil, []action.NextAction{{ActionName: screenshot.Name}}, nil, screenshot.Definition())
 	if err != nil || next[0].SessionIntent == nil || next[0].SessionIntent.Error == "" {
 		t.Fatal("use-only screenshot invented a root browser session")
@@ -154,13 +157,13 @@ func TestActionsRejectSessionSelectorsBeforeSideEffects(t *testing.T) {
 		for _, selector := range []string{"session_scope", "session_id"} {
 			t.Run(name+"/"+selector, func(t *testing.T) {
 				probe := &unitSetup{t: t}
-				var executor action.Executor = actions.NewBrowse(probe)
+				var executor action.Executor = unitAction(probe, "browse")
 				input := map[string]any{"url": "https://example.test/", "objective": "Read the page"}
 				binding := unitBinding()
 				if name == "login" {
-					executor, input = actions.NewLogin(probe), map[string]any{"url": "https://example.test/", "verification_url": "https://example.test/account", "expected_text": "Signed in", "credential_profile": "work"}
+					executor, input = unitAction(probe, "login"), map[string]any{"url": "https://example.test/", "verification_url": "https://example.test/account", "expected_text": "Signed in", "credential_profile": "work"}
 				} else if name == "screenshot" {
-					executor, input, binding.Mode = actions.NewScreenshot(probe), map[string]any{}, sessions.Use
+					executor, input, binding.Mode = unitAction(probe, "screenshot"), map[string]any{}, sessions.Use
 				}
 				if status, err := executor.Discover(t.Context(), unitEnvironment{probe}, nil); err != nil || status != action.Ready {
 					t.Fatal("selector regression could not discover its action")
@@ -186,7 +189,7 @@ func TestBrowseSetupUsesManagedKeysAndRetainsOnlySessionSelection(t *testing.T) 
 			t.Setenv("BROWSER_MODEL_API_KEY", "ignored-environment-key")
 			t.Setenv("OPENAI_API_KEY", "ignored-environment-key")
 			probe := &unitSetup{t: t, key: "fixture-first-private-model-key", answers: map[string]string{"browser_model_provider": provider, "browser_model_name": "exact-model-v1", "browser_model_url": endpoint}}
-			executor := actions.NewBrowse(probe)
+			executor := unitAction(probe, "browse")
 			if status, err := executor.Discover(t.Context(), unitEnvironment{probe}, nil); err != nil || status != action.Ready || len(probe.events) != 0 {
 				t.Fatal("discovery started setup or required credentials")
 			}
@@ -232,7 +235,7 @@ func TestCheckpointRecoveryGateStopsBeforeModelSetup(t *testing.T) {
 	requireHermesDiscoveryPlatform(t)
 	for _, failure := range []error{nil, errors.New("private-checkpoint-provider-error")} {
 		probe := &unitSetup{t: t}
-		executor := actions.NewBrowse(probe)
+		executor := unitAction(probe, "browse")
 		if status, err := executor.Discover(t.Context(), unitEnvironment{probe}, nil); err != nil || status != action.Ready {
 			t.Fatal("checkpoint fixture discovery failed")
 		}
@@ -342,4 +345,27 @@ func (p *unitSetup) RunHermes(_ context.Context, options runtime.HermesOptions, 
 func unitBinding() sessions.Binding {
 	task := id.New()
 	return sessions.Binding{Reference: sessions.Reference{ID: task, ScopeID: task, OwnerAgentID: "browser-agent-0123abcd"}, Mode: sessions.Open, OperationID: id.New(), TaskID: task, CommandID: task}
+}
+
+// The test host supplies the real adapters through the same dependency contract
+// as CLI composition. These factories remain lazy and create no runtime owner.
+func realBrowserDependencies() actions.Dependencies {
+	return actions.Dependencies{
+		BrowserAgent: func(ctx context.Context, model contracts.ModelConfig) (contracts.BrowserAgent, error) {
+			return hermesagent.NewAgent(ctx, model)
+		},
+		Browser: func(ctx context.Context) (contracts.Browser, error) {
+			return lightpanda.NewBrowser(ctx)
+		},
+	}
+}
+
+// Unit scenarios exercise the host's fresh actions with explicitly supplied adapters.
+func unitAction(runner actions.BrowserRunner, name string) action.Executor {
+	for _, executor := range browser.NewActions(runner, realBrowserDependencies()) {
+		if executor.Action().Name == name {
+			return executor
+		}
+	}
+	panic("unknown browser action fixture")
 }

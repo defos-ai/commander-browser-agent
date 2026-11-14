@@ -15,6 +15,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defos-ai/commander-browser-agent/browser/contracts"
+	hermesagent "github.com/defos-ai/commander-browser-agent/browser/hermes"
 	"github.com/defos-ai/commander-browser-agent/internal/browsing"
 	"github.com/defos-ai/commander-browser-agent/tests/fakes"
 	"github.com/defos-ai/commander/framework/agent/action"
@@ -41,7 +43,10 @@ func newHermesBrowseFixture(h *hermesSessionHost) action.Executor {
 }
 
 func (fixture *hermesBrowseFixture) Run(ctx context.Context, raw json.RawMessage) (action.Result, error) {
-	result, err := fixture.host.setup.RunHermesBrowse(ctx, fixture.host.manager, fixture.host.options, raw)
+	result, err := fixture.host.setup.RunHermesBrowse(ctx, fixture.host.manager, fixture.host.options,
+		func(ctx context.Context, model contracts.ModelConfig) (contracts.BrowserAgent, error) {
+			return hermesagent.NewAgent(ctx, model)
+		}, raw)
 	if fixture.returned != nil {
 		fixture.returned <- result
 	}

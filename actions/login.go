@@ -10,6 +10,7 @@ import (
 	"unicode/utf8"
 
 	browserruntime "github.com/defos-ai/commander-browser-agent/browser"
+	"github.com/defos-ai/commander-browser-agent/browser/contracts"
 	browserlogin "github.com/defos-ai/commander-browser-agent/browser/login"
 	"github.com/defos-ai/commander-browser-agent/internal/browsing"
 	"github.com/defos-ai/commander-browser-agent/internal/sensitive"
@@ -38,12 +39,13 @@ type LoginOutput struct {
 type Login struct {
 	*action.Base
 	runner         BrowserRunner
+	browserFactory contracts.BrowserFactory
 	configuration  atomic.Pointer[browserruntime.HermesOptions]
 	validateInput  func(any) error
 	validateOutput func(any) error
 }
 
-func NewLogin(runner BrowserRunner) *Login {
+func NewLogin(runner BrowserRunner, factory contracts.BrowserFactory) *Login {
 	input, err := action.ResolveSchema(json.RawMessage(loginInputSchema))
 	if err != nil {
 		panic("invalid built-in login input schema: " + err.Error())
@@ -55,7 +57,7 @@ func NewLogin(runner BrowserRunner) *Login {
 	return &Login{
 		Base: action.NewBase(actionmodel.Action{Name: LoginName, Description: LoginDescription, SessionMode: "open",
 			InputSchema: json.RawMessage(loginInputSchema), OutputSchema: json.RawMessage(loginOutputSchema)}),
-		runner: runner, validateInput: input.Validate, validateOutput: output.Validate,
+		runner: runner, browserFactory: factory, validateInput: input.Validate, validateOutput: output.Validate,
 	}
 }
 
@@ -69,6 +71,10 @@ func (a *Login) Discover(ctx context.Context, env environment.Environment, scope
 			status, discoveryErr = action.Unknown, errors.Join(err, context.Cause(ctx))
 		}
 	}()
+	if a.browserFactory == nil {
+		a.SetUnavailable("The host must provide its browser factory", actionmodel.Requirement{Kind: actionmodel.ConfigurationRequirement, Name: "browser-factory"})
+		return action.Unavailable, nil
+	}
 	configuration, status, err := discoverRuntime(ctx, a.Base, a.runner, env, scope)
 	if err == nil && status == action.Ready {
 		a.configuration.Store(configuration)
@@ -84,7 +90,7 @@ func (a *Login) Run(ctx context.Context, raw json.RawMessage) (result action.Res
 		return action.Result{}, err
 	}
 	configuration := a.configuration.Load()
-	if configuration == nil || a.runner == nil {
+	if configuration == nil || a.runner == nil || a.browserFactory == nil {
 		return action.Result{}, errors.New("login is unavailable; run discovery first")
 	}
 	if len(raw) > 32*1024 || validateBrowseJSON(a.validateInput, raw) != nil {
@@ -145,7 +151,7 @@ func (a *Login) Run(ctx context.Context, raw json.RawMessage) (result action.Res
 	}); err != nil {
 		return action.Result{}, loginActionError(budget.Context(), err)
 	}
-	var outcome browserlogin.Result
+	var outcome contracts.LoginResult
 	var snapshot sessions.Session
 	snapshot, runErr = a.runner.RunHermes(budget.Context(), *configuration, func(ctx context.Context) error {
 		request := func(ctx context.Context, name string, secretType action.SecretType) ([]byte, error) {
@@ -169,22 +175,32 @@ func (a *Login) Run(ctx context.Context, raw json.RawMessage) (result action.Res
 			return action.RequestReusableSecret(waiting, name)
 		}
 		var err error
-		outcome, err = browserlogin.RunHermes(ctx, browserlogin.Request{
+		var page contracts.Browser
+		page, err = a.browserFactory(ctx)
+		if err != nil {
+			return err
+		}
+		if page == nil {
+			return errors.New("host browser factory returned no browser")
+		}
+		outcome, err = page.Login(ctx, contracts.LoginRequest{
 			URL: input.URL, VerificationURL: input.VerificationURL, ExpectedText: input.ExpectedText,
+		}, contracts.CredentialSource{
 			OneTimeCode: func(ctx context.Context) ([]byte, error) {
 				return request(ctx, codeName, action.SecretTransient)
 			},
-		}, func(ctx context.Context) (browserlogin.Credentials, error) {
-			username, err := request(ctx, usernameName, action.SecretReusable)
-			if err != nil {
-				return browserlogin.Credentials{}, err
-			}
-			password, err := request(ctx, passwordName, action.SecretReusable)
-			if err != nil {
-				clear(username)
-				return browserlogin.Credentials{}, err
-			}
-			return browserlogin.Credentials{Username: username, Password: password}, nil
+			Credentials: func(ctx context.Context) (contracts.Credentials, error) {
+				username, err := request(ctx, usernameName, action.SecretReusable)
+				if err != nil {
+					return contracts.Credentials{}, err
+				}
+				password, err := request(ctx, passwordName, action.SecretReusable)
+				if err != nil {
+					clear(username)
+					return contracts.Credentials{}, err
+				}
+				return contracts.Credentials{Username: username, Password: password}, nil
+			},
 		})
 		return err
 	})
@@ -194,7 +210,7 @@ func (a *Login) Run(ctx context.Context, raw json.RawMessage) (result action.Res
 		status := "failed"
 		var outputErr error
 		if runErr == nil {
-			output := LoginOutput{Engine: browserruntime.Lightpanda, Result: outcome}
+			output := LoginOutput{Engine: browserruntime.Lightpanda, Result: browserlogin.Result(outcome)}
 			output.Status = sensitive.Redact(ctx, output.Status)
 			output.Reason = sensitive.Redact(ctx, output.Reason)
 			encoded, outputErr = json.Marshal(output)

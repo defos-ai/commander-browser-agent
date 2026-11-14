@@ -13,12 +13,16 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	browseragent "github.com/defos-ai/commander-browser-agent"
 	browserruntime "github.com/defos-ai/commander-browser-agent/browser"
+	"github.com/defos-ai/commander-browser-agent/browser/contracts"
+	hermesagent "github.com/defos-ai/commander-browser-agent/browser/hermes"
+	"github.com/defos-ai/commander-browser-agent/browser/lightpanda"
 	browserlogin "github.com/defos-ai/commander-browser-agent/browser/login"
 	"github.com/defos-ai/commander-browser-agent/internal/browsing"
 	"github.com/defos-ai/commander-browser-agent/internal/hermes"
@@ -48,8 +52,15 @@ type hermesSessionScenario struct {
 	prepareOnly  bool
 	checkpointed bool
 	cancel       <-chan struct{}
-	scope        chan context.Context
+	scope        chan hermesSessionScope
 	result       chan error
+}
+
+type hermesSessionScope struct {
+	ctx     context.Context
+	agent   contracts.BrowserAgent
+	browser contracts.Browser
+	request contracts.BrowseRequest
 }
 
 type hermesSessionOutput struct {
@@ -153,11 +164,20 @@ func newHermesSessionHostWithOptions(t *testing.T, cases map[string]hermesSessio
 						}
 						return hermes.Reply{}, nil
 					}
+					var scopedAgent contracts.BrowserAgent
 					if scenario.scope != nil {
 						if _, err := hermes.Run(context.WithoutCancel(workCtx), request, handler); err == nil {
 							t.Error("a detached context retained native execution authority")
 						}
-						scenario.scope <- workCtx
+						scope, err := newHermesSessionScope(t, workCtx, request)
+						if err != nil {
+							return err
+						}
+						requireHermesPortScopeRefused(t, context.WithoutCancel(workCtx), scope, contracts.LoginRequest{
+							URL: "http://127.0.0.1/", VerificationURL: "http://127.0.0.1/", ExpectedText: "Unused detached scope marker",
+						})
+						scenario.scope <- scope
+						scopedAgent = scope.agent
 					}
 					runCtx, cancel := context.WithTimeout(workCtx, 25*time.Second)
 					defer cancel()
@@ -171,7 +191,14 @@ func newHermesSessionHostWithOptions(t *testing.T, cases map[string]hermesSessio
 						}
 					}()
 					defer func() { cancel(); <-joined }()
-					result, err = hermes.Run(runCtx, request, handler)
+					if scopedAgent != nil {
+						result, err = scopedAgent.Browse(runCtx, contracts.BrowseRequest{
+							Objective: request.Objective, MaxIterations: request.MaxIterations,
+							MaxTokensPerResponse: request.MaxTokens, TimeoutSeconds: request.TimeoutSeconds,
+						}, handler)
+					} else {
+						result, err = hermes.Run(runCtx, request, handler)
+					}
 					return err
 				})
 				if scenario.result != nil {
@@ -225,7 +252,7 @@ func startHermesSessionHost(h *hermesSessionHost, owner string, executors []acti
 	configuration := agent.AgentConfig{ID: owner, Type: "browser-agent", Actions: executors, Sessions: h.manager, ArtifactFileStore: files,
 		Secrets: &agent.SecretConfig{RequestTTL: 2 * time.Second, RefreshInterval: 500 * time.Millisecond, RetryInterval: 100 * time.Millisecond}, HeartbeatInterval: &zero}
 	if h.production {
-		h.host, err = browseragent.NewAgent(configuration)
+		h.host, err = browseragent.NewAgent(configuration, realBrowserDependencies())
 	} else {
 		h.host, err = agent.NewAgent(configuration)
 	}
@@ -474,6 +501,70 @@ func hermesSessionScript(t *testing.T, code, observation string) (*fakes.HermesM
 	return model, hermesRequest(model, []byte(key))
 }
 
+func newHermesSessionScope(t *testing.T, ctx context.Context, request hermes.Request) (hermesSessionScope, error) {
+	t.Helper()
+	profiles, processes := hermesSessionProfiles(t), hermesReadinessProcesses(t)
+	model := hermesagent.ModelConfig{Provider: request.Provider, Model: request.Model, Endpoint: request.Endpoint, APIKey: request.APIKey}
+	agent, err := hermesagent.NewAgent(ctx, model)
+	if err != nil {
+		return hermesSessionScope{}, err
+	}
+	browser, err := lightpanda.NewBrowser(ctx)
+	if err != nil {
+		return hermesSessionScope{}, err
+	}
+	if candidate, err := hermesagent.NewAgent(context.WithoutCancel(ctx), model); candidate != nil || err == nil {
+		return hermesSessionScope{}, errors.New("a detached context constructed a browser agent")
+	}
+	if candidate, err := lightpanda.NewBrowser(context.WithoutCancel(ctx)); candidate != nil || err == nil {
+		return hermesSessionScope{}, errors.New("a detached context constructed a browser capability")
+	}
+	if !reflect.DeepEqual(profiles, hermesSessionProfiles(t)) || !reflect.DeepEqual(processes, hermesReadinessProcesses(t)) {
+		return hermesSessionScope{}, errors.New("capability constructors started browser work")
+	}
+	return hermesSessionScope{ctx: ctx, agent: agent, browser: browser, request: contracts.BrowseRequest{
+		Objective: request.Objective, MaxIterations: request.MaxIterations,
+		MaxTokensPerResponse: request.MaxTokens, TimeoutSeconds: request.TimeoutSeconds,
+	}}, nil
+}
+
+func requireHermesPortScopeRefused(t *testing.T, ctx context.Context, scope hermesSessionScope, login contracts.LoginRequest) {
+	t.Helper()
+	var hooks, secrets atomic.Int32
+	result, err := scope.agent.Browse(ctx, scope.request, func(context.Context, contracts.Event) (contracts.Reply, error) {
+		hooks.Add(1)
+		return contracts.Reply{}, errors.New("the stale agent reached a callback")
+	})
+	if err == nil || result != (contracts.BrowseResult{}) {
+		t.Error("a detached, expired or later callback reused a retained agent capability")
+	}
+	loggedIn, err := scope.browser.Login(ctx, login, contracts.CredentialSource{
+		Credentials: func(context.Context) (contracts.Credentials, error) {
+			secrets.Add(1)
+			return contracts.Credentials{}, errors.New("the stale browser requested credentials")
+		},
+		OneTimeCode: func(context.Context) ([]byte, error) {
+			secrets.Add(1)
+			return nil, errors.New("the stale browser requested a transient code")
+		},
+	})
+	if err == nil || loggedIn != (contracts.LoginResult{}) {
+		t.Error("a detached, expired or later callback reused a retained login capability")
+	}
+	image, err := scope.browser.Screenshot(ctx, contracts.ScreenshotRequest{Width: 1280, Height: 720})
+	if err == nil || len(image.PNG) != 0 || image.Truncated {
+		t.Error("a detached, expired or later callback reused a retained screenshot capability")
+	}
+	clear(image.PNG)
+	if hooks.Load() != 0 || secrets.Load() != 0 {
+		t.Error("scope refusal occurred after a model callback or secret request")
+	}
+}
+
+type hermesScopeLogs struct{}
+
+func (hermesScopeLogs) Log(ctx context.Context, _ string) error { return ctx.Err() }
+
 func TestHermesSessionsFrameworkDispatchReuseAndIsolation(t *testing.T) {
 	var retained, isolated atomic.Int32
 	site := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -495,7 +586,7 @@ func TestHermesSessionsFrameworkDispatchReuseAndIsolation(t *testing.T) {
 	firstModel, first := hermesSessionScript(t, fmt.Sprintf("# Establish the fixture account\nnew_tab(%q)\nprint(js('document.body.textContent'))", site.URL+"/set"), "Native account established")
 	reuseModel, reuse := hermesSessionScript(t, fmt.Sprintf("# Read the retained account\ngoto_url(%q)\nprint(js('document.body.textContent'))", site.URL+"/read"), "Native account retained")
 	freshModel, fresh := hermesSessionScript(t, fmt.Sprintf("# Read an independent fixture session\nnew_tab(%q)\nprint(js('document.body.textContent'))", site.URL+"/read"), "Independent native session")
-	scope := make(chan context.Context, 1)
+	scope := make(chan hermesSessionScope, 1)
 	h := newHermesSessionHost(t, map[string]hermesSessionScenario{"first": {request: first, scope: scope}, "reuse": {request: reuse}, "fresh": {request: fresh}})
 	root := h.task(nil, sessions.Open, "first")
 	if root.SessionIntent.ID != root.ID || root.SessionIntent.ScopeID != root.ID {
@@ -513,8 +604,31 @@ func TestHermesSessionsFrameworkDispatchReuseAndIsolation(t *testing.T) {
 	if legacyErr == nil || legacyCalled || firstModel.Calls() != 2 {
 		t.Fatal("the same claim mixed legacy and native browser automation")
 	}
-	if _, err := hermes.Run(<-scope, first, nil); err == nil || firstModel.Calls() != 2 {
+	retainedScope := <-scope
+	if _, err := hermes.Run(retainedScope.ctx, first, nil); err == nil || firstModel.Calls() != 2 {
 		t.Fatal("a retained context executed outside its owning manager callback")
+	}
+	loginScope := contracts.LoginRequest{URL: site.URL + "/set", VerificationURL: site.URL + "/read", ExpectedText: "Scope rejection must precede navigation"}
+	requireHermesPortScopeRefused(t, retainedScope.ctx, retainedScope, loginScope)
+	useScope := binding
+	useScope.Mode = sessions.Use
+	_, err := h.manager.RunHermes(action.WithLogs(action.WithSession(t.Context(), &useScope), hermesScopeLogs{}), h.options, func(ctx context.Context) error {
+		// This new grant is valid for the same retained worker, but cannot renew
+		// handles borrowed by the earlier action's callback.
+		requireHermesPortScopeRefused(t, ctx, retainedScope, loginScope)
+		current, err := lightpanda.NewBrowser(ctx)
+		if err != nil {
+			return err
+		}
+		image, err := current.Screenshot(ctx, contracts.ScreenshotRequest{Width: 1280, Height: 720})
+		defer clear(image.PNG)
+		if err == nil && len(image.PNG) == 0 {
+			return errors.New("the current browser capability returned no protected image")
+		}
+		return err
+	})
+	if err != nil || firstModel.Calls() != 2 {
+		t.Fatal("scoped capability checks lost the live browser or reached an expired agent's model")
 	}
 	child := h.task(&root, sessions.Open, "reuse")
 	continued := h.call(child)

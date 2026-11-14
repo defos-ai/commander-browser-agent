@@ -8,6 +8,7 @@ import (
 	"time"
 
 	browserruntime "github.com/defos-ai/commander-browser-agent/browser"
+	"github.com/defos-ai/commander-browser-agent/browser/contracts"
 	browserscreenshot "github.com/defos-ai/commander-browser-agent/browser/screenshot"
 	"github.com/defos-ai/commander/framework/agent/action"
 	"github.com/defos-ai/commander/framework/agent/environment"
@@ -37,12 +38,13 @@ type ScreenshotOutput struct {
 type Screenshot struct {
 	*action.Base
 	runner         BrowserRunner
+	browserFactory contracts.BrowserFactory
 	configuration  atomic.Pointer[browserruntime.HermesOptions]
 	validateInput  func(any) error
 	validateOutput func(any) error
 }
 
-func NewScreenshot(runner BrowserRunner) *Screenshot {
+func NewScreenshot(runner BrowserRunner, factory contracts.BrowserFactory) *Screenshot {
 	input, err := action.ResolveSchema(json.RawMessage(screenshotInputSchema))
 	if err != nil {
 		panic("invalid built-in screenshot input schema: " + err.Error())
@@ -54,7 +56,7 @@ func NewScreenshot(runner BrowserRunner) *Screenshot {
 	return &Screenshot{
 		Base: action.NewBase(actionmodel.Action{Name: ScreenshotName, Description: ScreenshotDescription, SessionMode: "use",
 			InputSchema: json.RawMessage(screenshotInputSchema), OutputSchema: json.RawMessage(screenshotOutputSchema)}),
-		runner: runner, validateInput: input.Validate, validateOutput: output.Validate,
+		runner: runner, browserFactory: factory, validateInput: input.Validate, validateOutput: output.Validate,
 	}
 }
 
@@ -68,6 +70,10 @@ func (a *Screenshot) Discover(ctx context.Context, env environment.Environment, 
 			status, discoveryErr = action.Unknown, errors.Join(err, context.Cause(ctx))
 		}
 	}()
+	if a.browserFactory == nil {
+		a.SetUnavailable("The host must provide its browser factory", actionmodel.Requirement{Kind: actionmodel.ConfigurationRequirement, Name: "browser-factory"})
+		return action.Unavailable, nil
+	}
 	configuration, status, err := discoverRuntime(ctx, a.Base, a.runner, env, scope)
 	if err == nil && status == action.Ready {
 		a.configuration.Store(configuration)
@@ -83,7 +89,7 @@ func (a *Screenshot) Run(ctx context.Context, raw json.RawMessage) (action.Resul
 		return action.Result{}, err
 	}
 	configuration := a.configuration.Load()
-	if configuration == nil || a.runner == nil {
+	if configuration == nil || a.runner == nil || a.browserFactory == nil {
 		return action.Result{}, errors.New("screenshot is unavailable; run discovery first")
 	}
 	if len(raw) > 8192 || validateBrowseJSON(a.validateInput, raw) != nil {
@@ -109,10 +115,18 @@ func (a *Screenshot) Run(ctx context.Context, raw json.RawMessage) (action.Resul
 	if err := action.Log(budget, "Capturing a protected text snapshot from the retained browser page"); err != nil {
 		return action.Result{}, err
 	}
-	var capture browserscreenshot.Image
+	var capture contracts.Image
 	snapshot, runErr := a.runner.RunHermes(budget, *configuration, func(ctx context.Context) error {
 		var err error
-		capture, err = browserscreenshot.CaptureHermes(ctx, width, height)
+		var page contracts.Browser
+		page, err = a.browserFactory(ctx)
+		if err != nil {
+			return err
+		}
+		if page == nil {
+			return errors.New("host browser factory returned no browser")
+		}
+		capture, err = page.Screenshot(ctx, contracts.ScreenshotRequest{Width: width, Height: height})
 		return err
 	})
 	result := action.Result{Session: &snapshot}

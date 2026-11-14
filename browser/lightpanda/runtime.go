@@ -1,4 +1,4 @@
-// Package lightpanda discovers the supported browser automation executable.
+// Package lightpanda adapts retained sessions and discovers the supported executable.
 package lightpanda
 
 import (
@@ -7,12 +7,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/defos-ai/commander-browser-agent/browser"
 	"github.com/defos-ai/commander/framework/agent/environment"
 	actionmodel "github.com/defos-ai/commander/framework/domain/actions"
 )
 
 // Version is the Lightpanda release supported by this agent.
-const Version = "1.0.2"
+const Version = browser.LightpandaVersion
 
 // Runtime identifies a version-checked executable. It owns no browser process.
 type Runtime struct{ executable string }

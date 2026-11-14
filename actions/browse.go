@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 
 	browserruntime "github.com/defos-ai/commander-browser-agent/browser"
+	"github.com/defos-ai/commander-browser-agent/browser/contracts"
 	"github.com/defos-ai/commander-browser-agent/internal/browsing"
 	"github.com/defos-ai/commander/framework/agent/action"
 	"github.com/defos-ai/commander/framework/agent/environment"
@@ -30,18 +31,19 @@ type BrowseOutput = browsing.HermesBrowseOutput
 type Browse struct {
 	*action.Base
 	runner        BrowserRunner
+	agentFactory  contracts.BrowserAgentFactory
 	configuration atomic.Pointer[browserruntime.HermesOptions]
 	setup         browsing.Setup
 }
 
 // NewBrowse creates fresh discovery/setup state without opening a runtime.
-func NewBrowse(runner BrowserRunner) *Browse {
+func NewBrowse(runner BrowserRunner, factory contracts.BrowserAgentFactory) *Browse {
 	return &Browse{
 		Base: action.NewBase(actionmodel.Action{
 			Name: BrowseName, Description: BrowseDescription, SessionMode: "open",
 			InputSchema: json.RawMessage(browsing.HermesBrowseInputSchema), OutputSchema: json.RawMessage(browsing.HermesBrowseOutputSchema),
 		}),
-		runner: runner,
+		runner: runner, agentFactory: factory,
 	}
 }
 
@@ -54,6 +56,10 @@ func (a *Browse) Discover(ctx context.Context, env environment.Environment, scop
 			status, discoveryErr = action.Unknown, errors.Join(ctx.Err(), context.Cause(ctx))
 		}
 	}()
+	if a.agentFactory == nil {
+		a.SetUnavailable("The host must provide its browser agent factory", actionmodel.Requirement{Kind: actionmodel.ConfigurationRequirement, Name: "browser-agent-factory"})
+		return action.Unavailable, nil
+	}
 	configuration, status, err := discoverRuntime(ctx, a.Base, a.runner, env, scope)
 	if err == nil && status == action.Ready {
 		a.configuration.Store(configuration)
@@ -69,10 +75,10 @@ func (a *Browse) Run(ctx context.Context, raw json.RawMessage) (action.Result, e
 		return action.Result{}, err
 	}
 	configuration := a.configuration.Load()
-	if configuration == nil || a.runner == nil {
+	if configuration == nil || a.runner == nil || a.agentFactory == nil {
 		return action.Result{}, errors.New("browse is unavailable; run discovery first")
 	}
-	return a.setup.RunHermesBrowse(ctx, a.runner, *configuration, raw)
+	return a.setup.RunHermesBrowse(ctx, a.runner, *configuration, a.agentFactory, raw)
 }
 
 func validateBrowseJSON(validate func(any) error, raw json.RawMessage) error {

@@ -1,5 +1,5 @@
-// Package hermes discovers the pinned Python browser-agent runtime without
-// starting an agent, model request or browser session.
+// Package hermes adapts the pinned native browser agent and discovers its runtime.
+// Discovery starts no agent, model request or browser session.
 package hermes
 
 import (

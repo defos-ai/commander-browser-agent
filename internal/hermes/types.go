@@ -3,8 +3,7 @@
 package hermes
 
 import (
-	"context"
-
+	"github.com/defos-ai/commander-browser-agent/browser/contracts"
 	"github.com/defos-ai/commander/framework/domain/sessions"
 )
 
@@ -49,27 +48,14 @@ type workerRequest struct {
 
 // Event contains only a bounded question or fixed progress/admission metadata.
 // Browser code, tool arguments and raw runtime errors never cross this boundary.
-type Event struct {
-	Kind     string   `json:"kind"`
-	Sequence int      `json:"sequence,omitempty"`
-	Tool     string   `json:"tool,omitempty"`
-	Text     string   `json:"text,omitempty"`
-	Options  []string `json:"options,omitempty"`
-}
+type Event = contracts.Event
 
-type Reply struct {
-	Approved bool   `json:"approved,omitempty"`
-	Answer   string `json:"answer,omitempty"`
-}
+type Reply = contracts.Reply
 
 // Handler must respect cancellation. Admission is refused unless the handler
 // positively confirms it; a missing checkpoint receipt is never approval.
-type Handler func(context.Context, Event) (Reply, error)
+type Handler = contracts.Hooks
 
 // Result deliberately excludes transcripts, reasoning and provider errors.
 // Tool admission fences a whole Python invocation, including its uncertain effects.
-type Result struct {
-	Status        string `json:"status"`
-	Text          string `json:"text,omitempty"`
-	ModelRequests int    `json:"model_requests,omitempty"`
-}
+type Result = contracts.BrowseResult

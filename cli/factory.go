@@ -8,6 +8,10 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/defos-ai/commander-browser-agent/actions"
+	"github.com/defos-ai/commander-browser-agent/browser/contracts"
+	"github.com/defos-ai/commander-browser-agent/browser/hermes"
+	"github.com/defos-ai/commander-browser-agent/browser/lightpanda"
 	"github.com/defos-ai/commander/framework/comms"
 	"github.com/defos-ai/commander/framework/domain/artifacts"
 	"github.com/defos-ai/commander/providers/fs"
@@ -21,6 +25,7 @@ import (
 type dependencies struct {
 	Bus               comms.Bus
 	ArtifactFileStore artifacts.ArtifactFileStore
+	Actions           actions.Dependencies
 	closers           []func() error
 }
 
@@ -36,7 +41,14 @@ func openDependencies(ctx context.Context, configuration config) (result *depend
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	d := &dependencies{}
+	d := &dependencies{Actions: actions.Dependencies{
+		BrowserAgent: func(ctx context.Context, model contracts.ModelConfig) (contracts.BrowserAgent, error) {
+			return hermes.NewAgent(ctx, model)
+		},
+		Browser: func(ctx context.Context) (contracts.Browser, error) {
+			return lightpanda.NewBrowser(ctx)
+		},
+	}}
 	defer func() {
 		if err != nil {
 			err = errors.Join(err, d.Close())

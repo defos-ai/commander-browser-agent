@@ -8,8 +8,8 @@ import (
 )
 
 // NewActions creates fresh actions using this host's shared browser sessions.
-func NewActions(runner agentactions.BrowserRunner) []action.Executor {
-	return agentactions.NewActions(runner)
+func NewActions(runner agentactions.BrowserRunner, dependencies agentactions.Dependencies) []action.Executor {
+	return agentactions.NewActions(runner, dependencies)
 }
 
 func ActionNames() []string {

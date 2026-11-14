@@ -68,7 +68,7 @@ func Run(ctx context.Context, args []string, stderr io.Writer) (result error) {
 			result = errors.Join(result, err)
 		}
 	}()
-	actions := browser.NewActions(sessions)
+	actions := browser.NewActions(sessions, dependencies.Actions)
 	if configuration.actionNames != nil {
 		selected := make([]action.Executor, 0, len(configuration.actionNames))
 		for _, name := range configuration.actionNames {
@@ -88,7 +88,7 @@ func Run(ctx context.Context, args []string, stderr io.Writer) (result error) {
 		ArtifactFileStore: dependencies.ArtifactFileStore,
 		Logger:            logger,
 		HeartbeatInterval: &configuration.heartbeatInterval,
-	})
+	}, dependencies.Actions)
 	if err != nil {
 		return err
 	}

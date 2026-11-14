@@ -10,7 +10,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/defos-ai/commander-browser-agent/internal/hermes"
+	"github.com/defos-ai/commander-browser-agent/browser/contracts"
 	"github.com/defos-ai/commander/framework/agent/action"
 	"github.com/defos-ai/commander/framework/domain/sessions"
 )
@@ -192,25 +192,25 @@ func (c *HermesCheckpoints) Start(ctx context.Context, limits HermesCheckpointLi
 
 // Handler persists admission/question fences before invoking the inner handler.
 // Answers are counted only as prepared, never as delivered to the model.
-func (c *HermesCheckpoints) Handler(inner hermes.Handler) hermes.Handler {
-	return func(ctx context.Context, event hermes.Event) (hermes.Reply, error) {
+func (c *HermesCheckpoints) Handler(inner contracts.Hooks) contracts.Hooks {
+	return func(ctx context.Context, event contracts.Event) (contracts.Reply, error) {
 		if err := c.enter(ctx); err != nil {
-			return hermes.Reply{}, err
+			return contracts.Reply{}, err
 		}
 		if !c.started || c.finishAttempt || c.callback || c.action != "browse" || !c.identity(ctx) || !validHermesCheckpointEvent(event) {
 			c.leave()
-			return hermes.Reply{}, c.fail(errHermesCheckpoint)
+			return contracts.Reply{}, c.fail(errHermesCheckpoint)
 		}
 		if err := c.event(ctx, event); err != nil {
 			c.leave()
-			return hermes.Reply{}, err
+			return contracts.Reply{}, err
 		}
 		c.callback = true
 		c.leave()
 
 		// No lock or execution gate is held across user callbacks. A reentrant
 		// call is refused by callback state rather than deadlocking its caller.
-		var reply hermes.Reply
+		var reply contracts.Reply
 		var err error
 		if inner != nil {
 			reply, err = inner(ctx, event)
@@ -218,17 +218,17 @@ func (c *HermesCheckpoints) Handler(inner hermes.Handler) hermes.Handler {
 			err = errHermesCheckpoint
 		}
 		if err != nil {
-			return hermes.Reply{}, c.fail(hermesCheckpointError(ctx, err))
+			return contracts.Reply{}, c.fail(hermesCheckpointError(ctx, err))
 		}
 		if err := c.enter(ctx); err != nil {
-			return hermes.Reply{}, err
+			return contracts.Reply{}, err
 		}
 		defer c.leave()
 		c.callback = false
 		if !c.identity(ctx) || ctx.Err() != nil ||
 			event.Kind == "admit" && (!reply.Approved || reply.Answer != "") ||
 			event.Kind == "question" && !hermesCheckpointText(reply.Answer, 2000) {
-			return hermes.Reply{}, c.fail(hermesCheckpointError(ctx, errHermesCheckpoint))
+			return contracts.Reply{}, c.fail(hermesCheckpointError(ctx, errHermesCheckpoint))
 		}
 		if event.Kind == "question" {
 			c.counters.AnswersPrepared++
@@ -239,7 +239,7 @@ func (c *HermesCheckpoints) Handler(inner hermes.Handler) hermes.Handler {
 }
 
 // event runs under the execution gate and retains only fixed metadata.
-func (c *HermesCheckpoints) event(ctx context.Context, event hermes.Event) error {
+func (c *HermesCheckpoints) event(ctx context.Context, event contracts.Event) error {
 	if event.Kind == "progress" {
 		if event.Tool == "" {
 			return nil
@@ -337,7 +337,7 @@ func (c *HermesCheckpoints) save(ctx context.Context, name string, fact hermesCh
 	return c.failed()
 }
 
-func validHermesCheckpointEvent(event hermes.Event) bool {
+func validHermesCheckpointEvent(event contracts.Event) bool {
 	switch event.Kind {
 	case "admit":
 		return event.Sequence > 0 && event.Tool == "browser_exec" && event.Text == "" && len(event.Options) == 0

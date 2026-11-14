@@ -16,6 +16,45 @@ type workerGrant struct {
 	uses   sync.WaitGroup
 }
 
+// Scope binds an adapter to one private manager callback. Its zero value grants
+// nothing; it carries no public worker handle or transferable session selector.
+type Scope struct {
+	grant *workerGrant
+}
+
+// NewScope captures only the current callback's grant. It starts no runtime,
+// borrows no browser connection and cannot extend that callback's lifetime.
+func NewScope(ctx context.Context) (Scope, error) {
+	if err := contextError(ctx); err != nil {
+		return Scope{}, err
+	}
+	grant, _ := ctx.Value(workerContextKey{}).(*workerGrant)
+	scope := Scope{grant: grant}
+	if err := scope.Check(ctx); err != nil {
+		return Scope{}, err
+	}
+	return scope, nil
+}
+
+// Check refuses detached or expired contexts and any later callback's grant,
+// even when that callback happens to use the same retained worker. The existing
+// operation-level borrow still owns admission and joining after this check.
+func (s Scope) Check(ctx context.Context) error {
+	if err := contextError(ctx); err != nil {
+		return err
+	}
+	grant, ok := ctx.Value(workerContextKey{}).(*workerGrant)
+	if !ok || grant == nil || s.grant == nil || grant != s.grant || ctx.Done() == nil {
+		return ErrClosed
+	}
+	grant.mu.Lock()
+	defer grant.mu.Unlock()
+	if !grant.active || grant.ctx.Err() != nil {
+		return errors.Join(ErrClosed, contextError(grant.ctx))
+	}
+	return nil
+}
+
 // WithWorker lends one manager-owned worker to a synchronous session callback.
 // A retained context never becomes valid again for a later callback.
 func WithWorker(ctx context.Context, worker *Worker, work func(context.Context) error) error {
