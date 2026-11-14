@@ -118,10 +118,10 @@ func TestReleaseManifest(t *testing.T) {
 		!reflect.DeepEqual(value.Actions, []manifest.Action{{Name: "analyze-custom", Description: "Count words in custom text."}}) {
 		t.Fatalf("manifest omitted static metadata: %+v", value)
 	}
-	if len(value.Native) != 6 {
-		t.Fatalf("manifest has %d native platforms; want 6", len(value.Native))
+	if len(value.Native) != 4 {
+		t.Fatalf("manifest has %d native platforms; want 4", len(value.Native))
 	}
-	for _, platform := range []string{"linux", "darwin", "windows"} {
+	for _, platform := range []string{"linux", "darwin"} {
 		for _, arch := range []string{"amd64", "arm64"} {
 			asset := assetName(platform, arch)
 			data, err := os.ReadFile(filepath.Join(directory, "dist", asset))
@@ -233,24 +233,16 @@ func fixture(t *testing.T) string {
 	if err := os.Mkdir(filepath.Join(directory, "dist"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	for _, platform := range []string{"linux", "darwin", "windows"} {
+	for _, platform := range []string{"linux", "darwin"} {
 		for _, arch := range []string{"amd64", "arm64"} {
-			contents := "abc"
-			if platform == "windows" {
-				contents = "hello"
-			}
-			writeFile(t, filepath.Join(directory, "dist", assetName(platform, arch)), contents)
+			writeFile(t, filepath.Join(directory, "dist", assetName(platform, arch)), "abc")
 		}
 	}
 	return directory
 }
 
 func assetName(platform, arch string) string {
-	name := "commander-custom-agent_" + platform + "_" + arch
-	if platform == "windows" {
-		name += ".exe"
-	}
-	return name
+	return "commander-custom-agent_" + platform + "_" + arch
 }
 
 func manifestArgs() []string {

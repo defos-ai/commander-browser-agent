@@ -675,7 +675,10 @@
   dependencies to local checkouts.
 - Manifest generation uses `framework/agent/manifest.Render` and its embedded
   template. Do not add a repository-local template or a `--template` release flag.
-- Make release chains tests → six native builds → Docker image → digest-pinned
+- Native release assets cover Linux and macOS, each on amd64 and arm64. Do not
+  build or advertise native Windows assets; Windows users run the Linux agent
+  through Docker or WSL until the required native runtimes are supported.
+- Make release chains tests → four native builds → Docker image → digest-pinned
   `agent.yaml` and release assets from one tested revision. Keep build/push
   workflows reusable, serialize releases, preserve existing tags/assets and retry
   failed jobs in the same run. After complete publication, promote Docker `stable`

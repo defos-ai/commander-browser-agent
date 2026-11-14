@@ -128,12 +128,9 @@ func writeManifest(data metadata, digest, assets string) error {
 		return errors.New("digest must be sha256: followed by 64 lowercase hexadecimal characters")
 	}
 	native := make(map[string]manifest.NativeAsset)
-	for _, platform := range []string{"linux", "darwin", "windows"} {
+	for _, platform := range []string{"linux", "darwin"} {
 		for _, arch := range []string{"amd64", "arm64"} {
 			asset := data.Binary + "_" + platform + "_" + arch
-			if platform == "windows" {
-				asset += ".exe"
-			}
 			checksum, err := hashAsset(filepath.Join(assets, asset))
 			if err != nil {
 				return err
