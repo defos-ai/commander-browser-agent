@@ -81,10 +81,21 @@
   linux/arm64 binaries, fails unsupported architectures, and disables telemetry
   and core dumps. Keep standalone context and `GOWORK=off`, a real UID1000 user
   and writable home.
-- Follow the two-stage Go build/Debian runtime Dockerfile pattern. Download
-  Lightpanda with the build image's existing tools. Runtime workdir is
+- Use two stages: a Go build and `python:3.14.10-slim-bookworm` runtime.
+  Keep shell commands for building, installation, user setup and readiness in
+  [docker/scripts/](docker/scripts/); the Dockerfile declares the high-level
+  steps, files, mounts and runtime settings. Mount runtime setup/check scripts
+  only for their build steps; do not retain them in the final image.
+  [docker/scripts/fetch-lightpanda.sh](docker/scripts/fetch-lightpanda.sh) verifies
+  Lightpanda using the build image's existing tools. Inherit CPython, CA
+  certificates and libstdc++ from the Python base; do not copy Python, maintain
+  a shared-library install list or add a separate `ldconfig` step. Runtime workdir is
   `/home/commander`, with private mode-0700 `state/`; CLI owns bus/storage defaults,
   while Compose supplies its shared `/state` mounts and environment overrides.
+  Keep image environment to HOME and the Lightpanda path/disable flags. Workers
+  configure their own private Hermes homes, Python paths and environment.
+  Worker/plugin scripts are embedded in Go and staged per session; do not copy
+  them separately into the image. Keep the external offline checker installed.
 - Keep the upstream AGPL-3.0-or-later license, embedded-font notices and runtime
   attribution in [third_party/lightpanda/](third_party/lightpanda/). Docker copies
   these files to `/usr/share/doc/lightpanda` without fetching them during builds.
@@ -102,8 +113,10 @@
   3.14.10 and the frozen core lockfile (browser-harness 0.1.13). Default actions
   use its native browser tools through local child processes. Keep model configuration
   and keys out of image settings. No runtime dependency downloads or lazy installs.
-  [docker/fetch-hermes.sh](docker/fetch-hermes.sh) pins the archive and both uv
+  [docker/scripts/fetch-hermes.sh](docker/scripts/fetch-hermes.sh) pins the archive and both uv
   binaries; preserve the license and attribution in [third_party/hermes/](third_party/hermes/).
+  Install the frozen environment at its final path using a read-only build-time
+  uv mount; do not retain uv in the runtime image.
   The offline readiness command is `/opt/hermes/.venv/bin/python -I -S
   /usr/local/lib/commander-browser/hermes/check.py`. It checks the packaged
   identity and imports using a temporary private home, without starting an
