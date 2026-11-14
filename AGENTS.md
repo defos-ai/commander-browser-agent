@@ -81,7 +81,11 @@
   linux/arm64 binaries, fails unsupported architectures, and disables telemetry
   and core dumps. Keep standalone context and `GOWORK=off`, a real UID1000 user
   and writable home.
-- Use two stages: a Go build and `python:3.14.10-slim-bookworm` runtime.
+- Use two stages: a Go build and `python:3.14.10-slim-trixie` runtime.
+  Lightpanda 1.0.2's pinned ARM64 binary requires glibc 2.38; Bookworm's 2.36
+  cannot run it. Keep the runtime on a compatible base. The build-time readiness
+  script checks Lightpanda's exact version with a ten-second bound before Hermes
+  imports, as UID1000, without starting a browser server.
   Keep shell commands for building, installation, user setup and readiness in
   [docker/scripts/](docker/scripts/); the Dockerfile declares the high-level
   steps, files, mounts and runtime settings. Mount runtime setup/check scripts
@@ -726,9 +730,13 @@ the FS bus with managed secret delivery, checkpoint receipts and artifact upload
 Its fake model uses the real SDK HTTP boundary; no external model or demo stack
 is required.
 The production manager owns browser lifecycle; fixtures own HTTP pages only.
-CI compiles the race-enabled test binary in the Go bookworm image to match the
-runtime's glibc, then executes it as the runtime image's UID1000 with no external
-network. Use `--init` for this test container to reap browser descendants.
+CI runs the full runtime suite on native amd64 (`ubuntu-24.04`) and ARM64
+(`ubuntu-24.04-arm`) runners, with explicit matching image/compiler/test platforms
+and separate image caches. It compiles the race-enabled test binary in the Go
+Bookworm image for a compatible glibc baseline, then executes it as the runtime
+image's UID1000 with no external network. Use `--init` for this test container
+to reap browser descendants. Emulated smoke checks do not replace native ARM64
+workflow results.
 The `hermesintegration` tag adds permanent private-bridge scenarios using the
 packaged Python/Hermes paths and a fake HTTP model: native navigation, host
 admission, clarification, cookie reuse across runs, cancellation and confirmed

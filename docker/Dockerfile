@@ -17,7 +17,7 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
     sh docker/scripts/build-agent.sh
 
 # 3. Install Hermes and prepare the runtime user.
-FROM python:3.14.10-slim-bookworm
+FROM python:3.14.10-slim-trixie
 COPY --from=build /out/hermes /opt/hermes
 RUN --mount=type=bind,from=build,source=/out/uv,target=/tmp/uv,readonly \
     --mount=type=bind,source=docker/scripts/setup-runtime.sh,target=/tmp/setup-runtime.sh,readonly \

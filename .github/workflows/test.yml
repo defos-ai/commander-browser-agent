@@ -35,10 +35,18 @@ jobs:
 
   runtime:
     needs: unit
-    runs-on: ubuntu-latest
+    name: Runtime / ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {arch: amd64, runner: ubuntu-24.04}
+          - {arch: arm64, runner: ubuntu-24.04-arm}
     env:
       GOWORK: "off"
+      PLATFORM: linux/${{ matrix.arch }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -53,13 +61,14 @@ jobs:
         with:
           context: .
           file: docker/Dockerfile
+          platforms: ${{ env.PLATFORM }}
           load: true
           tags: commander-browser-agent:local
-          cache-from: type=gha,scope=agent
-          cache-to: type=gha,scope=agent,mode=max
+          cache-from: type=gha,scope=agent-${{ matrix.arch }}
+          cache-to: type=gha,scope=agent-${{ matrix.arch }},mode=max
       - name: Check packaged browser runtimes
         run: |
-          docker run --rm --network none --entrypoint /bin/sh commander-browser-agent:local -ec '
+          docker run --rm --platform "$PLATFORM" --network none --entrypoint /bin/sh commander-browser-agent:local -ec '
             test "$(id -u)" = 1000
             "$LIGHTPANDA_PATH" version
             test -s /usr/share/doc/lightpanda/LICENSE
@@ -72,7 +81,7 @@ jobs:
           '
       - name: Build agent workflow tests
         run: |
-          docker run --rm --user "$(id -u):$(id -g)" --workdir /src \
+          docker run --rm --platform "$PLATFORM" --user "$(id -u):$(id -g)" --workdir /src \
             --mount "type=bind,source=$PWD,target=/src,readonly" \
             --mount "type=bind,source=$RUNNER_TEMP,target=/out" \
             --env GOWORK=off --env GOTOOLCHAIN=local \
@@ -83,7 +92,7 @@ jobs:
             '
       - name: Test browser workflows and sessions
         run: |
-          docker run --rm --init --network none \
+          docker run --rm --platform "$PLATFORM" --init --network none \
             --mount "type=bind,source=$RUNNER_TEMP/browser-session-tests,target=/browser-session-tests,readonly" \
             --entrypoint /bin/sh commander-browser-agent:local -ec '
               /browser-session-tests -test.v -test.count=1 -test.timeout=8m
