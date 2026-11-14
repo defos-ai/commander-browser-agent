@@ -143,7 +143,7 @@ func newHermesSessionHostWithOptions(t *testing.T, cases map[string]hermesSessio
 					}
 					request := scenario.request
 					if scenario.managed {
-						request, err = h.setup.PrepareHermes(workCtx)
+						request, err = h.prepareManagedRequest(workCtx)
 						if err != nil {
 							return err
 						}
@@ -484,6 +484,16 @@ func hermesSessionCheck(t *testing.T, err error) {
 	if err != nil {
 		t.Fatal("native session fixture operation failed")
 	}
+}
+
+// prepareManagedRequest adapts model setup only for low-level native fixtures.
+// The caller owns the same key buffer and clears it after native work joins.
+func (h *hermesSessionHost) prepareManagedRequest(ctx context.Context) (hermes.Request, error) {
+	model, err := h.setup.PrepareModel(ctx)
+	if err != nil {
+		return hermes.Request{}, err
+	}
+	return hermes.Request{Provider: model.Provider, Model: model.Model, Endpoint: model.Endpoint, APIKey: model.APIKey}, nil
 }
 
 func hermesSessionScript(t *testing.T, code, observation string) (*fakes.HermesModel, hermes.Request) {

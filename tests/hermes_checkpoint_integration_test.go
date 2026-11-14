@@ -62,7 +62,7 @@ func (h *hermesSessionHost) runCheckpointed(ctx context.Context, binding session
 			return err
 		}
 		if scenario.managed {
-			request, err = h.setup.PrepareHermes(setupCtx)
+			request, err = h.prepareManagedRequest(setupCtx)
 			if err != nil {
 				return err
 			}

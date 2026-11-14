@@ -336,8 +336,8 @@ func TestHermesScreenshotUseDoesNotStartBrowser(t *testing.T) {
 }
 
 func TestHermesScreenshotRendererCancellationAndClose(t *testing.T) {
-	for _, closeSession := range []bool{false, true} {
-		t.Run(fmt.Sprintf("close=%t", closeSession), func(t *testing.T) {
+	for _, mode := range []string{"cancel", "close", "log_error"} {
+		t.Run(mode, func(t *testing.T) {
 			site := fixtures.NewBrowser(t)
 			h := newHermesSessionHost(t, map[string]hermesSessionScenario{"login": {login: nativeLoginFixture(site, 0, "/login", "/account")}})
 			root := h.task(nil, sessions.Open, "login")
@@ -351,7 +351,11 @@ func TestHermesScreenshotRendererCancellationAndClose(t *testing.T) {
 			requireNativeLogin(t, output, "verified", true)
 			binding.Mode = sessions.Use
 			before := hermesScreenshotState(t, h, binding)
-			logs := &hermesRenderingWait{entered: make(chan struct{}), pause: true}
+			logs := &hermesRenderingWait{entered: make(chan struct{}), pause: mode != "log_error"}
+			release := make(chan struct{})
+			if mode == "log_error" {
+				logs.release, logs.failure = release, errors.New("private-rendering-log-provider-failure")
+			}
 			work, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			type outcome struct {
@@ -372,24 +376,30 @@ func TestHermesScreenshotRendererCancellationAndClose(t *testing.T) {
 			if !h.control(binding, "inspect") || !h.snapshot(binding.Reference).Busy {
 				t.Fatal("native screenshot blocked independent session inspection")
 			}
-			if closeSession {
+			switch mode {
+			case "close":
 				if !h.control(binding, "close") || h.snapshot(binding.Reference).State != "closed" || h.snapshot(binding.Reference).Busy {
 					t.Fatal("native session close did not join its allocated renderer")
 				}
-			} else {
+			case "cancel":
 				cancel()
+			case "log_error":
+				close(release)
 			}
 			select {
 			case stopped := <-done:
-				if !errors.Is(stopped.err, context.Canceled) || len(stopped.result.Output) != 0 || len(stopped.result.Artifacts) != 0 {
-					t.Fatal("interrupted native renderer returned artifacts or lost cancellation")
+				if stopped.err == nil || mode != "log_error" && !errors.Is(stopped.err, context.Canceled) || len(stopped.result.Output) != 0 || len(stopped.result.Artifacts) != 0 {
+					t.Fatal("failed native renderer returned artifacts or lost cancellation")
+				}
+				if mode == "log_error" && (errors.Is(stopped.err, context.Canceled) || strings.Contains(stopped.err.Error(), logs.failure.Error())) {
+					t.Fatal("rendering log failure canceled the caller or exposed private provider details")
 				}
 			case <-time.After(6 * time.Second):
 				t.Fatal("native renderer did not join after interruption")
 			}
-			if !closeSession {
+			if mode != "close" {
 				if h.snapshot(binding.Reference).State != "connected" || before != hermesScreenshotState(t, h, binding) {
-					t.Fatal("native screenshot cancellation lost or changed its healthy source")
+					t.Fatal("failed native screenshot lost or changed its healthy source")
 				}
 				captureHermesScreenshot(t, h, root, "desktop")
 			}
@@ -404,6 +414,8 @@ type hermesRenderingWait struct {
 	entered chan struct{}
 	once    sync.Once
 	pause   bool
+	release <-chan struct{}
+	failure error
 }
 
 func (logs *hermesRenderingWait) Log(ctx context.Context, message string) error {
@@ -412,6 +424,14 @@ func (logs *hermesRenderingWait) Log(ctx context.Context, message string) error 
 		if logs.pause {
 			<-ctx.Done()
 			return ctx.Err()
+		}
+		if logs.failure != nil {
+			select {
+			case <-logs.release:
+				return logs.failure
+			case <-ctx.Done():
+				return ctx.Err()
+			}
 		}
 	}
 	return nil

@@ -5,7 +5,6 @@ import (
 	"errors"
 
 	"github.com/defos-ai/commander-browser-agent/browser/contracts"
-	"github.com/defos-ai/commander-browser-agent/internal/hermes"
 	"github.com/defos-ai/commander/framework/agent/action"
 )
 
@@ -19,15 +18,6 @@ func (s *Setup) PrepareModel(ctx context.Context) (contracts.ModelConfig, error)
 		return contracts.ModelConfig{}, err
 	}
 	return contracts.ModelConfig{Provider: selection.Provider, Model: selection.Name, Endpoint: selection.URL, APIKey: key}, nil
-}
-
-// PrepareHermes retains the low-level bridge helper for native integration callers.
-func (s *Setup) PrepareHermes(ctx context.Context) (hermes.Request, error) {
-	model, err := s.PrepareModel(ctx)
-	if err != nil {
-		return hermes.Request{}, err
-	}
-	return hermes.Request{Provider: model.Provider, Model: model.Model, Endpoint: model.Endpoint, APIKey: model.APIKey}, nil
 }
 
 func selectHermesModel(ctx context.Context) (modelConfig, error) {

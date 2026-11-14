@@ -39,7 +39,8 @@
 - [cli/cli.go](cli/cli.go) owns reusable startup/shutdown; `Main` owns signal
   handling. Cancel serving before closing dependencies; preserve joined transport
   and persistence errors on shutdown. [cmd/main.go](cmd/main.go) translates errors
-  to exit status.
+  to exit status. The CLI always registers the full `browse`, `login` and
+  `screenshot` catalog. Library callers retain explicit custom/empty catalogs.
 - [cli/config.go](cli/config.go) owns flags/environment and validates identity
   before opening providers. `--agent-id-suffix` overrides
   `COMMANDER_AGENT_ID_SUFFIX`, including an explicitly empty flag. A nonempty
@@ -528,6 +529,12 @@
   shutdown stops admission and waits for render borrows.
   Return PNG bytes only after confirmed cleanup; uncertain cleanup retains
   ownership and marks the source runtime lost rather than silently reconnecting.
+- [internal/commander/progress.go](internal/commander/progress.go) supplies the
+  renderer's execution-scoped progress callback. The neutral renderer accepts
+  no progress payload and imports no Commander APIs. Invoke the callback after
+  protected DOM preparation and before PNG capture, with the current render
+  lifetime; missing callbacks, log errors and cancellation suppress PNG output
+  and still join cleanup. Do not retain callbacks on session or renderer owners.
 - The native renderer endpoint crosses only a private, scoped host message. It
   must identify the exact owned loopback Lightpanda process and never reach model
   handlers, results or artifacts. Worker shutdown stops admission, cancels and

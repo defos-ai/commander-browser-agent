@@ -14,7 +14,6 @@ import (
 	"github.com/chromedp/cdproto/page"
 	cdpruntime "github.com/chromedp/cdproto/runtime"
 	"github.com/chromedp/chromedp"
-	"github.com/defos-ai/commander/framework/agent/action"
 )
 
 const stepTimeout = 8 * time.Second
@@ -229,7 +228,7 @@ func (o *Owner) Render(ctx context.Context, lease context.Context, endpoint, tex
 		}
 		return nil, errRenderer
 	}
-	if err := action.Log(lifetime, "Rendering the protected screenshot"); err != nil {
+	if err := reportProgress(lifetime); err != nil {
 		if lifetime.Err() != nil {
 			return nil, contextError(lifetime)
 		}

@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
-	"slices"
-	"strings"
 	"time"
 
 	browser "github.com/defos-ai/commander-browser-agent"
@@ -19,7 +17,6 @@ import (
 
 type config struct {
 	agentID           string
-	actionNames       []string
 	busURL            string
 	storageURL        string
 	logLevel          string
@@ -29,18 +26,12 @@ type config struct {
 }
 
 func parseConfig(args []string, stderr io.Writer) (config, error) {
-	knownActions := browser.ActionNames()
-	availableActions := strings.Join(knownActions, ",")
-	if len(knownActions) == 0 {
-		availableActions = "none"
-	}
 	var result config
-	var actionNames, searchPaths, agentIDSuffix string
+	var searchPaths, agentIDSuffix string
 	var busURL, storageURL string
 	flags := flag.NewFlagSet(serviceName, flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	flags.StringVar(&agentIDSuffix, "agent-id-suffix", "", "8 lowercase hex characters; overrides COMMANDER_AGENT_ID_SUFFIX; omitted or empty generates a fresh ID")
-	flags.StringVar(&actionNames, "actions", "", "Comma-separated action names; omitted uses the agent type's catalog, explicit empty exposes no actions; available: "+availableActions)
 	flags.StringVar(&busURL, "bus-url", "", "Message broker URL or filesystem path; overrides BUS_URL; defaults to ./state/bus")
 	flags.StringVar(&storageURL, "storage-url", "", "Artifact storage URL or filesystem path; overrides STORAGE_URL; defaults to ./state/storage")
 	flags.StringVar(&result.logLevel, "log-level", "info", "Log level: debug, info, warn, error; overrides LOG_LEVEL")
@@ -80,18 +71,6 @@ func parseConfig(args []string, stderr io.Writer) (config, error) {
 	if result.heartbeatInterval < 0 {
 		return config{}, errors.New("heartbeat-interval must not be negative")
 	}
-	var err error
-	if provided["actions"] {
-		result.actionNames, err = parseList(actionNames)
-	}
-	if err != nil {
-		return config{}, fmt.Errorf("actions: %w", err)
-	}
-	for _, name := range result.actionNames {
-		if !slices.Contains(knownActions, name) {
-			return config{}, fmt.Errorf("unknown action %q; available: %s", name, availableActions)
-		}
-	}
 	if provided["search-paths"] {
 		paths := filepath.SplitList(searchPaths)
 		if paths == nil {
@@ -100,29 +79,4 @@ func parseConfig(args []string, stderr io.Writer) (config, error) {
 		result.scope = &environment.DiscoveryScope{Paths: paths}
 	}
 	return result, nil
-}
-
-func parseList(value string) ([]string, error) {
-	if strings.TrimSpace(value) == "" {
-		return []string{}, nil
-	}
-	items := strings.Split(value, ",")
-	for i, item := range items {
-		items[i] = strings.TrimSpace(item)
-	}
-	return items, validateList(items)
-}
-
-func validateList(items []string) error {
-	seen := make(map[string]bool, len(items))
-	for _, item := range items {
-		if strings.TrimSpace(item) == "" {
-			return errors.New("list entries must not be empty")
-		}
-		if seen[item] {
-			return fmt.Errorf("duplicate entry %q", item)
-		}
-		seen[item] = true
-	}
-	return nil
 }

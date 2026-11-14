@@ -226,6 +226,7 @@ func (m *SessionManager) Run(ctx context.Context, options browserruntime.Options
 	}
 	workCtx, cancel := context.WithCancel(ctx)
 	workCtx = sensitive.WithValues(workCtx, item.values)
+	workCtx = withRenderProgress(workCtx)
 	stopLifetime := context.AfterFunc(item.lifetime, cancel)
 	defer func() { stopLifetime(); cancel() }()
 	runErr = browser.WithContext(workCtx, work)

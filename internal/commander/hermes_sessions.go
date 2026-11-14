@@ -67,6 +67,7 @@ func (m *SessionManager) RunHermes(ctx context.Context, options browserruntime.H
 	}
 	workCtx, cancel := context.WithCancelCause(ctx)
 	workCtx = sensitive.WithValues(workCtx, item.values)
+	workCtx = withRenderProgress(workCtx)
 	watchDone := make(chan struct{})
 	go func() {
 		defer close(watchDone)

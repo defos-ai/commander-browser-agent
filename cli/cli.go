@@ -13,14 +13,14 @@ import (
 	browser "github.com/defos-ai/commander-browser-agent"
 	"github.com/defos-ai/commander-browser-agent/internal/commander"
 	agents "github.com/defos-ai/commander/framework/agent"
-	"github.com/defos-ai/commander/framework/agent/action"
 	"github.com/defos-ai/commander/framework/host"
 	"github.com/defos-ai/commander/framework/id"
 )
 
 const serviceName = "commander-" + string(browser.AgentType)
 
-// Run installs no signal handlers; Main adds process-level shutdown handling.
+// Run serves the full browser action catalog without installing signal handlers;
+// Main adds process-level shutdown handling.
 func Run(ctx context.Context, args []string, stderr io.Writer) (result error) {
 	if stderr == nil {
 		stderr = io.Discard
@@ -69,18 +69,6 @@ func Run(ctx context.Context, args []string, stderr io.Writer) (result error) {
 		}
 	}()
 	actions := browser.NewActions(sessions, dependencies.Actions)
-	if configuration.actionNames != nil {
-		selected := make([]action.Executor, 0, len(configuration.actionNames))
-		for _, name := range configuration.actionNames {
-			for _, instance := range actions {
-				if instance.Action().Name == name {
-					selected = append(selected, instance)
-					break
-				}
-			}
-		}
-		actions = selected
-	}
 	agent, err := browser.NewAgent(agents.AgentConfig{
 		ID:                agentID,
 		Sessions:          sessions,
