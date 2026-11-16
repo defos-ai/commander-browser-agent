@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/defos-ai/commander/framework/agent/manifest"
+	agentmodel "github.com/defos-ai/commander/framework/domain/agents"
 )
 
 type metadata struct {
@@ -147,6 +148,7 @@ func writeManifest(data metadata, digest, assets string) error {
 		Type:             data.Type,
 		Version:          data.Version,
 		Responsibilities: description.Responsibilities,
+		Dependencies:     description.Dependencies,
 		Actions:          description.Actions,
 		Native:           native,
 		Docker:           &manifest.Docker{Image: data.Image + "@" + digest},
@@ -194,9 +196,10 @@ func hashAsset(path string) (string, error) {
 }
 
 type agentDescription struct {
-	Type             string            `json:"type"`
-	Responsibilities []string          `json:"responsibilities"`
-	Actions          []manifest.Action `json:"actions"`
+	Type             string                  `json:"type"`
+	Responsibilities []string                `json:"responsibilities"`
+	Dependencies     []agentmodel.Dependency `json:"dependencies"`
+	Actions          []manifest.Action       `json:"actions"`
 }
 
 // The import follows go.mod, so copying the template never leaves a hardcoded
@@ -216,6 +219,7 @@ func main() {
     if err := json.NewEncoder(os.Stdout).Encode(map[string]any{
         "type": string(described.AgentType),
         "responsibilities": described.Responsibilities(),
+        "dependencies": described.Dependencies(),
         "actions": actions,
     }); err != nil {
         os.Exit(1)

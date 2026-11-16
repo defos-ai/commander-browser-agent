@@ -2,7 +2,7 @@
 
 A [Hermes](https://github.com/NousResearch/hermes-agent) and
 [Lightpanda](https://lightpanda.io/) browser agent for
-[DEFOS Commander v0.4.1](https://github.com/defos-ai/commander).
+[DEFOS Commander v0.6.0](https://github.com/defos-ai/commander).
 
 - `browse` — navigate and interact with websites; return protected final text.
 - `login` — sign in with managed credentials and one-time codes; reuse the session.

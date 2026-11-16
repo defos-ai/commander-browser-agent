@@ -32,6 +32,9 @@ func NewAgent(config agents.AgentConfig, dependencies agentactions.Dependencies)
 	if config.Responsibilities == nil {
 		config.Responsibilities = Responsibilities()
 	}
+	if config.Dependencies == nil {
+		config.Dependencies = Dependencies()
+	}
 	if config.Actions == nil {
 		runner, ok := config.Sessions.(agentactions.BrowserRunner)
 		if !ok {

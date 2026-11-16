@@ -380,7 +380,7 @@
   Never cache plaintext keys in setup or discovery state. Session reuse skips
   questions and resolves credentials again. Setup is bounded to ten minutes,
   separately from active browsing, and cannot extend the outer task deadline.
-  Commander v0.4.1 supports reusable `SecretRequestOptions.Default` bytes as
+  Commander v0.6.0 supports reusable `SecretRequestOptions.Default` bytes as
   create-if-missing seeds; existing values, including expired ones, take
   precedence. It has no lookup-only or lazy-default action API. Keep first-use
   model questions until Commander can report an authoritative missing setting
@@ -403,7 +403,7 @@
   owns operator waiting, fallback eligibility and saved answers. Protect question
   text, options and answers through the session redactor; keep their transcripts
   out of results, logs and artifacts. Each wait is bounded to three minutes and
-  the browse wall deadline still wins. In Commander v0.4.1, canceling a waiter
+  the browse wall deadline still wins. In Commander v0.6.0, canceling a waiter
   does not retract its saved pending question; do not promise automatic cleanup.
 - [internal/commander/](internal/commander/) owns runtime readiness, model setup,
   clarification, managed login secret delivery and checkpoint orchestration. These are private
@@ -455,7 +455,7 @@
   Derive stable, purpose-specific username/password names from origin and profile;
   never accept arbitrary secret names from the model or action input. These names
   are a convention in Commander's shared namespace, not an access-control policy.
-  Use v0.4.1 `action.RequestReusableSecret`, with empty RequiredSecrets, bounded
+  Use `action.RequestReusableSecret`, with empty RequiredSecrets, bounded
   waits and cancellation. Derive the transient code request's `-otp` name from
   that same origin/profile convention; Commander binds each request to its own
   execution and delivery, so a later request cannot reuse an earlier code.
@@ -635,7 +635,7 @@
 
 - [compose.yaml](compose.yaml) follows the example agent's isolated FS demo:
   UID1000-owned state, one controller, loopback MCP/API/Admin ports 4283/4284/4285,
-  and optional Playground using the same `COMMANDER_VERSION` (default `v0.4.1`).
+  and optional Playground using the same `COMMANDER_VERSION` (default `v0.6.0`).
   Commander host images explicitly use linux/amd64; the agent image supports
   linux/amd64 and linux/arm64. Never run demo Playground with `--all-in-one`.
 - Start the local demo with its packaged runtimes:
@@ -674,7 +674,7 @@
   Grant the new repository write access before publishing. Do not let the old
   monorepo workflow keep publishing the same version/stable tags.
 - The next standalone release is `v0.2.1`. Published Commander framework/providers
-  are pinned to `v0.4.1`, with no local `replace`. Agent release versions are
+  are pinned to `v0.6.0`, with no local `replace`. Agent release versions are
   independent of Commander versions. An ignored development workspace may map
   dependencies to local checkouts.
 - Manifest generation uses `framework/agent/manifest.Render` and its embedded
@@ -692,9 +692,9 @@
 
 ## Static package description
 
-- [description.go](description.go) provides pure `Responsibilities()` and
-  `ActionDescriptions()` functions returning fresh slices. Runtime defaults and
-  release manifests use the same metadata; constructors share description
+- [description.go](description.go) provides pure `Responsibilities()`,
+  `Dependencies()` and `ActionDescriptions()` functions returning fresh slices.
+  Runtime defaults and release manifests use the same metadata; constructors share description
   constants from `actions/`. Update both the registered and described action lists
   when capabilities change. Do not create agents/providers, run discovery, read
   environment variables or perform I/O in these functions.
@@ -703,6 +703,13 @@
   Go environment free of release/model tokens. The four-field `metadata` command
   remains independent of these functions. Descriptions are capability metadata,
   never action readiness or permission to launch a package.
+- Commander v0.6.0 registers and publishes the same dependency declarations.
+  Use exact executable requirement names `lightpanda` and `hermes-runtime` so
+  Admin can connect unavailable runtime checks to their setup guidance. Versions
+  come from the pinned discovery constants; declarations neither install software
+  nor replace readiness checks. Default only a nil `AgentConfig.Dependencies`;
+  preserve explicit empty/custom declarations. Keep model settings, keys, live
+  paths and observed runtime state out of this static metadata.
 
 ## Validation
 

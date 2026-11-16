@@ -22,6 +22,7 @@ import (
 	"github.com/defos-ai/commander/framework/agent"
 	"github.com/defos-ai/commander/framework/agent/action"
 	"github.com/defos-ai/commander/framework/agent/environment"
+	agentmodel "github.com/defos-ai/commander/framework/domain/agents"
 	"github.com/defos-ai/commander/framework/domain/operations"
 	"github.com/defos-ai/commander/framework/domain/sessions"
 	"github.com/defos-ai/commander/framework/id"
@@ -42,6 +43,18 @@ func TestAgentCatalogMatchesMetadataAndPreservesEmptySelection(t *testing.T) {
 	if !slices.Equal(browser.ActionNames(), []string{"browse", "login", "screenshot"}) || len(metadata) != len(snapshot.Actions) || !reflect.DeepEqual(browser.Responsibilities(), snapshot.Responsibilities) {
 		t.Fatal("registered capabilities differ from release metadata")
 	}
+	dependencies := browser.Dependencies()
+	versions := map[string]string{"lightpanda": "1.0.2", "hermes-runtime": "v0.23.1"}
+	if !reflect.DeepEqual(dependencies, snapshot.Dependencies) || len(dependencies) != len(versions) {
+		t.Fatal("registered runtime dependencies differ from release metadata")
+	}
+	for _, dependency := range dependencies {
+		version, exists := versions[dependency.Name]
+		if !exists || dependency.Version != version || strings.TrimSpace(dependency.Description) == "" {
+			t.Fatal("runtime dependency metadata lost its executable requirement, version or description")
+		}
+		delete(versions, dependency.Name)
+	}
 	first, second := browser.NewActions(nil, realBrowserDependencies()), browser.NewActions(nil, realBrowserDependencies())
 	for i, registered := range snapshot.Actions {
 		if registered.Name != metadata[i].Name || registered.Description != metadata[i].Description || registered.SessionMode != metadata[i].SessionMode || len(registered.RequiredSecrets) != 0 || first[i] == second[i] {
@@ -52,9 +65,18 @@ func TestAgentCatalogMatchesMetadataAndPreservesEmptySelection(t *testing.T) {
 	if browser.ActionDescriptions()[0].Description == metadata[0].Description {
 		t.Fatal("metadata shares mutable state")
 	}
-	empty, err := browser.NewAgent(agent.AgentConfig{ArtifactFileStore: files, Actions: []action.Executor{}}, realBrowserDependencies())
-	if err != nil || len(empty.Describe().Actions) != 0 {
-		t.Fatal("explicitly empty catalog gained default actions")
+	dependencies[0].Description = "caller mutation"
+	if !reflect.DeepEqual(browser.Dependencies(), snapshot.Dependencies) {
+		t.Fatal("dependency metadata shares mutable state")
+	}
+	empty, err := browser.NewAgent(agent.AgentConfig{ArtifactFileStore: files, Actions: []action.Executor{}, Dependencies: []agentmodel.Dependency{}}, realBrowserDependencies())
+	if err != nil || len(empty.Describe().Actions) != 0 || len(empty.Describe().Dependencies) != 0 {
+		t.Fatal("explicitly empty catalog gained default actions or dependencies")
+	}
+	custom := []agentmodel.Dependency{{Name: "custom-runtime", Description: "Run the caller's browser integration.", Version: "2.0"}}
+	configured, err := browser.NewAgent(agent.AgentConfig{ArtifactFileStore: files, Dependencies: custom}, realBrowserDependencies())
+	if err != nil || !reflect.DeepEqual(configured.Describe().Dependencies, custom) {
+		t.Fatal("caller dependency declarations were replaced or merged with defaults")
 	}
 }
 

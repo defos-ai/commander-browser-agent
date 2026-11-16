@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/defos-ai/commander/framework/agent/manifest"
+	agentmodel "github.com/defos-ai/commander/framework/domain/agents"
 )
 
 var releaseTool string
@@ -115,7 +116,8 @@ func TestReleaseManifest(t *testing.T) {
 		t.Fatalf("manifest is incompatible with Commander: %v", err)
 	}
 	if value.Type != "custom-agent" || !reflect.DeepEqual(value.Responsibilities, []string{"Analyze custom text"}) ||
-		!reflect.DeepEqual(value.Actions, []manifest.Action{{Name: "analyze-custom", Description: "Count words in custom text."}}) {
+		!reflect.DeepEqual(value.Actions, []manifest.Action{{Name: "analyze-custom", Description: "Count words in custom text."}}) ||
+		!reflect.DeepEqual(value.Dependencies, []agentmodel.Dependency{{Name: "custom-runtime", Description: "Runtime for custom analysis.", Version: "1.2.3"}}) {
 		t.Fatalf("manifest omitted static metadata: %+v", value)
 	}
 	if len(value.Native) != 4 {
@@ -139,7 +141,7 @@ func TestReleaseManifest(t *testing.T) {
 	}
 }
 
-func TestReleaseManifestAllowsEmptyActionCatalog(t *testing.T) {
+func TestReleaseManifestAllowsEmptyStaticCatalogs(t *testing.T) {
 	directory := fixture(t)
 	source := strings.Replace(descriptionFixtureSource,
 		`return []descriptionAction{{Name: "analyze-custom", Description: "Count words in custom text."}}`,
@@ -147,6 +149,9 @@ func TestReleaseManifestAllowsEmptyActionCatalog(t *testing.T) {
 	if source == descriptionFixtureSource {
 		t.Fatal("fixture did not remove its action catalog")
 	}
+	source = strings.Replace(source,
+		`return []descriptionDependency{{Name: "custom-runtime", Description: "Runtime for custom analysis.", Version: "1.2.3"}}`,
+		`return []descriptionDependency{}`, 1)
 	writeFile(t, filepath.Join(directory, "description.go"), source)
 	output, err := invoke(t, directory, manifestArgs()...)
 	if err != nil {
@@ -157,7 +162,7 @@ func TestReleaseManifestAllowsEmptyActionCatalog(t *testing.T) {
 		t.Fatal(err)
 	}
 	value, err := manifest.Parse(contents, "v0.1.0")
-	if err != nil || len(value.Actions) != 0 || len(value.Responsibilities) != 1 {
+	if err != nil || len(value.Actions) != 0 || len(value.Dependencies) != 0 || len(value.Responsibilities) != 1 {
 		t.Fatalf("empty catalog manifest did not preserve static metadata: %+v, %v", value, err)
 	}
 }
@@ -187,6 +192,9 @@ func TestReleaseManifestFailurePreservesExistingOutput(t *testing.T) {
 		"duplicate action": func(t *testing.T, directory string) {
 			original := `{Name: "analyze-custom", Description: "Count words in custom text."}`
 			writeFile(t, filepath.Join(directory, "description.go"), strings.Replace(descriptionFixtureSource, original, original+", "+original, 1))
+		},
+		"blank dependency description": func(t *testing.T, directory string) {
+			writeFile(t, filepath.Join(directory, "description.go"), strings.Replace(descriptionFixtureSource, "Runtime for custom analysis.", " ", 1))
 		},
 		"empty responsibilities": func(t *testing.T, directory string) {
 			writeFile(t, filepath.Join(directory, "description.go"), strings.Replace(descriptionFixtureSource, `[]string{"Analyze custom text"}`, `[]string{}`, 1))
@@ -277,6 +285,7 @@ const descriptionFixtureSource = `package example
 import "os"
 
 type descriptionAction struct { Name, Description string }
+type descriptionDependency struct { Name, Description, Version string }
 
 func Responsibilities() []string {
     for _, name := range []string{"GH_TOKEN", "GITHUB_TOKEN", "CODEX_API_KEY", "SECRETS_ENCRYPTION_KEY"} {
@@ -287,5 +296,9 @@ func Responsibilities() []string {
 
 func ActionDescriptions() []descriptionAction {
     return []descriptionAction{{Name: "analyze-custom", Description: "Count words in custom text."}}
+}
+
+func Dependencies() []descriptionDependency {
+    return []descriptionDependency{{Name: "custom-runtime", Description: "Runtime for custom analysis.", Version: "1.2.3"}}
 }
 `
