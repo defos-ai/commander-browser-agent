@@ -3,9 +3,11 @@ package commander
 import (
 	"context"
 	"errors"
+	"unicode/utf8"
 
 	"github.com/defos-ai/commander-browser-agent/browser/contracts"
 	"github.com/defos-ai/commander/framework/agent/action"
+	"github.com/defos-ai/commander/framework/agent/environment"
 )
 
 // PrepareModel resolves the session's non-secret choices and current managed key.
@@ -20,17 +22,53 @@ func (s *Setup) PrepareModel(ctx context.Context) (contracts.ModelConfig, error)
 	return contracts.ModelConfig{Provider: selection.Provider, Model: selection.Name, Endpoint: selection.URL, APIKey: key}, nil
 }
 
-func selectHermesModel(ctx context.Context) (modelConfig, error) {
-	question, err := action.Question(ctx, "browser_model_provider", "Which model provider should this browser session use? Select a provider, not an API key.",
-		"OpenAI", "Other (OpenAI-compatible)")
+func requestModelConfig(ctx context.Context) (modelConfig, error) {
+	provider, err := modelSetting(ctx, ModelProviderSecretName, true)
 	if err != nil {
 		return modelConfig{}, err
 	}
-	provider, ok := providerID(question.Answer)
-	if !ok || provider != "openai" && provider != "other" {
-		return modelConfig{}, errors.New("Hermes requires OpenAI or an explicitly selected OpenAI-compatible provider")
+	if provider != "openai" && provider != "other" {
+		return modelConfig{}, errors.New("BROWSER_MODEL_PROVIDER must be openai or other")
 	}
-	return selectModelDetails(ctx, provider)
+	model, err := modelSetting(ctx, ModelNameSecretName, true)
+	if err != nil {
+		return modelConfig{}, err
+	}
+	if validateModelName(model) != nil {
+		return modelConfig{}, errors.New("BROWSER_MODEL_NAME must contain a valid exact model ID/version")
+	}
+	selection := modelConfig{Provider: provider, Name: model, URL: openAIEndpoint}
+	if provider == "other" {
+		selection.URL, err = modelSetting(ctx, ModelURLSecretName, false)
+		if err != nil {
+			return modelConfig{}, err
+		}
+		if validateModelURL(selection.URL) != nil {
+			return modelConfig{}, errors.New("BROWSER_MODEL_URL must be an exact HTTPS or loopback HTTP completion endpoint without credentials, query or fragment")
+		}
+	}
+	return selection, nil
+}
+
+func modelSetting(ctx context.Context, name string, allowEnvironment bool) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if allowEnvironment {
+		local := environment.Local{}
+		if value, ok := local.LookupEnv(name); ok && value != "" {
+			return value, nil
+		}
+	}
+	raw, err := action.RequestReusableSecret(ctx, name)
+	defer clear(raw)
+	if err != nil {
+		return "", err
+	}
+	if len(raw) > 8<<10 || !utf8.Valid(raw) {
+		return "", errors.New("browser model setting must contain a bounded UTF-8 string")
+	}
+	return string(raw), nil
 }
 
 func acceptHermesModel(selection modelConfig) error {

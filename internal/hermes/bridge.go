@@ -611,6 +611,14 @@ func (w *Worker) Run(ctx context.Context, request Request, handler Handler) (res
 			w.fail(ErrUncertain)
 			result = Result{}
 			runErr = errors.Join(runErr, ErrUncertain, err, w.Close())
+			return
+		}
+		if runErr == nil && active.Err() == nil {
+			if err := transport.modelError(); err != nil {
+				// Hermes's generic SDK failure text cannot diagnose the provider.
+				// Publish only the fixed Go-owned cause after native/HTTP quiescence.
+				result.Status, result.Text, runErr = "failed", "", err
+			}
 		}
 	}()
 	wire := workerRequest{

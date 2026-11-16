@@ -199,5 +199,33 @@ func hermesBrowseError(ctx context.Context, err error) error {
 	if errors.Is(err, context.Canceled) {
 		return context.Canceled
 	}
+	if failure := modelFailureOnly(err); failure != nil {
+		return fmt.Errorf("%w; inspect the session before an explicit continuation", failure)
+	}
 	return errors.New("native browser work is unconfirmed; inspect the session before an explicit continuation")
+}
+
+// Only a wholly classified model failure may replace the generic work error.
+// Joined persistence, session-health or cleanup errors retain that uncertainty.
+func modelFailureOnly(err error) error {
+	switch err {
+	case contracts.ErrModelRequestRejected, contracts.ErrModelCredentials, contracts.ErrModelRateLimited,
+		contracts.ErrModelUnavailable, contracts.ErrModelResponse, contracts.ErrModelRequestPolicy, contracts.ErrModelRequestLimit:
+		return err
+	}
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		var failure error
+		for _, child := range joined.Unwrap() {
+			classified := modelFailureOnly(child)
+			if classified == nil || failure != nil && failure != classified {
+				return nil
+			}
+			failure = classified
+		}
+		return failure
+	}
+	if wrapped, ok := err.(interface{ Unwrap() error }); ok {
+		return modelFailureOnly(wrapped.Unwrap())
+	}
+	return nil
 }

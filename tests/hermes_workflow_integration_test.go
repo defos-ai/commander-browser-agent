@@ -72,13 +72,11 @@ func TestHermesIntegratedManagedWorkflow(t *testing.T) {
 	binding := h.binding(first)
 	firstBinding := binding
 	command := h.dispatch(first, &firstBinding)
-	h.answerSetup(command, "browser_model_provider", "Other (OpenAI-compatible)")
-	h.answerSetup(command, "browser_model_name", "gpt-4.1-mini")
-	h.answerSetup(command, "browser_model_url", endpoint)
+	h.deliverModelConfig(command, "other", "gpt-4.1-mini", endpoint)
 	if model.Calls() != 0 {
 		t.Fatal("the managed workflow contacted a model before managed key delivery")
 	}
-	lease := h.deliverModelKey(command, secretName, key, 1)
+	lease := h.deliverModelSecret(command, secretName, key, 1)
 	started := h.checkpoint(controllerevents.CheckpointSave, "browse_started")
 	if model.Calls() != 0 || h.snapshot(binding.Reference).State != "starting" ||
 		!reflect.DeepEqual(profilesBefore, hermesSessionProfiles(t)) || !reflect.DeepEqual(processesBefore, hermesReadinessProcesses(t)) {
@@ -99,7 +97,7 @@ func TestHermesIntegratedManagedWorkflow(t *testing.T) {
 		}
 	}
 	h.replyCheckpoint(questionFence, h.persistCheckpoint(questionFence))
-	h.answerSetup(command, "browser_clarification_1", "Report the sample count")
+	h.answerQuestion(command, "browser_clarification_1", "Report the sample count")
 	final := h.checkpoint(controllerevents.CheckpointSave, "browse_finished")
 	h.replyCheckpoint(final, h.persistCheckpoint(final))
 	firstOutput, ok := h.screenshotResult(command)
@@ -148,7 +146,7 @@ func TestHermesIntegratedManagedWorkflow(t *testing.T) {
 	authenticated := h.nativeBrowseTask(&loginTask, input)
 	authenticatedBinding := h.binding(authenticated)
 	command = h.dispatch(authenticated, &authenticatedBinding)
-	lease = h.deliverModelKey(command, secretName, key, 2)
+	lease = h.deliverModelSecret(command, secretName, key, 2)
 	final = h.checkpoint(controllerevents.CheckpointSave, "browse_finished")
 	h.replyCheckpoint(final, h.persistCheckpoint(final))
 	authenticatedOutput, ok := h.screenshotResult(command)
@@ -185,7 +183,7 @@ func TestHermesIntegratedManagedWorkflow(t *testing.T) {
 	refused := h.nativeBrowseTask(&authenticated, input)
 	refusedBinding := h.binding(refused)
 	command = h.dispatch(refused, &refusedBinding)
-	h.deliverModelKey(command, secretName, key, 3)
+	h.deliverModelSecret(command, secretName, key, 3)
 	final = h.checkpoint(controllerevents.CheckpointSave, "browse_finished")
 	h.refuseCheckpoint(final)
 	assertHermesCheckpointFailure(t, h, command)

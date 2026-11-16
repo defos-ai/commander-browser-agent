@@ -79,8 +79,8 @@ func (h *hermesSessionHost) loginCredentials(command messages.Message, site *fix
 	h.t.Helper()
 	user, pass, err := commander.LoginSecretNames(site.URL, site.Accounts[account].Profile)
 	hermesSessionCheck(h.t, err)
-	h.deliverModelKey(command, user, site.Accounts[account].Username, 1)
-	h.deliverModelKey(command, pass, site.Accounts[account].Password, 1)
+	h.deliverModelSecret(command, user, site.Accounts[account].Username, 1)
+	h.deliverModelSecret(command, pass, site.Accounts[account].Password, 1)
 }
 
 func (h *hermesSessionHost) loginCodeRequest(command messages.Message, site *fixtures.BrowserSite) messages.Message {

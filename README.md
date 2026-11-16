@@ -14,12 +14,15 @@ and [how to connect an agent](https://github.com/defos-ai/commander/blob/main/do
 ## Try it locally
 
 ```sh
+export BROWSER_MODEL_PROVIDER=openai
+export BROWSER_MODEL_NAME=chat-latest
 docker compose up --build --wait
 docker compose run --rm --no-deps playground
 ```
 
-The agent asks which model to use and requests credentials through Commander's
-managed secrets.
+Provider/model variables are optional. Missing values and API keys use
+Commander's reusable managed settings.
+See [AGENTS.md](AGENTS.md#intelligence-and-model-access) for custom providers.
 
 One agent container runs the Go agent, Hermes `v0.23.1` and Lightpanda `1.0.2`
 as separate processes. Native runs need those packaged runtimes installed;

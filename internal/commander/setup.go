@@ -6,11 +6,19 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
-	"strings"
 	"sync"
 
 	"github.com/defos-ai/commander/framework/agent/action"
 	"github.com/defos-ai/commander/framework/domain/sessions"
+)
+
+const (
+	// ModelProviderSecretName selects the provider through deployment settings or Commander.
+	ModelProviderSecretName = "BROWSER_MODEL_PROVIDER"
+	// ModelNameSecretName selects the exact model through deployment settings or Commander.
+	ModelNameSecretName = "BROWSER_MODEL_NAME"
+	// ModelURLSecretName stores the custom provider's exact managed endpoint.
+	ModelURLSecretName = "BROWSER_MODEL_URL"
 )
 
 // Setup retains non-secret model choices for each full Commander creation claim.
@@ -67,7 +75,7 @@ func (s *Setup) prepare(ctx context.Context) (modelConfig, []byte, error) {
 		selection = *setup.selection
 	} else {
 		var err error
-		selection, err = selectHermesModel(ctx)
+		selection, err = requestModelConfig(ctx)
 		if err != nil {
 			return empty, nil, err
 		}
@@ -76,39 +84,12 @@ func (s *Setup) prepare(ctx context.Context) (modelConfig, []byte, error) {
 		return empty, nil, err
 	}
 	if setup.selection == nil {
-		// Retain valid operator choices even when credentials are still pending.
-		// The framework owns saved question answers and operator/model eligibility.
+		// Bind valid settings to this session even while its key is pending.
+		// New sessions resolve the current settings again.
 		setup.selection = &selection
 	}
 	key, err := selectedModelKey(ctx, selection)
 	return selection, key, err
-}
-
-func selectModelDetails(ctx context.Context, provider string) (modelConfig, error) {
-	selection := modelConfig{Provider: provider}
-	question, err := action.Question(ctx, "browser_model_name", "Which exact tool-calling model ID/version should this browser session use? Enter the model ID, not an API key.")
-	if err != nil {
-		return selection, err
-	}
-	selection.Name = strings.TrimSpace(question.Answer)
-	if validateModelName(selection.Name) != nil {
-		return selection, errors.New("model answer must be a valid exact model ID/version")
-	}
-	if selection.Provider == "other" {
-		question, err := action.Question(ctx, "browser_model_url", "What is the exact Chat Completions endpoint for this custom model provider? Enter an HTTPS URL, or local HTTP URL, without credentials, query parameters or fragment.")
-		if err != nil {
-			return selection, err
-		}
-		selection.URL = strings.TrimSpace(question.Answer)
-	} else if selection.Provider == "openai" {
-		selection.URL = openAIEndpoint
-	} else {
-		return selection, errors.New("model provider is not supported")
-	}
-	if validateModelConfig(selection) != nil {
-		return selection, errors.New("selected browser model configuration is invalid")
-	}
-	return selection, nil
 }
 
 func selectedModelKey(ctx context.Context, selection modelConfig) ([]byte, error) {
@@ -125,15 +106,4 @@ func selectedModelKey(ctx context.Context, selection modelConfig) ([]byte, error
 		return nil, errors.New("model credential destination does not match its provider")
 	}
 	return action.RequestReusableSecret(ctx, name)
-}
-
-func providerID(value string) (string, bool) {
-	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "openai", "open ai":
-		return "openai", true
-	case "other", "other (openai-compatible)", "openai-compatible", "custom":
-		return "other", true
-	default:
-		return "", false
-	}
 }

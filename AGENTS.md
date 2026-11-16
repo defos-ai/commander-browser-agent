@@ -24,7 +24,7 @@
   `ArtifactFileStore`; the controller accepts metadata. Do not claim exactly-once
   execution or confuse broker ACKs with result acceptance.
 - The default action catalog exposes `browse`, `login` and `screenshot`, with
-  model-setup and in-browser non-secret clarification questions, and execution
+  shared managed model setup, in-browser non-secret clarification questions and execution
   checkpoints for browsing and login. Do not restore
   legacy capture/accessibility actions or their review mission. Static HTTP
   checks/crawling remain in the separate
@@ -41,7 +41,7 @@
   and persistence errors on shutdown. [cmd/main.go](cmd/main.go) translates errors
   to exit status. The CLI always registers the full `browse`, `login` and
   `screenshot` catalog. Library callers retain explicit custom/empty catalogs.
-- [cli/config.go](cli/config.go) owns flags/environment and validates identity
+- [cli/config.go](cli/config.go) owns host flags/environment and validates identity
   before opening providers. `--agent-id-suffix` overrides
   `COMMANDER_AGENT_ID_SUFFIX`, including an explicitly empty flag. A nonempty
   suffix must be exactly eight lowercase hex characters. Compose the full ID from
@@ -328,10 +328,21 @@
 - Enforce each native response allowance in the model proxy as well as in
   Hermes configuration. Preserve a smaller positive integer `max_tokens` or
   `max_completion_tokens`, clamp a larger one and supply a missing allowance.
+  For the selected OpenAI provider, use `max_completion_tokens` regardless of
+  the model ID: the private loopback URL hides Hermes's direct OpenAI detection.
+  Keep Other's allowance vocabulary and the exact selected model unchanged.
   Reject competing aliases, duplicate root fields, unsupported generation
   containers and multiple completions before provider contact. Forward at most
   `max_iterations + 1` HTTP requests, including native retries. These are request
   allowances, not a provider's actual generated-token or cost guarantee.
+- Keep provider bodies, headers and raw errors private. After native work and
+  model HTTP cleanup have joined, report only fixed host-owned failure categories
+  for credentials, request rejection, rate limits, availability, unsafe responses
+  and gateway limits. A later accepted completion clears a recovered failure.
+  Suppress native SDK troubleshooting text and browse artifacts on transport
+  failure. Cancellation, session-health, cleanup and checkpoint uncertainty take
+  precedence over a model diagnosis; a model error does not prove that earlier
+  browser work had no effects or authorize automatic replay.
 - Worker close owns model-transport startup and shutdown independently of the
   execution gate. Join HTTP work before clearing owned key/token bytes and before
   confirming session closure. Keep worker fingerprints as well as manager-owned
@@ -348,12 +359,18 @@
   [Lightpanda Agent](https://github.com/lightpanda-io/browser/blob/c5f7bb29b127040c899d4e181b5709f76fc71a6f/src/agent/Agent.zig),
   [ToolSession](https://github.com/lightpanda-io/browser/blob/c5f7bb29b127040c899d4e181b5709f76fc71a6f/src/ToolSession.zig),
   [Browser Use session](https://github.com/browser-use/browser-use/blob/2cc71890e65056b67fdb29d98bb407749c15bb08/browser_use/browser/session.py).
-- Model setup follows provider → exact model ID/version → provider key.
-  [internal/commander/setup.go](internal/commander/setup.go) uses `action.Question` for
-  non-secret choices, with stable keys and at most four options. Commander owns
-  operator-first waiting and model eligibility; never have the unconfigured
-  browser model answer its own setup. Custom endpoints are a further non-secret
-  question, never a secret request. Do not fetch a live model catalog before keys.
+- [internal/commander/setup.go](internal/commander/setup.go) resolves separate
+  `BROWSER_MODEL_PROVIDER` (`openai` or `other`) and `BROWSER_MODEL_NAME`
+  (the exact model ID, such as `chat-latest`). Nonempty environment values take
+  precedence; missing/empty values use `action.RequestReusableSecret` under the
+  same respective names. Read these variables during execution setup, never
+  during discovery. Other additionally requests a reusable `BROWSER_MODEL_URL`
+  containing its exact Chat Completions endpoint; this value comes from Commander,
+  not the environment. OpenAI always uses its fixed endpoint. Validate settings
+  before requesting the separate canonical API key, and clear delivered buffers.
+  Do not restore the combined `BROWSER_MODEL_CONFIG` JSON setting.
+  Do not fetch a live model catalog before keys or make an extra paid validation
+  request: the native model request validates the selected wire profile.
 - [internal/commander/model.go](internal/commander/model.go) uses the same setup
   cache and creation claims. Its native path offers OpenAI and explicitly
   selected Other only; reject unverified profiles before requesting credentials.
@@ -361,10 +378,12 @@
   secret naming. Reuse resolves managed credentials again and honors Commander's
   delivery lease; it does not force a sync or bypass the managed-secret provider.
   The default catalog offers these two verified provider selections.
-- Model configuration and API keys must not come from the agent's environment.
-  New sessions obtain provider/model choices through questions; Other also asks
-  for its exact endpoint. Do not retain removed model-environment shortcuts or
-  aliases. Runtime discovery uses the environment abstraction for Lightpanda
+- Only the two provider/model environment variables above configure model
+  selection. API keys always come from managed secrets, including when provider
+  and model are configured through the environment. New sessions resolve missing
+  settings through Commander; it prompts only when delivery needs operator input.
+  Do not add model-key environment shortcuts or aliases. Runtime discovery uses
+  the environment abstraction for Lightpanda
   and Hermes, clears stale state, and never makes model network calls, asks
   questions or requests secrets. Require HTTPS except local HTTP; reject embedded
   credentials, URL query/fragment and redirects.
@@ -377,16 +396,21 @@
   the verified OpenAI-compatible wire profile; retain its fake-provider regressions.
 - Keep valid non-secret choices in memory per full Commander creation claim;
   serialize setup per identity and reject conflicting claims.
-  Never cache plaintext keys in setup or discovery state. Session reuse skips
-  questions and resolves credentials again. Setup is bounded to ten minutes,
+  Never cache plaintext keys in setup or discovery state. Session reuse keeps
+  its pinned selection and resolves credentials again. New sessions can receive
+  updated shared settings, subject to Commander's managed delivery leases.
+  Setup is bounded to ten minutes,
   separately from active browsing, and cannot extend the outer task deadline.
   Commander v0.6.0 supports reusable `SecretRequestOptions.Default` bytes as
   create-if-missing seeds; existing values, including expired ones, take
-  precedence. It has no lookup-only or lazy-default action API. Keep first-use
-  model questions until Commander can report an authoritative missing setting
-  before asking them; a timeout does not establish absence. Shared model setup
-  across agent instances needs that hook before question answers can seed
-  reusable settings without repeating questions. Do not seed placeholder values,
+  precedence. It has no lookup-only or lazy-default action API. The operator
+  chose separate environment values with reusable-setting fallback instead of
+  provider/model questions. Entering a reusable value remembers it before model
+  validation.
+  A post-validation remember question with first-use question fallback would
+  need an authoritative missing-aware API. A timeout does not establish absence.
+  Reject invalid settings before requesting API keys; an unsuccessful model call
+  does not delete or overwrite operator-managed configuration. Do not seed placeholder values,
   race questions against secret delivery, or add direct secret-store access.
 - Enable framework managed secrets in the host. Request missing keys on demand;
   RequiredSecrets must stay empty so setup can run first. Clear owned key bytes
@@ -656,10 +680,11 @@
 - The agent receives the shared bus/storage mounts and no Docker socket. Native
   Python has the same container filesystem permissions as the Go host, including
   these mounts; process environment scrubbing and private homes do not create an
-  OS security boundary. Model choices and provider keys still use the managed
-  bridge rather than environment or action input.
-- Do not pass model settings or keys into the demo agent: use questions and
-  managed secrets. Do not automatically pass host provider keys into Playground.
+  OS security boundary. Provider keys still use the managed bridge, while the
+  two optional environment settings configure provider/model selection.
+- The demo agent forwards only the optional provider/model environment settings;
+  missing settings and all API keys use managed secrets. Do not automatically
+  pass host provider keys into Playground.
   It accepts masked key entry or one explicitly forwarded provider key and shares
   the selected key; the agent requests its managed secret.
 - Separate `api-credentials` and `mcp-credentials` volumes retain the demo logins.

@@ -132,14 +132,12 @@ func TestHermesBrowseNativeContractDispatchReuseAndWallTime(t *testing.T) {
 	root := h.nativeBrowseTask(nil, input)
 	binding := h.binding(root)
 	command := h.dispatch(root, &binding)
-	h.answerSetup(command, "browser_model_provider", "Other (OpenAI-compatible)")
-	h.answerSetup(command, "browser_model_name", "gpt-4.1-mini")
-	h.answerSetup(command, "browser_model_url", endpoint)
+	h.deliverModelConfig(command, "other", "gpt-4.1-mini", endpoint)
 	if model.Calls() != 0 {
 		t.Fatal("native browsing contacted a model before managed key delivery")
 	}
-	lease := h.deliverModelKey(command, secretName, key, 1)
-	h.answerSetup(command, "browser_clarification_1", "42 samples")
+	lease := h.deliverModelSecret(command, secretName, key, 1)
+	h.answerQuestion(command, "browser_clarification_1", "42 samples")
 	final := h.checkpoint(controllerevents.CheckpointSave, "browse_finished")
 	if model.Calls() != 3 {
 		t.Fatal("native browse finalized before the scripted reasoning returned")
@@ -168,7 +166,7 @@ func TestHermesBrowseNativeContractDispatchReuseAndWallTime(t *testing.T) {
 	child := h.nativeBrowseTask(&root, input)
 	childBinding := h.binding(child)
 	command = h.dispatch(child, &childBinding)
-	lease = h.deliverModelKey(command, secretName, key, 2)
+	lease = h.deliverModelSecret(command, secretName, key, 2)
 	final = h.checkpoint(controllerevents.CheckpointSave, "browse_finished")
 	h.refuseCheckpoint(final)
 	if _, ok := h.screenshotResult(command); ok || model.Calls() != 5 || childBinding.Claim() != binding.Claim() {
@@ -187,7 +185,7 @@ func TestHermesBrowseNativeContractDispatchReuseAndWallTime(t *testing.T) {
 	timedBinding := h.binding(timed)
 	command = h.dispatch(timed, &timedBinding)
 	started := time.Now()
-	h.deliverModelKey(command, secretName, key, 3)
+	h.deliverModelSecret(command, secretName, key, 3)
 	question := h.setupMessage(command)
 	request, err := controllerevents.DecodeQuestionRequest(question)
 	if err != nil || request.Key != "browser_clarification_1" || request.CommandID != command.ID || model.Calls() != 6 {

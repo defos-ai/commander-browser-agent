@@ -306,11 +306,9 @@ func TestHermesCheckpointReceiptsFenceQuestionsBatchesAndFinalization(t *testing
 	root := h.task(nil, sessions.Open, "guarded")
 	binding := h.binding(root)
 	command := h.dispatch(root, &binding)
-	h.answerSetup(command, "browser_model_provider", "Other (OpenAI-compatible)")
-	h.answerSetup(command, "browser_model_name", "gpt-4.1-mini")
 	endpoint := model.URL + "/chat/completions"
-	h.answerSetup(command, "browser_model_url", endpoint)
-	h.deliverModelKey(command, modelSecretName(endpoint), key, 1)
+	h.deliverModelConfig(command, "other", "gpt-4.1-mini", endpoint)
+	h.deliverModelSecret(command, modelSecretName(endpoint), key, 1)
 	start := h.checkpoint(controllerevents.CheckpointSave, "browse_started")
 	startReceipt := h.persistCheckpoint(start)
 	startRetry := h.checkpoint(controllerevents.CheckpointSave, "browse_started")
@@ -334,7 +332,7 @@ func TestHermesCheckpointReceiptsFenceQuestionsBatchesAndFinalization(t *testing
 		}
 	}
 	h.replyCheckpoint(clarificationRetry, clarificationReceipt)
-	h.answerSetup(command, "native_fixture_question", answer)
+	h.answerQuestion(command, "native_fixture_question", answer)
 	batch := h.checkpoint(controllerevents.CheckpointSave, "browse_step_02")
 	batchReceipt := h.persistCheckpoint(batch)
 	// A validly shaped receipt with conflicting data does not grant dispatch.

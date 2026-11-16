@@ -222,12 +222,22 @@ func TestScreenshotRejectsOpenBindingBeforeSideEffects(t *testing.T) {
 func TestBrowseSetupUsesManagedKeysAndRetainsOnlySessionSelection(t *testing.T) {
 	requireHermesDiscoveryPlatform(t)
 	const endpoint = "https://custom.example.test/v1/chat/completions"
-	for _, provider := range []string{"OpenAI", "Other"} {
-		t.Run(provider, func(t *testing.T) {
-			t.Setenv("BROWSER_MODEL_PROVIDER", "invalid-legacy-provider")
+	for _, test := range []struct {
+		name, envProvider, envModel, provider string
+		settings                              []string
+	}{
+		{name: "managed_openai", provider: "openai", settings: []string{commander.ModelProviderSecretName, commander.ModelNameSecretName}},
+		{name: "environment_openai", envProvider: "openai", envModel: "chat-latest", provider: "openai"},
+		{name: "managed_provider", envModel: "chat-latest", provider: "openai", settings: []string{commander.ModelProviderSecretName}},
+		{name: "managed_custom_model", envProvider: "other", provider: "other", settings: []string{commander.ModelNameSecretName, commander.ModelURLSecretName}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("BROWSER_MODEL_PROVIDER", test.envProvider)
+			t.Setenv("BROWSER_MODEL_NAME", test.envModel)
+			t.Setenv("BROWSER_MODEL_URL", "https://ignored.example.test/v1/chat/completions")
 			t.Setenv("BROWSER_MODEL_API_KEY", "ignored-environment-key")
 			t.Setenv("OPENAI_API_KEY", "ignored-environment-key")
-			probe := &unitSetup{t: t, key: "fixture-first-private-model-key", answers: map[string]string{"browser_model_provider": provider, "browser_model_name": "exact-model-v1", "browser_model_url": endpoint}}
+			probe := &unitSetup{t: t, key: "fixture-first-private-model-key", provider: test.provider, model: "exact-model-v1", endpoint: endpoint}
 			executor := unitAction(probe, "browse")
 			if status, err := executor.Discover(t.Context(), unitEnvironment{probe}, nil); err != nil || status != action.Ready || len(probe.events) != 0 {
 				t.Fatal("discovery started setup or required credentials")
@@ -244,18 +254,19 @@ func TestBrowseSetupUsesManagedKeysAndRetainsOnlySessionSelection(t *testing.T) 
 				return err
 			}
 			name := "OPENAI_API_KEY"
-			want := []string{"browser_model_provider", "browser_model_name"}
-			if provider == "Other" {
+			if test.provider == "other" {
 				name = fmt.Sprintf("browser-model-api-key-%x", sha256.Sum256([]byte(endpoint)))
-				want = append(want, "browser_model_url")
 			}
-			want = append(want, name)
+			want := append(slices.Clone(test.settings), name)
 			if run(binding) == nil || !slices.Equal(probe.events, want) || probe.runs != 1 {
-				t.Fatal("setup did not ask provider/model before its canonical managed key")
+				t.Fatal("setup ignored environment precedence, managed setting order or its separate canonical key")
 			}
+			t.Setenv("BROWSER_MODEL_PROVIDER", "changed-invalid-provider")
+			t.Setenv("BROWSER_MODEL_NAME", "changed-model")
+			probe.provider, probe.model, probe.endpoint = "changed-invalid-provider", "changed-model", "https://changed.example.test/v1/chat/completions"
 			binding.Mode, probe.key, probe.events = sessions.Open, "fixture-rotated-private-model-key", nil
 			if run(binding) == nil || !slices.Equal(probe.events, []string{name}) || probe.runs != 2 {
-				t.Fatal("reuse repeated questions or cached a plaintext key")
+				t.Fatal("reuse requested configuration again or cached a plaintext key")
 			}
 			binding.OperationID = id.New()
 			if err := run(binding); !errors.Is(err, sessions.ErrConflict) || len(probe.events) != 1 || probe.runs != 2 {
@@ -263,7 +274,50 @@ func TestBrowseSetupUsesManagedKeysAndRetainsOnlySessionSelection(t *testing.T) 
 			}
 			for _, value := range probe.returned {
 				if bytesRemain := strings.Trim(string(value), "\x00"); bytesRemain != "" {
-					t.Fatal("managed key buffer was retained")
+					t.Fatal("managed model configuration or key buffer was retained")
+				}
+			}
+		})
+	}
+}
+
+func TestBrowseSetupRefusesInvalidSettingsBeforeCredentials(t *testing.T) {
+	requireHermesDiscoveryPlatform(t)
+	const private = "fixture-private-invalid-config"
+	for _, test := range []struct {
+		name, envProvider, envModel, provider, model, endpoint string
+		settings                                               []string
+		providerError                                          error
+	}{
+		{name: "managed_provider", provider: private, settings: []string{commander.ModelProviderSecretName}},
+		{name: "managed_model", provider: "openai", model: private + "\n", settings: []string{commander.ModelProviderSecretName, commander.ModelNameSecretName}},
+		{name: "custom_endpoint", provider: "other", model: "chat-latest", endpoint: "http://" + private + ".example/v1/chat/completions", settings: []string{commander.ModelProviderSecretName, commander.ModelNameSecretName, commander.ModelURLSecretName}},
+		{name: "environment_provider", envProvider: private},
+		{name: "environment_model", envProvider: "openai", envModel: private + "\n"},
+		{name: "provider_error", provider: "openai", settings: []string{commander.ModelProviderSecretName}, providerError: errors.New(private)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("BROWSER_MODEL_PROVIDER", test.envProvider)
+			t.Setenv("BROWSER_MODEL_NAME", test.envModel)
+			probe := &unitSetup{t: t, key: "fixture-unused-provider-key", provider: test.provider, model: test.model, endpoint: test.endpoint, settingError: test.providerError}
+			executor := unitAction(probe, "browse")
+			if status, err := executor.Discover(t.Context(), unitEnvironment{probe}, nil); err != nil || status != action.Ready {
+				t.Fatal("invalid-config fixture discovery failed")
+			}
+			binding := unitBinding()
+			ctx := action.WithQuestions(action.WithSecrets(action.WithSession(t.Context(), &binding), probe), probe)
+			for range 2 {
+				result, err := executor.Run(ctx, json.RawMessage(`{"objective":"Read the fixture","url":"https://example.test/"}`))
+				if err == nil || strings.Contains(err.Error(), private) || probe.runs != 0 || len(result.Output) != 0 || len(result.Artifacts) != 0 {
+					t.Fatal("invalid managed configuration reached credentials/native work or exposed its contents")
+				}
+			}
+			if !slices.Equal(probe.events, append(slices.Clone(test.settings), test.settings...)) {
+				t.Fatal("invalid managed configuration was cached, requested credentials or asked setup questions")
+			}
+			for _, value := range probe.returned {
+				if strings.Trim(string(value), "\x00") != "" {
+					t.Fatal("invalid or failed managed configuration retained its delivered bytes")
 				}
 			}
 		})
@@ -304,11 +358,14 @@ const unitLightpandaExecutable = "/trusted/lightpanda"
 type unitSetup struct {
 	t                     *testing.T
 	key                   string
+	provider              string
+	model                 string
+	endpoint              string
+	settingError          error
 	unavailableHermes     bool
 	unavailableLightpanda bool
 	discoveryRuns         int
 	values                *sensitive.Values
-	answers               map[string]string
 	events                []string
 	returned              [][]byte
 	runs                  int
@@ -357,13 +414,27 @@ func (p unitEnvironment) Run(_ context.Context, argv []string) (environment.Resu
 }
 func (p *unitSetup) Question(_ context.Context, key, text string, options []string) (operations.Question, error) {
 	p.events = append(p.events, key)
-	return operations.Question{Status: operations.QuestionAnswered, Key: key, Text: text, Options: options, Answer: p.answers[key], AnsweredBy: operations.AnswerOperator}, nil
+	return operations.Question{Status: operations.QuestionAnswered, Key: key, Text: text, Options: options, AnsweredBy: operations.AnswerOperator}, nil
 }
 func (*unitSetup) Secret(string) ([]byte, error) { return nil, action.ErrSecretUnavailable }
-func (p *unitSetup) RequestSecret(_ context.Context, name string) ([]byte, error) {
+func (p *unitSetup) RequestSecretWithOptions(_ context.Context, name string, options action.SecretRequestOptions) ([]byte, error) {
+	if options.Type != action.SecretReusable || options.Default != nil {
+		p.t.Error("model setup changed its reusable delivery type or supplied a default")
+	}
 	p.events = append(p.events, name)
 	value := []byte(p.key)
+	switch name {
+	case commander.ModelProviderSecretName:
+		value = []byte(p.provider)
+	case commander.ModelNameSecretName:
+		value = []byte(p.model)
+	case commander.ModelURLSecretName:
+		value = []byte(p.endpoint)
+	}
 	p.returned = append(p.returned, value)
+	if name == commander.ModelProviderSecretName {
+		return value, p.settingError
+	}
 	return value, nil
 }
 func (p *unitSetup) Log(ctx context.Context, _ string) error {

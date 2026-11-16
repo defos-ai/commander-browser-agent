@@ -3,6 +3,7 @@
 package browser_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -85,5 +86,62 @@ func TestHermesModelAllowanceBoundsNativeRecovery(t *testing.T) {
 				t.Fatal("native truncation recovery did not complete within the host response allowance")
 			}
 		})
+	}
+}
+
+// The private loopback endpoint must retain OpenAI's completion allowance
+// vocabulary even when the selected model has no GPT-family prefix.
+func TestHermesOpenAIChatLatestCompletionAllowance(t *testing.T) {
+	worker := newHermesWorker(t)
+	const key = "fixture-openai-chat-latest-key"
+	const model = "chat-latest"
+	const allowance = 37
+	const answer = "Chat latest fixture completed."
+	var calls atomic.Int32
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		body, err := io.ReadAll(io.LimitReader(r.Body, (2<<20)+1))
+		if err != nil || len(body) > 2<<20 || r.Method != http.MethodPost || r.URL.Path != "/chat/completions" ||
+			r.URL.RawQuery != "" || r.Header.Get("Authorization") != "Bearer "+key || bytes.Contains(body, []byte(key)) {
+			t.Error("native OpenAI request escaped its provider contract")
+			http.Error(w, "Invalid fixture request", http.StatusBadRequest)
+			return
+		}
+		var request map[string]json.RawMessage
+		if json.Unmarshal(body, &request) != nil {
+			t.Error("native OpenAI provider received malformed JSON")
+			http.Error(w, "Invalid fixture request", http.StatusBadRequest)
+			return
+		}
+		var selectedModel string
+		var tokens int
+		_, hasLegacy := request["max_tokens"]
+		if hasLegacy || json.Unmarshal(request["max_completion_tokens"], &tokens) != nil || tokens != allowance {
+			t.Error("native OpenAI request omitted its completion allowance or retained the legacy alias")
+			http.Error(w, "Unsupported fixture allowance", http.StatusBadRequest)
+			return
+		}
+		if json.Unmarshal(request["model"], &selectedModel) != nil || selectedModel != model || string(request["stream"]) != "false" {
+			t.Error("native OpenAI request changed the selected model or enabled streaming")
+			http.Error(w, "Invalid fixture request", http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id": "chat-latest-fixture", "object": "chat.completion", "created": 1, "model": model,
+			"choices": []any{map[string]any{"index": 0, "message": map[string]any{"role": "assistant", "content": answer}, "finish_reason": "stop"}},
+			"usage":   map[string]int{"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+		})
+	}))
+	t.Cleanup(provider.Close)
+	request := hermes.Request{Objective: "Complete the chat latest fixture.", Provider: "openai", Model: model,
+		Endpoint: provider.URL + "/chat/completions", APIKey: []byte(key), MaxIterations: 4, MaxTokens: allowance, TimeoutSeconds: 25}
+	defer clear(request.APIKey)
+	result, err := worker.Run(t.Context(), request, func(context.Context, hermes.Event) (hermes.Reply, error) {
+		t.Error("the final-answer fixture unexpectedly requested browser work")
+		return hermes.Reply{}, nil
+	})
+	if err != nil || result.Status != "completed" || result.Text != answer || calls.Load() != 1 {
+		t.Fatal("native OpenAI chat latest did not complete with one bounded completion request")
 	}
 }

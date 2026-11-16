@@ -18,6 +18,8 @@ import (
 	"sync"
 	"time"
 	"unicode/utf8"
+
+	"github.com/defos-ai/commander-browser-agent/browser/contracts"
 )
 
 const (
@@ -38,6 +40,7 @@ type modelTransport struct {
 	key     []byte
 
 	endpoint  string
+	provider  string
 	model     string
 	limit     int
 	maxTokens int
@@ -53,6 +56,8 @@ type modelTransport struct {
 	mu        sync.Mutex
 	closing   bool
 	requests  int
+	attempt   uint64
+	failure   error
 	fault     bool
 	close     sync.Once
 	closeErr  error
@@ -84,7 +89,7 @@ func startModelTransport(ctx context.Context, request Request, redact func(strin
 	lifetime, cancel := context.WithTimeout(ctx, timeout)
 	m := &modelTransport{
 		token: []byte(hex.EncodeToString(random[:])), key: bytes.Clone(request.APIKey),
-		endpoint: request.Endpoint, model: request.Model, limit: request.MaxIterations + 1, maxTokens: request.MaxTokens,
+		endpoint: request.Endpoint, provider: request.Provider, model: request.Model, limit: request.MaxIterations + 1, maxTokens: request.MaxTokens,
 		redact: redact, ctx: lifetime, cancel: cancel, served: make(chan struct{}), joined: make(chan struct{})}
 	// No environment proxies, redirects, automatic decompression,
 	// shared connections or replayable request bodies belong to this transport.
@@ -136,24 +141,43 @@ func (m *modelTransport) handle(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}
+	m.mu.Lock()
+	if m.closing || m.ctx.Err() != nil {
+		m.mu.Unlock()
+		modelFailure(w)
+		return
+	}
+	m.attempt++
+	attempt := m.attempt
+	m.mu.Unlock()
+	refuse := func(cause error) {
+		// Record before the SDK can receive its nonretryable response. Raw
+		// provider errors stay private; only fixed host-owned causes are retained.
+		// An SDK-aborted HTTP request is not a provider diagnosis.
+		if r.Context().Err() != nil {
+			cause = nil
+		}
+		m.recordAttempt(attempt, cause)
+		modelFailure(w)
+	}
 	raw, err := io.ReadAll(io.LimitReader(r.Body, modelRequestLimit+1))
 	defer clear(raw)
 	if err != nil || len(raw) > modelRequestLimit || !uniqueModelRequestFields(raw) {
-		modelFailure(w)
+		refuse(contracts.ErrModelRequestPolicy)
 		return
 	}
 	value, err := m.cleanJSON(raw, modelRequestLimit)
 	request, ok := value.(map[string]any)
 	stream, hasStream := request["stream"]
 	if err != nil || !ok || request["model"] != m.model || hasStream && stream != false || !m.constrainResponseAllowance(request) {
-		modelFailure(w)
+		refuse(contracts.ErrModelRequestPolicy)
 		return
 	}
 	request["stream"] = false
 	body, err := json.Marshal(request)
 	defer clear(body)
 	if err != nil || len(body) > modelRequestLimit {
-		modelFailure(w)
+		refuse(contracts.ErrModelRequestPolicy)
 		return
 	}
 	m.mu.Lock()
@@ -163,7 +187,7 @@ func (m *modelTransport) handle(w http.ResponseWriter, r *http.Request) {
 	}
 	m.mu.Unlock()
 	if !allowed {
-		modelFailure(w)
+		refuse(contracts.ErrModelRequestLimit)
 		return
 	}
 	// A non-rewindable body also prevents net/http from replaying a POST after
@@ -171,7 +195,7 @@ func (m *modelTransport) handle(w http.ResponseWriter, r *http.Request) {
 	input := &modelBody{reader: bytes.NewReader(body), closed: make(chan struct{})}
 	upstream, err := http.NewRequestWithContext(r.Context(), http.MethodPost, m.endpoint, input)
 	if err != nil {
-		modelFailure(w)
+		refuse(contracts.ErrModelRequestPolicy)
 		return
 	}
 	upstream.ContentLength = int64(len(body))
@@ -182,29 +206,71 @@ func (m *modelTransport) handle(w http.ResponseWriter, r *http.Request) {
 	response, err := m.client.Do(upstream)
 	defer func() { <-input.closed }()
 	if err != nil {
-		modelFailure(w)
+		refuse(contracts.ErrModelUnavailable)
 		return
 	}
 	defer response.Body.Close()
-	if response.StatusCode < 200 || response.StatusCode >= 300 ||
-		response.Header.Get("Content-Encoding") != "" && response.Header.Get("Content-Encoding") != "identity" {
-		modelFailure(w)
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		refuse(providerFailure(response.StatusCode))
+		return
+	}
+	if encoding := response.Header.Get("Content-Encoding"); encoding != "" && encoding != "identity" {
+		refuse(contracts.ErrModelResponse)
 		return
 	}
 	output, err := io.ReadAll(io.LimitReader(response.Body, modelResponseLimit+1))
 	defer clear(output)
 	if err != nil || len(output) > modelResponseLimit {
-		modelFailure(w)
+		refuse(contracts.ErrModelResponse)
 		return
 	}
 	clean, err := protectModelJSON(output, m.protectText)
 	defer clear(clean)
 	if err != nil || len(clean) > modelResponseLimit {
-		modelFailure(w)
+		refuse(contracts.ErrModelResponse)
 		return
 	}
+	var envelope map[string]json.RawMessage
+	if json.Unmarshal(clean, &envelope) != nil || envelope == nil || envelope["error"] != nil {
+		// Some compatible endpoints return error envelopes with HTTP 200.
+		// Those diagnostics must not become native history or final text.
+		refuse(contracts.ErrModelResponse)
+		return
+	}
+	// A later accepted completion clears a recovered request failure. An older
+	// concurrent request cannot overwrite the latest authenticated attempt.
+	m.recordAttempt(attempt, nil)
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write(clean)
+}
+
+func (m *modelTransport) recordAttempt(attempt uint64, failure error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if attempt == m.attempt && !m.closing && m.ctx.Err() == nil {
+		m.failure = failure
+	}
+}
+
+// modelError is read after Close has joined all handlers. Close cancels the
+// transport's own context, so that cancellation must not erase a recorded cause.
+func (m *modelTransport) modelError() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.failure
+}
+
+func providerFailure(status int) error {
+	switch {
+	case status == http.StatusUnauthorized || status == http.StatusForbidden:
+		return contracts.ErrModelCredentials
+	case status == http.StatusTooManyRequests:
+		return contracts.ErrModelRateLimited
+	case status >= 500:
+		return contracts.ErrModelUnavailable
+	default:
+		return contracts.ErrModelRequestRejected
+	}
 }
 
 // constrainResponseAllowance bounds the provider request's per-response
@@ -243,11 +309,19 @@ func (m *modelTransport) constrainResponseAllowance(request map[string]any) bool
 			allowance = requested
 		}
 	}
+	if m.provider == "openai" {
+		// Hermes cannot recognize api.openai.com behind the private loopback
+		// gateway. Preserve the direct OpenAI wire contract for every model ID,
+		// including aliases such as chat-latest, without changing the model.
+		name = "max_completion_tokens"
+	}
 	// New canonical metadata must obey the same known-value protection as the
 	// original body, including a numeric value introduced by clamping.
 	if m.protectText(name) != name || m.protectText(strconv.FormatInt(allowance, 10)) != strconv.FormatInt(allowance, 10) {
 		return false
 	}
+	delete(request, "max_tokens")
+	delete(request, "max_completion_tokens")
 	request[name] = allowance
 	return true
 }

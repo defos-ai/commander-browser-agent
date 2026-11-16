@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defos-ai/commander-browser-agent/internal/commander"
 	"github.com/defos-ai/commander-browser-agent/tests/fakes"
 	agentevents "github.com/defos-ai/commander/framework/comms/clients/agent/events"
 	controllerevents "github.com/defos-ai/commander/framework/comms/clients/controller/events"
@@ -35,16 +36,16 @@ func (h *hermesSessionHost) setupMessage(command messages.Message) messages.Mess
 	})
 }
 
-func (h *hermesSessionHost) answerSetup(command messages.Message, key, answer string) {
+func (h *hermesSessionHost) answerQuestion(command messages.Message, key, answer string) {
 	h.t.Helper()
 	message := h.setupMessage(command)
 	if message.Type != controllerevents.QuestionRequested {
-		h.t.Fatal("managed setup did not ask its non-secret question first")
+		h.t.Fatal("execution did not ask its non-secret clarification")
 	}
 	request, err := controllerevents.DecodeQuestionRequest(message)
 	hermesSessionCheck(h.t, err)
 	if request.CommandID != command.ID || request.Key != key || len(request.Options) > 4 {
-		h.t.Fatal("managed setup lost its bounded question order or identity")
+		h.t.Fatal("clarification lost its bounded question identity")
 	}
 	now := time.Now().UTC()
 	question := operations.Question{ID: id.New(), TaskID: message.TaskID, CommandID: command.ID, Key: request.Key, Text: request.Text, Options: request.Options,
@@ -55,32 +56,32 @@ func (h *hermesSessionHost) answerSetup(command messages.Message, key, answer st
 	hermesSessionCheck(h.t, (agentevents.Client{Bus: h.bus}).Publish(h.t.Context(), response))
 }
 
-func (h *hermesSessionHost) deliverModelKey(command messages.Message, name, key string, version uint64) time.Time {
+func (h *hermesSessionHost) deliverModelSecret(command messages.Message, name, key string, version uint64) time.Time {
 	h.t.Helper()
 	message := h.setupMessage(command)
 	if message.Type != controllerevents.SecretSyncRequested {
-		h.t.Fatal("setup repeated questions or ended before managed key delivery")
+		h.t.Fatal("setup asked a question or ended before managed secret delivery")
 	}
 	request, err := controllerevents.DecodeSecretSyncRequested(message)
 	hermesSessionCheck(h.t, err)
 	defer clear(request.Default)
 	if request.Request.AgentID != h.host.ID() || request.Request.AgentType != "browser-agent" {
-		h.t.Fatal("model key request lost its exact agent identity")
+		h.t.Fatal("model setup secret request lost its exact agent identity")
 	}
 	if request.Request.CommandID != "" || request.Request.OperationID != "" || request.Request.TaskID != "" {
-		h.t.Fatal("reusable model key request unexpectedly used transient execution identity")
+		h.t.Fatal("reusable model setup request unexpectedly used transient execution identity")
 	}
 	if request.Request.Key.Name != name {
-		h.t.Fatal("model key request did not use its canonical managed name")
+		h.t.Fatal("model setup secret request did not use its canonical managed name")
 	}
 	if request.Request.EffectiveType() != secrets.SecretReusable {
-		h.t.Fatal("model key request was not reusable")
+		h.t.Fatal("model setup secret request was not reusable")
 	}
 	if request.Default != nil {
-		h.t.Fatal("model key request unexpectedly supplied a default seed")
+		h.t.Fatal("model setup secret request unexpectedly supplied a default seed")
 	}
 	if bytes.Contains(message.Payload, []byte(key)) {
-		h.t.Fatal("the model key value appeared before private delivery")
+		h.t.Fatal("a model setup value appeared before private delivery")
 	}
 	now := time.Now().UTC()
 	value := []byte(key)
@@ -99,6 +100,15 @@ func (h *hermesSessionHost) deliverModelKey(command messages.Message, name, key 
 	h.accepted[message.ID] = delivery
 	hermesSessionCheck(h.t, (agentevents.Client{Bus: h.bus}).Publish(h.t.Context(), delivery))
 	return delivery.ExpiresAt
+}
+
+func (h *hermesSessionHost) deliverModelConfig(command messages.Message, provider, model, endpoint string) {
+	h.t.Helper()
+	h.deliverModelSecret(command, commander.ModelProviderSecretName, provider, 1)
+	h.deliverModelSecret(command, commander.ModelNameSecretName, model, 1)
+	if provider == "other" {
+		h.deliverModelSecret(command, commander.ModelURLSecretName, endpoint, 1)
+	}
 }
 
 func TestHermesManagedModelSetupReusesSelectionAndProtectsRotation(t *testing.T) {
@@ -127,16 +137,16 @@ func TestHermesManagedModelSetupReusesSelectionAndProtectsRotation(t *testing.T)
 	name := fmt.Sprintf("browser-model-api-key-%x", sha256.Sum256([]byte(endpoint)))
 	profilesBefore := hermesSessionProfiles(t)
 	h := newHermesSessionHost(t, map[string]hermesSessionScenario{"managed": {managed: true}})
+	t.Setenv("BROWSER_MODEL_PROVIDER", "other")
+	t.Setenv("BROWSER_MODEL_NAME", "gpt-4.1-mini")
 	root := h.task(nil, sessions.Open, "managed")
 	binding := h.binding(root)
 	command := h.dispatch(root, &binding)
-	h.answerSetup(command, "browser_model_provider", "Other (OpenAI-compatible)")
-	h.answerSetup(command, "browser_model_name", "gpt-4.1-mini")
-	h.answerSetup(command, "browser_model_url", endpoint)
+	h.deliverModelSecret(command, commander.ModelURLSecretName, endpoint, 1)
 	if model.Calls() != 0 {
 		t.Fatal("model requests started before managed credentials arrived")
 	}
-	lease := h.deliverModelKey(command, name, firstKey, 1)
+	lease := h.deliverModelSecret(command, name, firstKey, 1)
 	first, ok := h.finish(command)
 	if !ok || first.Result.Status != "completed" || model.Calls() != 2 {
 		t.Fatal("managed setup did not reach the real provider through its selected key")
@@ -151,10 +161,13 @@ func TestHermesManagedModelSetupReusesSelectionAndProtectsRotation(t *testing.T)
 		t.Fatal("managed fixture lease wait was cancelled")
 	}
 	model.RotateKey(secondKey)
+	// A retained session keeps its validated model even after host defaults change.
+	t.Setenv("BROWSER_MODEL_PROVIDER", "openai")
+	t.Setenv("BROWSER_MODEL_NAME", "changed-model")
 	child := h.task(&root, sessions.Open, "managed")
 	childBinding := h.binding(child)
 	command = h.dispatch(child, &childBinding)
-	h.deliverModelKey(command, name, secondKey, 2)
+	h.deliverModelSecret(command, name, secondKey, 2)
 	second, ok := h.finish(command)
 	if !ok || second.Result.Status != "completed" || second.Claim != first.Claim || model.Calls() != 4 {
 		t.Fatal("reuse repeated setup, cached a plaintext key or replaced browser ownership")
@@ -168,21 +181,37 @@ func TestHermesManagedModelSetupReusesSelectionAndProtectsRotation(t *testing.T)
 		}
 	}
 	assertHermesOwnedFilesAndEnvironmentPrivate(t, profilesBefore, firstKey, secondKey, ignored)
+	for _, message := range h.history {
+		if message.Type == controllerevents.QuestionRequested {
+			t.Fatal("managed model configuration or reuse asked a setup question")
+		}
+	}
 }
 
-func TestHermesSetupRequestsCanonicalOpenAIKeyWithoutModelAccess(t *testing.T) {
+func TestHermesFreshHostsReuseManagedSettingsAndCanonicalOpenAIKeyWithoutQuestions(t *testing.T) {
 	key := "fixture-canonical-openai-" + id.New()
 	t.Setenv("OPENAI_API_KEY", "ignored-openai-environment-"+id.New())
-	h := newHermesSessionHost(t, map[string]hermesSessionScenario{"prepare": {managed: true, prepareOnly: true}})
-	root := h.task(nil, sessions.Open, "prepare")
-	binding := h.binding(root)
-	command := h.dispatch(root, &binding)
-	h.answerSetup(command, "browser_model_provider", "OpenAI")
-	h.answerSetup(command, "browser_model_name", "gpt-4.1-mini")
-	h.deliverModelKey(command, "OPENAI_API_KEY", key, 1)
-	output, ok := h.finish(command)
-	if !ok || output.Session.State != "starting" || output.Result.ModelRequests != 0 {
-		t.Fatal("preparation-only setup opened a browser or model request")
+	previousHost := ""
+	for range 2 {
+		h := newHermesSessionHost(t, map[string]hermesSessionScenario{"prepare": {managed: true, prepareOnly: true}})
+		if h.host.ID() == previousHost {
+			t.Fatal("shared configuration fixture reused the same agent instance")
+		}
+		previousHost = h.host.ID()
+		root := h.task(nil, sessions.Open, "prepare")
+		binding := h.binding(root)
+		command := h.dispatch(root, &binding)
+		h.deliverModelConfig(command, "openai", "chat-latest", "")
+		h.deliverModelSecret(command, "OPENAI_API_KEY", key, 1)
+		output, ok := h.finish(command)
+		if !ok || output.Session.State != "starting" || output.Result.ModelRequests != 0 {
+			t.Fatal("preparation-only managed setup opened a browser or model request")
+		}
+		for _, message := range h.history {
+			if message.Type == controllerevents.QuestionRequested {
+				t.Fatal("a fresh agent asked model setup questions despite managed configuration")
+			}
+		}
 	}
 }
 

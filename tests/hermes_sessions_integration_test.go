@@ -239,6 +239,9 @@ func newDefaultHermesSessionHost(t *testing.T) *hermesSessionHost {
 func startHermesSessionHost(h *hermesSessionHost, owner string, executors []action.Executor, profilesBefore map[string]bool) *hermesSessionHost {
 	t := h.t
 	t.Helper()
+	// Managed-setting scenarios must not inherit the developer's model defaults.
+	t.Setenv("BROWSER_MODEL_PROVIDER", "")
+	t.Setenv("BROWSER_MODEL_NAME", "")
 	root := t.TempDir()
 	var err error
 	h.bus, err = fscomms.NewFsBus(filepath.Join(root, "bus"))
