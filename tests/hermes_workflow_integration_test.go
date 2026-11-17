@@ -72,13 +72,14 @@ func TestHermesIntegratedManagedWorkflow(t *testing.T) {
 	binding := h.binding(first)
 	firstBinding := binding
 	command := h.dispatch(first, &firstBinding)
-	h.deliverModelConfig(command, "other", "gpt-4.1-mini", endpoint)
+	h.answerModelConfig(command, "other", "gpt-4.1-mini", endpoint)
 	if model.Calls() != 0 {
 		t.Fatal("the managed workflow contacted a model before managed key delivery")
 	}
 	lease := h.deliverModelSecret(command, secretName, key, 1)
+	h.rememberModelConfig(command, "other", "gpt-4.1-mini", endpoint)
 	started := h.checkpoint(controllerevents.CheckpointSave, "browse_started")
-	if model.Calls() != 0 || h.snapshot(binding.Reference).State != "starting" ||
+	if model.Calls() != 0 || model.ValidationCalls() != 1 || h.snapshot(binding.Reference).State != "starting" ||
 		!reflect.DeepEqual(profilesBefore, hermesSessionProfiles(t)) || !reflect.DeepEqual(processesBefore, hermesReadinessProcesses(t)) {
 		t.Fatal("managed browse crossed its unconfirmed startup/native-work fence")
 	}

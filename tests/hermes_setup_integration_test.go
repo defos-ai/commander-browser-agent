@@ -4,6 +4,7 @@ package browser_test
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
@@ -14,9 +15,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/defos-ai/commander-browser-agent/browser/contracts"
 	"github.com/defos-ai/commander-browser-agent/internal/commander"
 	"github.com/defos-ai/commander-browser-agent/tests/fakes"
 	agentevents "github.com/defos-ai/commander/framework/comms/clients/agent/events"
@@ -40,12 +43,12 @@ func (h *hermesSessionHost) answerQuestion(command messages.Message, key, answer
 	h.t.Helper()
 	message := h.setupMessage(command)
 	if message.Type != controllerevents.QuestionRequested {
-		h.t.Fatal("execution did not ask its non-secret clarification")
+		h.t.Fatal("execution did not ask its non-secret question")
 	}
 	request, err := controllerevents.DecodeQuestionRequest(message)
 	hermesSessionCheck(h.t, err)
 	if request.CommandID != command.ID || request.Key != key || len(request.Options) > 4 {
-		h.t.Fatal("clarification lost its bounded question identity")
+		h.t.Fatal("question lost its bounded identity")
 	}
 	now := time.Now().UTC()
 	question := operations.Question{ID: id.New(), TaskID: message.TaskID, CommandID: command.ID, Key: request.Key, Text: request.Text, Options: request.Options,
@@ -57,6 +60,11 @@ func (h *hermesSessionHost) answerQuestion(command messages.Message, key, answer
 }
 
 func (h *hermesSessionHost) deliverModelSecret(command messages.Message, name, key string, version uint64) time.Time {
+	h.t.Helper()
+	return h.deliverReusableSecret(command, name, key, version, nil)
+}
+
+func (h *hermesSessionHost) deliverReusableSecret(command messages.Message, name, key string, version uint64, expectedDefault []byte) time.Time {
 	h.t.Helper()
 	message := h.setupMessage(command)
 	if message.Type != controllerevents.SecretSyncRequested {
@@ -77,10 +85,10 @@ func (h *hermesSessionHost) deliverModelSecret(command messages.Message, name, k
 	if request.Request.EffectiveType() != secrets.SecretReusable {
 		h.t.Fatal("model setup secret request was not reusable")
 	}
-	if request.Default != nil {
-		h.t.Fatal("model setup secret request unexpectedly supplied a default seed")
+	if !bytes.Equal(request.Default, expectedDefault) || (request.Default == nil) != (expectedDefault == nil) {
+		h.t.Fatal("managed request lost its exact selected default or seeded credentials")
 	}
-	if bytes.Contains(message.Payload, []byte(key)) {
+	if expectedDefault == nil && bytes.Contains(message.Payload, []byte(key)) {
 		h.t.Fatal("a model setup value appeared before private delivery")
 	}
 	now := time.Now().UTC()
@@ -102,13 +110,22 @@ func (h *hermesSessionHost) deliverModelSecret(command messages.Message, name, k
 	return delivery.ExpiresAt
 }
 
-func (h *hermesSessionHost) deliverModelConfig(command messages.Message, provider, model, endpoint string) {
+func (h *hermesSessionHost) answerModelConfig(command messages.Message, provider, model, endpoint string) {
 	h.t.Helper()
-	h.deliverModelSecret(command, commander.ModelProviderSecretName, provider, 1)
-	h.deliverModelSecret(command, commander.ModelNameSecretName, model, 1)
+	h.answerQuestion(command, "browser_model_provider_1", provider)
+	h.answerQuestion(command, "browser_model_1", model)
 	if provider == "other" {
-		h.deliverModelSecret(command, commander.ModelURLSecretName, endpoint, 1)
+		h.answerQuestion(command, "browser_model_url_1", endpoint)
 	}
+}
+
+func (h *hermesSessionHost) rememberModelConfig(command messages.Message, provider, model, endpoint string) {
+	h.t.Helper()
+	h.deliverReusableSecret(command, commander.ModelProviderSecretName, provider, 1, []byte(provider))
+	if provider == "other" {
+		h.deliverReusableSecret(command, commander.ModelURLSecretName, endpoint, 1, []byte(endpoint))
+	}
+	h.deliverReusableSecret(command, commander.ModelNameSecretName, model, 1, []byte(model))
 }
 
 func TestHermesManagedModelSetupReusesSelectionAndProtectsRotation(t *testing.T) {
@@ -142,11 +159,16 @@ func TestHermesManagedModelSetupReusesSelectionAndProtectsRotation(t *testing.T)
 	root := h.task(nil, sessions.Open, "managed")
 	binding := h.binding(root)
 	command := h.dispatch(root, &binding)
-	h.deliverModelSecret(command, commander.ModelURLSecretName, endpoint, 1)
+	rootCommandID := command.ID
+	h.answerQuestion(command, "browser_model_url_1", endpoint)
 	if model.Calls() != 0 {
 		t.Fatal("model requests started before managed credentials arrived")
 	}
 	lease := h.deliverModelSecret(command, name, firstKey, 1)
+	h.rememberModelConfig(command, "other", "gpt-4.1-mini", endpoint)
+	if model.ValidationCalls() != 1 {
+		t.Fatal("settings were remembered before a model-only validation")
+	}
 	first, ok := h.finish(command)
 	if !ok || first.Result.Status != "completed" || model.Calls() != 2 {
 		t.Fatal("managed setup did not reach the real provider through its selected key")
@@ -169,7 +191,7 @@ func TestHermesManagedModelSetupReusesSelectionAndProtectsRotation(t *testing.T)
 	command = h.dispatch(child, &childBinding)
 	h.deliverModelSecret(command, name, secondKey, 2)
 	second, ok := h.finish(command)
-	if !ok || second.Result.Status != "completed" || second.Claim != first.Claim || model.Calls() != 4 {
+	if !ok || second.Result.Status != "completed" || second.Claim != first.Claim || model.Calls() != 4 || model.ValidationCalls() != 1 {
 		t.Fatal("reuse repeated setup, cached a plaintext key or replaced browser ownership")
 	}
 	for _, output := range []hermesSessionOutput{first, second} {
@@ -183,12 +205,16 @@ func TestHermesManagedModelSetupReusesSelectionAndProtectsRotation(t *testing.T)
 	assertHermesOwnedFilesAndEnvironmentPrivate(t, profilesBefore, firstKey, secondKey, ignored)
 	for _, message := range h.history {
 		if message.Type == controllerevents.QuestionRequested {
-			t.Fatal("managed model configuration or reuse asked a setup question")
+			request, err := controllerevents.DecodeQuestionRequest(message)
+			hermesSessionCheck(t, err)
+			if request.CommandID != rootCommandID || request.Key != "browser_model_url_1" {
+				h.t.Fatal("retained model setup repeated a question")
+			}
 		}
 	}
 }
 
-func TestHermesFreshHostsReuseManagedSettingsAndCanonicalOpenAIKeyWithoutQuestions(t *testing.T) {
+func TestHermesFreshHostsValidateBeforeSeedingMatchingManagedDefaults(t *testing.T) {
 	key := "fixture-canonical-openai-" + id.New()
 	t.Setenv("OPENAI_API_KEY", "ignored-openai-environment-"+id.New())
 	previousHost := ""
@@ -198,19 +224,39 @@ func TestHermesFreshHostsReuseManagedSettingsAndCanonicalOpenAIKeyWithoutQuestio
 			t.Fatal("shared configuration fixture reused the same agent instance")
 		}
 		previousHost = h.host.ID()
+		var validations atomic.Int32
+		// Keep canonical OpenAI key routing offline. The default-catalog workflow
+		// separately exercises the real HTTP validator against a local provider.
+		h.setup.ValidateModel = func(_ context.Context, model contracts.ModelConfig) error {
+			validations.Add(1)
+			if model.Provider != "openai" || model.Model != "chat-latest" || model.Endpoint != "https://api.openai.com/v1/chat/completions" || string(model.APIKey) != key {
+				t.Error("model validation lost its exact settings or canonical key")
+			}
+			return nil
+		}
 		root := h.task(nil, sessions.Open, "prepare")
 		binding := h.binding(root)
 		command := h.dispatch(root, &binding)
-		h.deliverModelConfig(command, "openai", "chat-latest", "")
-		h.deliverModelSecret(command, "OPENAI_API_KEY", key, 1)
-		output, ok := h.finish(command)
-		if !ok || output.Session.State != "starting" || output.Result.ModelRequests != 0 {
-			t.Fatal("preparation-only managed setup opened a browser or model request")
+		h.answerModelConfig(command, "openai", "chat-latest", "")
+		if validations.Load() != 0 {
+			t.Fatal("model validation started before managed key delivery")
 		}
+		h.deliverModelSecret(command, "OPENAI_API_KEY", key, 1)
+		h.rememberModelConfig(command, "openai", "chat-latest", "")
+		output, ok := h.finish(command)
+		if !ok || validations.Load() != 1 || output.Session.State != "starting" || output.Result.ModelRequests != 0 {
+			t.Fatal("setup did not validate once before matching existing defaults, or opened a browser")
+		}
+		questions := map[string]bool{}
 		for _, message := range h.history {
 			if message.Type == controllerevents.QuestionRequested {
-				t.Fatal("a fresh agent asked model setup questions despite managed configuration")
+				request, err := controllerevents.DecodeQuestionRequest(message)
+				hermesSessionCheck(t, err)
+				questions[request.Key] = true
 			}
+		}
+		if len(questions) != 2 || !questions["browser_model_provider_1"] || !questions["browser_model_1"] {
+			t.Fatal("a fresh host did not ask its two non-secret model questions")
 		}
 	}
 }

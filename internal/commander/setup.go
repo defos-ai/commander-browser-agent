@@ -8,6 +8,7 @@ import (
 	"errors"
 	"sync"
 
+	"github.com/defos-ai/commander-browser-agent/browser/contracts"
 	"github.com/defos-ai/commander/framework/agent/action"
 	"github.com/defos-ai/commander/framework/domain/sessions"
 )
@@ -21,9 +22,11 @@ const (
 	ModelURLSecretName = "BROWSER_MODEL_URL"
 )
 
-// Setup retains non-secret model choices for each full Commander creation claim.
-// Its zero value is ready for use and starts no browser or model connection.
+// Setup retains validated non-secret choices for each full Commander creation claim.
+// Configure ValidateModel before use; construction starts no connection.
 type Setup struct {
+	ValidateModel contracts.ModelValidator
+
 	mu      sync.Mutex
 	entries map[string]*modelSetup
 }
@@ -45,6 +48,10 @@ func (s *Setup) prepare(ctx context.Context) (modelConfig, []byte, error) {
 	var empty modelConfig
 	if err := ctx.Err(); err != nil {
 		return empty, nil, err
+	}
+	validate := s.ValidateModel
+	if validate == nil {
+		return empty, nil, errors.New("browser model setup requires a model validator")
 	}
 	binding, err := action.OpenSession(ctx)
 	if err != nil {
@@ -70,26 +77,69 @@ func (s *Setup) prepare(ctx context.Context) (modelConfig, []byte, error) {
 	case <-ctx.Done():
 		return empty, nil, ctx.Err()
 	}
-	var selection modelConfig
 	if setup.selection != nil {
-		selection = *setup.selection
-	} else {
-		var err error
-		selection, err = requestModelConfig(ctx)
+		selection := *setup.selection
+		key, err := selectedModelKey(ctx, selection)
 		if err != nil {
+			clear(key)
 			return empty, nil, err
 		}
+		if !validModelKey(key) {
+			clear(key)
+			return empty, nil, errors.New("native browser model credentials are invalid")
+		}
+		return selection, key, nil
 	}
-	if err := acceptHermesModel(selection); err != nil {
-		return empty, nil, err
-	}
-	if setup.selection == nil {
-		// Bind valid settings to this session even while its key is pending.
-		// New sessions resolve the current settings again.
+	for attempt := 1; attempt <= 3; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return empty, nil, err
+		}
+		selection, err := requestModelConfig(ctx, attempt)
+		if err != nil {
+			if ctx.Err() != nil {
+				return empty, nil, ctx.Err()
+			}
+			if errors.Is(err, errModelSelectionInvalid) {
+				continue
+			}
+			return empty, nil, err
+		}
+		key, err := selectedModelKey(ctx, selection)
+		if err != nil {
+			clear(key)
+			return empty, nil, err
+		}
+		if !validModelKey(key) {
+			clear(key)
+			return empty, nil, errors.New("native browser model credentials are invalid")
+		}
+		candidate := contracts.ModelConfig{Provider: selection.Provider, Model: selection.Name, Endpoint: selection.URL, APIKey: key}
+		err = validate(ctx, candidate)
+		if ctx.Err() != nil {
+			clear(key)
+			return empty, nil, ctx.Err()
+		}
+		if err != nil {
+			clear(key)
+			if modelFailureOnly(err) == contracts.ErrModelRequestRejected {
+				continue
+			}
+			return empty, nil, safeModelValidationError(err)
+		}
+		if err := seedModelSettings(ctx, selection); err != nil {
+			clear(key)
+			return empty, nil, err
+		}
+		if err := ctx.Err(); err != nil {
+			clear(key)
+			return empty, nil, err
+		}
+		// Only a validated tuple with matching managed receipts is retained.
+		// A later action resolves its canonical credential again.
 		setup.selection = &selection
+		return selection, key, nil
 	}
-	key, err := selectedModelKey(ctx, selection)
-	return selection, key, err
+	return empty, nil, errors.New("browser model setup failed after three selection attempts")
 }
 
 func selectedModelKey(ctx context.Context, selection modelConfig) ([]byte, error) {

@@ -18,6 +18,7 @@ import (
 	"github.com/defos-ai/commander-browser-agent/browser/contracts"
 	"github.com/defos-ai/commander-browser-agent/internal/commander"
 	"github.com/defos-ai/commander-browser-agent/internal/hermes"
+	"github.com/defos-ai/commander-browser-agent/tests/fakes"
 	controllerevents "github.com/defos-ai/commander/framework/comms/clients/controller/events"
 	"github.com/defos-ai/commander/framework/comms/messages"
 )
@@ -40,7 +41,7 @@ func TestHermesModelFailuresStayClassifiedOutsideNativeHistory(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			key := "fixture-model-failure-key-" + test.name
-			provider, calls := hermesFailingProvider(t, key, test.status, test.malformed)
+			provider, calls, _ := hermesFailingProvider(t, key, test.status, test.malformed)
 			request := hermes.Request{Objective: "Complete the local model failure fixture.", Provider: "other", Model: "gpt-4.1-mini",
 				Endpoint: provider.URL + "/chat/completions", APIKey: []byte(key), MaxIterations: 1, MaxTokens: 128, TimeoutSeconds: 25}
 			defer clear(request.APIKey)
@@ -72,22 +73,23 @@ func TestHermesBrowseModelFailureWaitsForFinalCheckpoint(t *testing.T) {
 	for _, refuseFinal := range []bool{false, true} {
 		t.Run(fmt.Sprintf("refuse_final=%t", refuseFinal), func(t *testing.T) {
 			const key = "fixture-managed-model-failure-key"
-			provider, calls := hermesFailingProvider(t, key, http.StatusUnauthorized, false)
+			provider, calls, validations := hermesFailingProvider(t, key, http.StatusUnauthorized, false)
 			endpoint := provider.URL + "/chat/completions"
 			h := newDefaultHermesSessionHost(t)
 			task := h.nativeBrowseTask(nil, commander.HermesBrowseInput{Objective: "Read the local failure fixture.", URL: "https://example.test/",
 				MaxIterations: 1, MaxTokensPerResponse: 128, TimeoutSeconds: 30})
 			binding := h.binding(task)
 			command := h.dispatch(task, &binding)
-			h.deliverModelConfig(command, "other", "gpt-4.1-mini", endpoint)
+			h.answerModelConfig(command, "other", "gpt-4.1-mini", endpoint)
 			h.deliverModelSecret(command, modelSecretName(endpoint), key, 1)
+			h.rememberModelConfig(command, "other", "gpt-4.1-mini", endpoint)
 			final := h.checkpoint(controllerevents.CheckpointSave, "browse_finished")
 			request, err := controllerevents.DecodeCheckpointRequest(final)
 			hermesSessionCheck(t, err)
 			var fact struct {
 				Status string `json:"status"`
 			}
-			if json.Unmarshal(request.Data, &fact) != nil || fact.Status != "failed" || calls.Load() != 1 {
+			if json.Unmarshal(request.Data, &fact) != nil || fact.Status != "failed" || calls.Load() != 1 || validations.Load() != 1 {
 				t.Fatal("model failure finalized before its quiescent failed checkpoint or retried the provider")
 			}
 			for _, message := range h.history {
@@ -125,11 +127,10 @@ func TestHermesBrowseModelFailureWaitsForFinalCheckpoint(t *testing.T) {
 	}
 }
 
-func hermesFailingProvider(t *testing.T, key string, status int, malformed bool) (*httptest.Server, *atomic.Int32) {
+func hermesFailingProvider(t *testing.T, key string, status int, malformed bool) (*httptest.Server, *atomic.Int32, *atomic.Int32) {
 	t.Helper()
-	calls := new(atomic.Int32)
+	calls, validations := new(atomic.Int32), new(atomic.Int32)
 	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		calls.Add(1)
 		defer r.Body.Close()
 		body, err := io.ReadAll(io.LimitReader(r.Body, (2<<20)+1))
 		defer clear(body)
@@ -137,6 +138,13 @@ func hermesFailingProvider(t *testing.T, key string, status int, malformed bool)
 			t.Error("model failure fixture received an unexpected provider request")
 		}
 		w.Header().Set("Content-Type", "application/json")
+		var request fakes.HermesRequest
+		if json.Unmarshal(body, &request) == nil && request.IsModelValidation() {
+			validations.Add(1)
+			_, _ = io.WriteString(w, `{"object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"OK"},"finish_reason":"stop"}]}`)
+			return
+		}
+		calls.Add(1)
 		w.Header().Set("X-Provider-Private", hermesProviderFailureCanary)
 		w.Header().Set("Retry-After", "0")
 		w.WriteHeader(status)
@@ -147,5 +155,5 @@ func hermesFailingProvider(t *testing.T, key string, status int, malformed bool)
 		_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]string{"message": hermesProviderFailureCanary + " " + key}})
 	}))
 	t.Cleanup(provider.Close)
-	return provider, calls
+	return provider, calls, validations
 }

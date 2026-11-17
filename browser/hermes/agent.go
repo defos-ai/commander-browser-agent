@@ -12,6 +12,12 @@ import (
 // the concrete Hermes adapter. Model credentials remain outside browse tasks.
 type ModelConfig = contracts.ModelConfig
 
+// ValidateModel checks the selected completion endpoint without a native agent
+// or browser. It borrows the credential only for the bounded HTTP exchange.
+func ValidateModel(ctx context.Context, model ModelConfig) error {
+	return native.CheckModel(ctx, model)
+}
+
 // Agent lends Hermes reasoning only for its original manager callback.
 // It does not own another worker, browser process or automation connection.
 type Agent struct {

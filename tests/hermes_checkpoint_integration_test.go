@@ -307,8 +307,9 @@ func TestHermesCheckpointReceiptsFenceQuestionsBatchesAndFinalization(t *testing
 	binding := h.binding(root)
 	command := h.dispatch(root, &binding)
 	endpoint := model.URL + "/chat/completions"
-	h.deliverModelConfig(command, "other", "gpt-4.1-mini", endpoint)
+	h.answerModelConfig(command, "other", "gpt-4.1-mini", endpoint)
 	h.deliverModelSecret(command, modelSecretName(endpoint), key, 1)
+	h.rememberModelConfig(command, "other", "gpt-4.1-mini", endpoint)
 	start := h.checkpoint(controllerevents.CheckpointSave, "browse_started")
 	startReceipt := h.persistCheckpoint(start)
 	startRetry := h.checkpoint(controllerevents.CheckpointSave, "browse_started")

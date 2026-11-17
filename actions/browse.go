@@ -37,13 +37,13 @@ type Browse struct {
 }
 
 // NewBrowse creates fresh discovery/setup state without opening a runtime.
-func NewBrowse(runner BrowserRunner, factory contracts.BrowserAgentFactory) *Browse {
+func NewBrowse(runner BrowserRunner, factory contracts.BrowserAgentFactory, validator contracts.ModelValidator) *Browse {
 	return &Browse{
 		Base: action.NewBase(actionmodel.Action{
 			Name: BrowseName, Description: BrowseDescription, SessionMode: "open",
 			InputSchema: json.RawMessage(commander.HermesBrowseInputSchema), OutputSchema: json.RawMessage(commander.HermesBrowseOutputSchema),
 		}),
-		runner: runner, agentFactory: factory,
+		runner: runner, agentFactory: factory, setup: commander.Setup{ValidateModel: validator},
 	}
 }
 
@@ -58,6 +58,10 @@ func (a *Browse) Discover(ctx context.Context, env environment.Environment, scop
 	}()
 	if a.agentFactory == nil {
 		a.SetUnavailable("The host must provide its browser agent factory", actionmodel.Requirement{Kind: actionmodel.ConfigurationRequirement, Name: "browser-agent-factory"})
+		return action.Unavailable, nil
+	}
+	if a.setup.ValidateModel == nil {
+		a.SetUnavailable("The host must provide its browser model validator", actionmodel.Requirement{Kind: actionmodel.ConfigurationRequirement, Name: "browser-model-validator"})
 		return action.Unavailable, nil
 	}
 	configuration, status, err := commander.DiscoverRuntime(ctx, a.Base, a.runner, env, scope)

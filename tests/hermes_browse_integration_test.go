@@ -132,11 +132,12 @@ func TestHermesBrowseNativeContractDispatchReuseAndWallTime(t *testing.T) {
 	root := h.nativeBrowseTask(nil, input)
 	binding := h.binding(root)
 	command := h.dispatch(root, &binding)
-	h.deliverModelConfig(command, "other", "gpt-4.1-mini", endpoint)
+	h.answerModelConfig(command, "other", "gpt-4.1-mini", endpoint)
 	if model.Calls() != 0 {
 		t.Fatal("native browsing contacted a model before managed key delivery")
 	}
 	lease := h.deliverModelSecret(command, secretName, key, 1)
+	h.rememberModelConfig(command, "other", "gpt-4.1-mini", endpoint)
 	h.answerQuestion(command, "browser_clarification_1", "42 samples")
 	final := h.checkpoint(controllerevents.CheckpointSave, "browse_finished")
 	if model.Calls() != 3 {

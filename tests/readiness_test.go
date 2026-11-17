@@ -13,7 +13,8 @@ import (
 func TestActionsRequireCapabilityFactoriesBeforeDiscovery(t *testing.T) {
 	probe := &unitSetup{t: t}
 	for _, executor := range []action.Executor{
-		actions.NewBrowse(probe, nil), actions.NewLogin(probe, nil), actions.NewScreenshot(probe, nil),
+		actions.NewBrowse(probe, nil, nil), actions.NewBrowse(probe, realBrowserDependencies().BrowserAgent, nil),
+		actions.NewLogin(probe, nil), actions.NewScreenshot(probe, nil),
 	} {
 		status, err := executor.Discover(t.Context(), unitEnvironment{probe}, nil)
 		if err != nil || status != action.Unavailable || probe.discoveryRuns != 0 || probe.runs != 0 || len(probe.events) != 0 {

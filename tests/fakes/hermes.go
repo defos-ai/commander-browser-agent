@@ -38,6 +38,15 @@ type HermesRequest struct {
 	} `json:"tools"`
 }
 
+// IsModelValidation identifies the bounded model-only connectivity probe.
+func (r HermesRequest) IsModelValidation() bool {
+	if len(r.Messages) != 1 || r.Messages[0].Role != "user" || len(r.Tools) != 0 || r.Stream {
+		return false
+	}
+	var text string
+	return json.Unmarshal(r.Messages[0].Content, &text) == nil && text == "Reply OK to confirm the browser model connection."
+}
+
 func (r HermesRequest) HasTool(name string) bool {
 	for _, tool := range r.Tools {
 		if tool.Function.Name == name {
@@ -81,6 +90,7 @@ type HermesModel struct {
 	Blocked      chan struct{}
 	Disconnected chan struct{}
 	calls        atomic.Int32
+	validations  atomic.Int32
 	blockedOnce  sync.Once
 	closedOnce   sync.Once
 	mu           sync.RWMutex
@@ -88,7 +98,8 @@ type HermesModel struct {
 	protected    []string
 }
 
-func (m *HermesModel) Calls() int { return int(m.calls.Load()) }
+func (m *HermesModel) Calls() int           { return int(m.calls.Load()) }
+func (m *HermesModel) ValidationCalls() int { return int(m.validations.Load()) }
 
 func (m *HermesModel) RotateKey(key string) {
 	m.mu.Lock()
@@ -151,8 +162,14 @@ func NewHermesModel(t *testing.T, key string, decide func(HermesRequest, int) He
 			http.Error(w, "Invalid fixture model", http.StatusBadRequest)
 			return
 		}
-		number := int(model.calls.Add(1))
-		response := decide(request, number)
+		number := 0
+		response := HermesResponse{Text: "OK"}
+		if request.IsModelValidation() {
+			model.validations.Add(1)
+		} else {
+			number = int(model.calls.Add(1))
+			response = decide(request, number)
+		}
 		if response.Redirect != "" {
 			http.Redirect(w, r, response.Redirect, http.StatusTemporaryRedirect)
 			return

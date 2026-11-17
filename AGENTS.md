@@ -275,7 +275,7 @@
   [internal/commander/browse_contract.go](internal/commander/browse_contract.go)
   and [browse.go](internal/commander/browse.go). It reports protected
   final text, runtime status and Hermes's `api_calls` counter, which can omit
-  internal retries. Do not synthesize typed findings, grounded evidence,
+  internal retries and excludes setup connection checks. Do not synthesize typed findings, grounded evidence,
   `final_url`, browser-operation counts or actual token/cost usage. The starting
   URL is part of the native task, not an independently confirmed navigation.
 - Native input uses `max_iterations` (default 12, 1–30),
@@ -362,15 +362,37 @@
 - [internal/commander/setup.go](internal/commander/setup.go) resolves separate
   `BROWSER_MODEL_PROVIDER` (`openai` or `other`) and `BROWSER_MODEL_NAME`
   (the exact model ID, such as `chat-latest`). Nonempty environment values take
-  precedence; missing/empty values use `action.RequestReusableSecret` under the
-  same respective names. Read these variables during execution setup, never
-  during discovery. Other additionally requests a reusable `BROWSER_MODEL_URL`
-  containing its exact Chat Completions endpoint; this value comes from Commander,
-  not the environment. OpenAI always uses its fixed endpoint. Validate settings
-  before requesting the separate canonical API key, and clear delivered buffers.
+  precedence on the first setup attempt; missing choices use regular
+  `action.Question` calls. Other asks a further non-secret question for its exact
+  Chat Completions endpoint. OpenAI always uses its fixed endpoint. Read model
+  variables only during execution, never discovery. Request API keys separately
+  through their canonical managed names after validating the candidate syntax.
+  Retry invalid provider/model/endpoint answers or an explicit provider request
+  rejection with fresh question keys, up to three total attempts. Later attempts
+  ask again rather than repeating an invalid environment value. Question keys are
+  `browser_model_provider_N`, `browser_model_N` and `browser_model_url_N`, N=1..3;
+  never reuse a saved question key with changed text or embed provider errors.
   Do not restore the combined `BROWSER_MODEL_CONFIG` JSON setting.
-  Do not fetch a live model catalog before keys or make an extra paid validation
-  request: the native model request validates the selected wire profile.
+  Do not fetch a live model catalog before keys.
+- `actions.Dependencies.ValidateModel`, supplied by [cli/factory.go](cli/factory.go),
+  performs one bounded model-only connection check per syntactically valid fresh
+  candidate. The Hermes adapter shares the protected Go model transport; it starts
+  no native worker, browser or reasoning loop and executes no model-returned tools.
+  Use one fixed non-secret prompt, a twenty-second deadline and a 128-token
+  response allowance. This is an additional model API request during the existing
+  ten-minute setup budget, before the browser start fence and active browse budget.
+  A valid completion confirms connection/model access, not universal tool support
+  or browser quality. Discard all provider text. Authentication, rate limits,
+  network, unsafe response, cancellation and cleanup errors stop setup instead of
+  being treated as an incorrect provider/model answer. Never retry a browser
+  workflow to validate setup.
+- Only after that connection check succeeds, seed the separate reusable
+  `BROWSER_MODEL_PROVIDER`, Other's `BROWSER_MODEL_URL` and `BROWSER_MODEL_NAME`
+  using `action.RequestReusableSecret` with the validated value as `Default`.
+  Clear owned seed, delivery and API-key buffers on every error path. Compare each
+  receipt exactly: a different existing value is a managed-settings conflict,
+  never authority to switch the validated model or credential destination.
+  Cache choices only after validation and matching save receipts.
 - [internal/commander/model.go](internal/commander/model.go) uses the same setup
   cache and creation claims. Its native path offers OpenAI and explicitly
   selected Other only; reject unverified profiles before requesting credentials.
@@ -380,8 +402,8 @@
   The default catalog offers these two verified provider selections.
 - Only the two provider/model environment variables above configure model
   selection. API keys always come from managed secrets, including when provider
-  and model are configured through the environment. New sessions resolve missing
-  settings through Commander; it prompts only when delivery needs operator input.
+  and model are configured through the environment. New sessions ask missing
+  provider/model choices through ordinary questions, not secret-value prompts.
   Do not add model-key environment shortcuts or aliases. Runtime discovery uses
   the environment abstraction for Lightpanda
   and Hermes, clears stale state, and never makes model network calls, asks
@@ -404,13 +426,13 @@
   Commander v0.6.0 supports reusable `SecretRequestOptions.Default` bytes as
   create-if-missing seeds; existing values, including expired ones, take
   precedence. It has no lookup-only or lazy-default action API. The operator
-  chose separate environment values with reusable-setting fallback instead of
-  provider/model questions. Entering a reusable value remembers it before model
-  validation.
-  A post-validation remember question with first-use question fallback would
-  need an authoritative missing-aware API. A timeout does not establish absence.
-  Reject invalid settings before requesting API keys; an unsuccessful model call
-  does not delete or overwrite operator-managed configuration. Do not seed placeholder values,
+  chose question-first validation followed by reusable default seeds. Defaults
+  create missing settings and do not overwrite older values. Separate settings
+  cannot be saved atomically; conflicting/partial saves require operator correction.
+  Every fresh session lacking environment choices still asks those questions:
+  silent read-before-question needs a missing-aware API. A timeout does not
+  establish absence. An unsuccessful model call does not delete or overwrite
+  operator-managed configuration. Do not seed placeholder values,
   race questions against secret delivery, or add direct secret-store access.
 - Enable framework managed secrets in the host. Request missing keys on demand;
   RequiredSecrets must stay empty so setup can run first. Clear owned key bytes
@@ -683,7 +705,8 @@
   OS security boundary. Provider keys still use the managed bridge, while the
   two optional environment settings configure provider/model selection.
 - The demo agent forwards only the optional provider/model environment settings;
-  missing settings and all API keys use managed secrets. Do not automatically
+  missing choices use regular questions and validated reusable seeds; API keys
+  use managed secrets. Do not automatically
   pass host provider keys into Playground.
   It accepts masked key entry or one explicitly forwarded provider key and shares
   the selected key; the agent requests its managed secret.

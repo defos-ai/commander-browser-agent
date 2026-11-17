@@ -20,8 +20,9 @@ docker compose up --build --wait
 docker compose run --rm --no-deps playground
 ```
 
-Provider/model variables are optional. Missing values and API keys use
-Commander's reusable managed settings.
+Provider/model variables are optional. Missing choices use regular Commander
+questions, with up to three setup attempts. Successful choices become reusable
+defaults after a connection check. API keys use managed secrets.
 See [AGENTS.md](AGENTS.md#intelligence-and-model-access) for custom providers.
 
 One agent container runs the Go agent, Hermes `v0.23.1` and Lightpanda `1.0.2`

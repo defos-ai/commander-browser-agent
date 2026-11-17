@@ -26,6 +26,10 @@ func (ModelConfig) GoString() string { return "private browser model configurati
 // Construction starts no worker, browser connection or model request.
 type BrowserAgentFactory func(context.Context, ModelConfig) (BrowserAgent, error)
 
+// ModelValidator checks model access without browser work or reasoning. It
+// borrows APIKey until return, honors cancellation and exposes no provider text.
+type ModelValidator func(context.Context, ModelConfig) error
+
 // BrowseRequest contains only a non-secret task and its execution allowances.
 // Model credentials and provider configuration belong to the host adapter.
 type BrowseRequest struct {

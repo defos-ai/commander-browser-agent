@@ -42,6 +42,7 @@ func openDependencies(ctx context.Context, configuration config) (result *depend
 		return nil, err
 	}
 	d := &dependencies{Actions: actions.Dependencies{
+		ValidateModel: hermes.ValidateModel,
 		BrowserAgent: func(ctx context.Context, model contracts.ModelConfig) (contracts.BrowserAgent, error) {
 			return hermes.NewAgent(ctx, model)
 		},
