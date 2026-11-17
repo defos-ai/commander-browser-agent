@@ -796,7 +796,9 @@ tests exercise native truncation recovery without equating Hermes's reported
 counter with actual forwarded HTTP requests.
 Focused tests exercise the combined thirty-fence limit and exact execution/claim
 checks without starting a runtime.
-CI runs the native integration suite with an eight-minute test-binary bound.
+CI runs the native integration suite with a twelve-minute test-binary bound;
+this covers the whole serial suite, including repeated runtime readiness checks
+and worker startup. Keep individual action, readiness and cleanup bounds intact.
 Clean-close Hermes scenarios check that their private profiles are removed;
 intentional uncertain-loss scenarios require retained lost state and profiles.
 The container must have no surviving Python or Lightpanda processes before it
