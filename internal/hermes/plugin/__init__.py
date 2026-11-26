@@ -4,6 +4,21 @@ import copy
 import json
 
 
+_LIGHTPANDA_GUIDANCE = (
+    "Commander Lightpanda retains one page. Reuse it for first and subsequent navigation. "
+    "Navigate with cdp('Page.navigate', url=..., _response_timeout=30) and check errorText. "
+    "For a new document, match the navigation frameId and loaderId with id and loaderId in "
+    "cdp('Page.getFrameTree')['frameTree']['frame']. Check the observed destination and the "
+    "specific content requested. A site can update its path, and its title can be readable "
+    "while document.readyState is still 'loading'. "
+    "Extract with cdp('Runtime.evaluate', expression=..., returnByValue=True, awaitPromise=False, "
+    "_response_timeout=30). Check exceptionDetails, then read reply['result']['value']. "
+    "Do not call new_tab, create targets or switch tabs. If a bounded read cannot confirm the "
+    "document, report that observation and stop without repeating navigation. "
+    "These instructions override navigation examples in the native helper reference below.\n\n"
+)
+
+
 def register(ctx):
     import tools.browser_use_cli
     import tools.terminal_tool
@@ -30,7 +45,9 @@ def register(ctx):
     for name, schema, handler in (("browser_exec", schemas["browser_exec"], browser),
                                   ("terminal", schemas["terminal"], denied_terminal)):
         schema = copy.deepcopy(schema)
-        if name == "terminal":
+        if name == "browser_exec":
+            schema["description"] = _LIGHTPANDA_GUIDANCE + schema["description"]
+        elif name == "terminal":
             schema["description"] = "Unavailable compatibility entry. Use browser_exec for browser work."
         ctx.register_tool(name=name, toolset="commander-browser", schema=schema,
                           handler=handler, check_fn=lambda: True, override=True)

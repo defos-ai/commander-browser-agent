@@ -83,10 +83,10 @@ func (m *SessionManager) RunHermes(ctx context.Context, options browserruntime.H
 	if workCtx.Err() != nil {
 		runErr = errors.Join(runErr, workCtx.Err(), context.Cause(workCtx))
 	}
-	// Verification is an independent bounded control probe. It must not turn
-	// cancellation of one action into an automatic browser replacement.
+	// Let the retained connection settle within this execution's remaining wall
+	// budget. Cancellation must not cause an automatic browser replacement.
 	if workCtx.Err() == nil {
-		if err := m.refreshHermes(workCtx, item, worker); err != nil && !errors.Is(err, browserruntime.ErrRuntimeNotConnected) {
+		if err := m.verifyHermes(workCtx, item, worker, 20*time.Second); err != nil && !errors.Is(err, browserruntime.ErrRuntimeNotConnected) {
 			runErr = errors.Join(runErr, err)
 		}
 	}
@@ -159,7 +159,7 @@ func (m *SessionManager) hermesRuntime(ctx context.Context, item *entry, mode se
 		m.mu.Unlock()
 		return nil, err
 	}
-	item.view.State, item.view.Reason = "starting", "Browser has not been opened"
+	item.view.State, item.view.Reason = "starting", "Browser connection has not been verified"
 	m.touchLocked(item)
 	m.mu.Unlock()
 	go m.monitor(item, worker)
@@ -168,6 +168,10 @@ func (m *SessionManager) hermesRuntime(ctx context.Context, item *entry, mode se
 }
 
 func (m *SessionManager) refreshHermes(ctx context.Context, item *entry, worker browserruntime.Runtime) error {
+	return m.verifyHermes(ctx, item, worker, 3*time.Second)
+}
+
+func (m *SessionManager) verifyHermes(ctx context.Context, item *entry, worker browserruntime.Runtime, timeout time.Duration) error {
 	m.mu.Lock()
 	if err := m.availableLocked(item); err != nil {
 		m.mu.Unlock()
@@ -175,7 +179,7 @@ func (m *SessionManager) refreshHermes(ctx context.Context, item *entry, worker 
 	}
 	revision := item.view.Revision
 	m.mu.Unlock()
-	bounded, cancel := context.WithTimeout(ctx, 3*time.Second)
+	bounded, cancel := context.WithTimeout(ctx, timeout)
 	err := worker.Verify(bounded)
 	cancel()
 	m.mu.Lock()
@@ -208,7 +212,7 @@ func (m *SessionManager) applyHermesHealthLocked(item *entry, err error, revisio
 		item.view.State, item.view.Reason, item.view.VerifiedAt = "lost", "Browser connection was lost", nil
 		m.cleanupLocked(item, false)
 	case errors.Is(err, browserruntime.ErrRuntimeNotConnected) && item.view.ConnectedAt == nil:
-		item.view.State, item.view.Reason, item.view.VerifiedAt = "starting", "Browser has not been opened", nil
+		item.view.State, item.view.Reason, item.view.VerifiedAt = "starting", "Browser connection has not been verified", nil
 	default:
 		item.view.State, item.view.Reason, item.view.VerifiedAt = "unverified", "Browser connection could not be verified", nil
 	}

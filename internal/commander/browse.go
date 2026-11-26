@@ -193,11 +193,8 @@ func hermesBrowseError(ctx context.Context, err error) error {
 	if ctx.Err() != nil {
 		return errors.Join(ctx.Err(), context.Cause(ctx))
 	}
-	if errors.Is(err, context.DeadlineExceeded) {
-		return context.DeadlineExceeded
-	}
-	if errors.Is(err, context.Canceled) {
-		return context.Canceled
+	if errors.Is(err, browserruntime.ErrRuntimeLost) {
+		return errors.New("browser session was lost; native work is unconfirmed; inspect the session before an explicit continuation")
 	}
 	if failure := modelFailureOnly(err); failure != nil {
 		return fmt.Errorf("%w; inspect the session before an explicit continuation", failure)

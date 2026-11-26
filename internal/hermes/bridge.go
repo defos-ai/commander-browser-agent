@@ -447,6 +447,8 @@ func (w *Worker) Verify(ctx context.Context) error {
 	if err := contextError(ctx); err != nil {
 		return err
 	}
+	check, stop := context.WithTimeout(ctx, 20*time.Second)
+	defer stop()
 	identifier, err := freshID()
 	if err != nil {
 		return ErrUnverified
@@ -476,9 +478,15 @@ func (w *Worker) Verify(ctx context.Context) error {
 		}
 		w.mu.Unlock()
 	}()
-	check, stop := context.WithTimeout(ctx, 2*time.Second)
-	defer stop()
-	if err := w.send(check, "verify", identifier, struct{}{}); err != nil {
+	// Give the worker one shared CDP budget while reserving time for its
+	// correlated receipt. Lightpanda can queue commands behind synchronous HTTP
+	// work; a probe timeout leaves ownership intact and reports unverified.
+	deadline, _ := check.Deadline()
+	timeoutMS := max(1, int((time.Until(deadline)-200*time.Millisecond)/time.Millisecond))
+	request := struct {
+		TimeoutMS int `json:"timeout_ms"`
+	}{TimeoutMS: timeoutMS}
+	if err := w.send(check, "verify", identifier, request); err != nil {
 		if errors.Is(err, ErrProtocol) {
 			w.fail(ErrProtocol)
 			return errors.Join(ErrLost, ErrProtocol)

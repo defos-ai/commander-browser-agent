@@ -18,6 +18,7 @@ from pathlib import Path
 import queue
 import secrets
 import shutil
+import socket
 import sys
 import threading
 import time
@@ -28,12 +29,40 @@ import ipaddress
 MAX_FRAME = 1 << 20
 MAX_TEXT = 64 << 10
 MAX_NATIVE_RESULT = 128 << 10
+MAX_PROBE_SECONDS = 20
 IDENTITY = {"release": "v0.23.1", "commit": "3b421578588243f920886e6fe79a6faa87ea026e",
             "archive_sha256": "2525046f165880c22f177f2214c8da3e26c58cb0aeab5bd09aad940556538897"}
 
 
 class Refused(Exception):
     pass
+
+
+class ProbeInterrupted(Refused):
+    pass
+
+
+class ProbeSocket:
+    """Apply one absolute deadline to every IPC send and receive."""
+
+    def __init__(self, worker, connection, deadline, owner):
+        self.worker, self.connection = worker, connection
+        self.deadline, self.owner = deadline, owner
+        self.received = 0
+
+    def sendall(self, value):
+        if len(value) > MAX_FRAME:
+            raise Refused("browser_request_limit")
+        self.connection.settimeout(self.worker.probe_remaining(self.deadline, self.owner))
+        return self.connection.sendall(value)
+
+    def recv(self, maximum):
+        self.connection.settimeout(self.worker.probe_remaining(self.deadline, self.owner))
+        value = self.connection.recv(maximum)
+        self.received += len(value)
+        if self.received > MAX_FRAME:
+            raise Refused("browser_response_limit")
+        return value
 
 
 def bounded_text(value, maximum):
@@ -82,6 +111,8 @@ class Worker:
         self.browser_attempted = False
         self.lost = False
         self.native = None
+        self.probe_sockets = {}
+        self.health_threads = set()
 
     def send(self, kind, identifier, payload):
         raw = json.dumps({"version": 1, "kind": kind, "id": identifier, "payload": payload},
@@ -208,53 +239,127 @@ class Worker:
                 "native_pid": native.pid, "native_birth": native.create_time(),
                 "endpoint": server.cdp_url}
 
-    def browser_route(self):
-        # browser-harness 0.1.13 has no public Python route getter. This is a
-        # version-pinned daemon IPC metadata exchange through admin's _ipc alias,
-        # not a new CDP connection or a mutation of the upstream implementation.
+    @staticmethod
+    def probe_deadline(deadline=None):
+        bound = time.monotonic() + MAX_PROBE_SECONDS
+        return bound if deadline is None else min(bound, deadline)
+
+    def probe_remaining(self, deadline, owner=None):
+        with self.lock:
+            if (self.closing or owner is not None and
+                    (owner.cancelled.is_set() or owner.finished.is_set() or self.active is not owner)):
+                raise ProbeInterrupted("browser_execution_stopped")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("browser_verification_timeout")
+        return remaining
+
+    def interrupt_probes(self, owner=None):
+        with self.lock:
+            connections = [connection for connection, current in self.probe_sockets.items()
+                           if owner is None or current is owner]
+        for connection in connections:
+            try:
+                connection.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+
+    def daemon_rpc(self, request, deadline=None):
+        # browser-harness 0.1.13 has no public Python route getter. Use its
+        # version-pinned daemon IPC protocol on the existing CDP connection.
+        # The proxy enforces one deadline across all chunks, and the owner can
+        # interrupt this exact socket without affecting another execution.
         from browser_harness.admin import ipc
-        connection, token = ipc.connect(self.session_name, timeout=1.0)
+        deadline = self.probe_deadline(deadline)
+        owner = self.execution.get()
+        connection = None
         try:
-            connection.settimeout(1.0)
-            response = ipc.request(connection, token, {"meta": "connection_status"})
+            connection, token = ipc.connect(self.session_name,
+                                            timeout=min(1, self.probe_remaining(deadline, owner)))
+            with self.lock:
+                self.probe_remaining(deadline, owner)
+                self.probe_sockets[connection] = owner
+            response = ipc.request(ProbeSocket(self, connection, deadline, owner), token, request)
+            self.probe_remaining(deadline, owner)
+            if not isinstance(response, dict) or "error" in response:
+                raise Refused("browser_rpc_unavailable")
+            return response
+        except Exception:
+            with self.lock:
+                interrupted = self.closing or owner is not None and owner.cancelled.is_set()
+            if interrupted:
+                raise ProbeInterrupted("browser_execution_stopped") from None
+            raise
         finally:
-            connection.close()
-        if not isinstance(response, dict) or "error" in response:
-            raise Refused("browser_route_unavailable")
+            if connection is not None:
+                with self.lock:
+                    self.probe_sockets.pop(connection, None)
+                connection.close()
+
+    def browser_cdp(self, method, params=None, *, session_id=None, deadline=None):
+        response = self.daemon_rpc({"method": method, "params": params or {},
+                                    "session_id": session_id}, deadline)
+        result = response.get("result")
+        if not isinstance(result, dict):
+            raise Refused("browser_rpc_unavailable")
+        return result
+
+    def browser_route(self, deadline=None):
+        response = self.daemon_rpc({"meta": "connection_status"}, deadline)
         route = {"target": response.get("target_id"), "automation_session": response.get("session_id")}
         if any(not isinstance(value, str) or not value or len(value.encode()) > 256
                for value in route.values()):
             raise Refused("browser_route_unavailable")
         return route  # Never retain the daemon's optional URL/title/page metadata.
 
-    def pin_browser(self):
-        from browser_harness.admin import daemon_browser_ready
-        from browser_harness.helpers import cdp, current_tab
+    def open_browser(self, deadline):
+        """Configure and pin the named blank page before any site navigation."""
+        from tools.browser_use_cli import browser_exec
 
-        identity = self.browser_identity()
-        if not daemon_browser_ready(self.session_name):
+        self.probe_remaining(deadline, self.execution.get())
+        self.browser_attempted = True
+        # Lightpanda serve defaults to ignoring external CSS. Page scripts and
+        # visibility checks need author styles even for text-only browsing.
+        result = browser_exec("cdp('LP.configureLoading', externalStylesheets=True)",
+                              session=self.session_name, task_id=self.session_name, timeout_s=5)
+        result = json.loads(result) if isinstance(result, str) else result
+        if not isinstance(result, dict) or result.get("success") is not True:
             raise Refused("browser_connection_unavailable")
-        route = self.browser_route()
-        target = current_tab().get("targetId")
-        if not isinstance(target, str) or not target or target != route["target"]:
-            raise Refused("browser_connection_unavailable")
-        session = cdp("Target.attachToTarget", targetId=target, flatten=True,
-                      _response_timeout=1.0).get("sessionId")
-        if not isinstance(session, str) or not session:
-            raise Refused("browser_connection_unavailable")
-        if self.browser_identity() != identity or self.browser_route() != route:
-            raise Refused("browser_identity_changed")
-        self.browser_pin = {**identity, **route, "session": session}
-        # This documented override short-circuits get_session_info on subsequent
-        # native calls. Together with require-existing it prevents provisioning a
-        # replacement Lightpanda process or harness daemon for this session.
-        os.environ["BU_CDP_URL"] = identity["endpoint"]
-        os.environ["BH_REQUIRE_EXISTING_DAEMON"] = "1"
-        if self.probe_browser() != "connected":
-            raise Refused("browser_connection_unavailable")
+        self.pin_browser(deadline)
 
-    def probe_browser(self):
-        """Called under native_lock: use the pinned connection without recovery."""
+    def pin_browser(self, deadline=None):
+        deadline = self.probe_deadline(deadline)
+        try:
+            identity = self.browser_identity()
+            route = self.browser_route(deadline)
+            target = self.daemon_rpc({"meta": "current_tab"}, deadline).get("targetId")
+            if not isinstance(target, str) or not target or target != route["target"]:
+                raise Refused("browser_connection_unavailable")
+            session = self.browser_cdp("Target.attachToTarget", {"targetId": target, "flatten": True},
+                                       deadline=deadline).get("sessionId")
+            if not isinstance(session, str) or not session:
+                raise Refused("browser_connection_unavailable")
+            if self.browser_identity() != identity or self.browser_route(deadline) != route:
+                raise Refused("browser_identity_changed")
+            self.browser_pin = {**identity, **route, "session": session}
+            # This documented override short-circuits get_session_info on
+            # subsequent native calls without provisioning a replacement.
+            os.environ["BU_CDP_URL"] = identity["endpoint"]
+            os.environ["BH_REQUIRE_EXISTING_DAEMON"] = "1"
+            if self.probe_browser(deadline) != "connected":
+                raise Refused("browser_connection_unavailable")
+        except Exception:
+            # An incomplete first pin has no previously verified attachment.
+            # Its timed-out metadata cannot establish a reusable identity.
+            if not self.closing:
+                self.mark_lost()
+            raise
+
+    def probe_browser(self, deadline=None):
+        """Called under native_lock: verify the pinned connection without recovery."""
+        deadline = self.probe_deadline(deadline)
+        if self.closing:
+            return "unverified"
         if self.lost:
             return "lost"
         if self.browser_pin is None:
@@ -263,38 +368,80 @@ class Worker:
                 return "lost"
             return "starting"
         try:
-            from browser_harness.admin import daemon_browser_ready
-            from browser_harness.helpers import cdp
             from tools.browser_session_lifecycle import update_session_activity
 
             pin = self.browser_pin
             route = {name: pin[name] for name in ("target", "automation_session")}
             identity = self.browser_identity()
-            if any(identity[name] != pin[name] for name in identity) or not daemon_browser_ready(self.session_name):
+            if any(identity[name] != pin[name] for name in identity):
                 raise Refused("browser_identity_changed")
-            if self.browser_route() != route:
+            if self.browser_route(deadline) != route:
                 raise Refused("browser_route_changed")
-            reply = cdp("Runtime.evaluate", session_id=pin["session"], expression="true",
-                        returnByValue=True, awaitPromise=False, _response_timeout=1.0)
+            reply = self.browser_cdp("Runtime.evaluate", {"expression": "true", "returnByValue": True,
+                                      "awaitPromise": False}, session_id=pin["session"], deadline=deadline)
             if reply.get("exceptionDetails") or reply.get("result", {}).get("value") is not True:
                 raise Refused("browser_connection_unavailable")
-            if self.browser_identity() != identity or self.browser_route() != route:
+            if self.browser_identity() != identity or self.browser_route(deadline) != route:
                 raise Refused("browser_identity_changed")
+            self.probe_remaining(deadline, self.execution.get())
             update_session_activity("bu-named-" + self.session_name)
             return "connected"
+        except (TimeoutError, ProbeInterrupted):
+            # Lightpanda can queue read-only CDP while processing synchronous
+            # website I/O. Retain ownership, but admit no work without a later
+            # positive verification of this same connection.
+            return "unverified"
         except Exception:
+            if self.closing:
+                return "unverified"
             self.mark_lost()
             return "lost"
 
-    def health(self):
+    def health(self, deadline):
+        if self.closing:
+            return "unverified"
         if self.lost:
             return "lost"
         if not self.native_lock.acquire(blocking=False):
             return "unverified"
         try:
-            return self.probe_browser()
+            return self.probe_browser(deadline)
         finally:
             self.native_lock.release()
+
+    def verify(self, identifier, timeout_ms):
+        deadline = time.monotonic() + timeout_ms / 1000
+
+        def run():
+            try:
+                state = self.health(deadline)
+                with self.lock:
+                    closing = self.closing
+                if not closing:
+                    self.send("health", identifier, {"state": state})
+            except Exception:
+                with self.lock:
+                    if not self.closing:
+                        self.mark_lost()
+            finally:
+                with self.lock:
+                    self.health_threads.discard(threading.current_thread())
+
+        with self.lock:
+            if self.closing or len(self.health_threads) >= 16:
+                self.send("health", identifier, {"state": "unverified"})
+                return
+            thread = threading.Thread(target=run, name="commander-browser-health", daemon=True)
+            self.health_threads.add(thread)
+            thread.start()
+
+    def join_health(self):
+        deadline = time.monotonic() + 2
+        with self.lock:
+            threads = set(self.health_threads)
+        for thread in threads:
+            thread.join(max(0, deadline - time.monotonic()))
+        return all(not thread.is_alive() for thread in threads)
 
     def request_workers(self, agent):
         """Observe only this agent's pinned request frames; never alter them."""
@@ -428,7 +575,8 @@ class Worker:
                     self.closing or self.tainted or self.lost):
                 return json.dumps({"error": "Browser execution is unavailable."})
             try:
-                if self.probe_browser() == "lost":
+                state = self.probe_browser(self.probe_deadline(run.deadline))
+                if state not in {"connected", "starting"}:
                     raise Refused("browser_session_lost")
                 if not isinstance(args, dict):
                     raise Refused("invalid_browser_request")
@@ -448,11 +596,16 @@ class Worker:
                 self.halt("failed", owner=run)
                 return json.dumps({"error": "Browser admission was refused."})
             run.in_native += 1
-            self.browser_attempted = True
+            verification_deadline = None
             try:
+                if state == "starting":
+                    self.open_browser(run.deadline)
+                remaining = int(self.probe_remaining(run.deadline, run))
+                if remaining < 5:
+                    raise Refused("execution_timeout")
                 # The public registry supplied this exact native handler. Do not
                 # redispatch the overridden name or forward model session routing.
-                result = handler({"code": code, "session": "" if self.browser_pin else self.session_name,
+                result = handler({"code": code, "session": "",
                                   "timeout_s": min(remaining, 300)}, task_id=self.session_name)
                 if run.cancelled.is_set():
                     raise Refused("execution_cancelled")
@@ -469,15 +622,15 @@ class Worker:
                 parsed = json.loads(encoded)
                 if isinstance(parsed, dict) and (parsed.get("success") is False or "error" in parsed):
                     raise Refused("browser_operation_unconfirmed")
-                if self.browser_pin is None:
-                    self.pin_browser()
-                elif self.probe_browser() != "connected":
+                verification_deadline = self.probe_deadline(run.deadline)
+                if self.probe_browser(verification_deadline) != "connected":
                     raise Refused("browser_session_lost")
                 self.event(run, {"kind": "progress", "sequence": run.sequence,
                                  "tool": "browser_exec", "text": "finished"}, wait=False)
                 return encoded
             except Exception:
-                if self.browser_pin is None or self.probe_browser() == "lost":
+                if self.browser_pin is None or self.probe_browser(
+                        verification_deadline or self.probe_deadline(run.deadline)) == "lost":
                     self.mark_lost()
                 self.halt("uncertain", owner=run)
                 return json.dumps({"error": "Browser execution could not be confirmed."})
@@ -589,6 +742,8 @@ class Worker:
                 agent = run.agent
             else:
                 agent = None
+        if run is not None:
+            self.interrupt_probes(run)
         if agent is not None:
             try:
                 threads = self.request_workers(agent)
@@ -640,11 +795,17 @@ class Worker:
             self.closing = True
             run = self.active
         self.cancel()
+        self.interrupt_probes()
+        if not self.join_health():
+            self.tainted = True
         if self.native is not None and not self.native.close():
             self.tainted = True
         if run is not None and run.thread is not None:
             run.thread.join(5)
             if run.thread.is_alive():
+                self.tainted = True
+        with self.lock:
+            if self.probe_sockets:
                 self.tainted = True
         self.remember_owned()
         try:
@@ -761,9 +922,10 @@ class Worker:
             self.send("closed", identifier, {"clean": clean})
             return False
         if kind == "verify":
-            if payload:
+            timeout_ms = payload.get("timeout_ms")
+            if set(payload) != {"timeout_ms"} or type(timeout_ms) is not int or not 1 <= timeout_ms <= 20000:
                 raise Refused("invalid_frame")
-            self.send("health", identifier, {"state": self.health()})
+            self.verify(identifier, timeout_ms)
             return True
         if kind == "browser":
             if self.native is None:

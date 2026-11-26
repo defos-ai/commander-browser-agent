@@ -231,6 +231,17 @@
   conservatively lose the session, even if its processes survive. Native Python
   may still perform recovery within a batch;
   these checks do not promise universal prevention of internal retries.
+  A `starting` inventory observation does not prove that navigation has not
+  happened; describe the connection as not yet verified.
+  First browse and login open the named blank page and enable external author
+  styles with `LP.configureLoading` before navigation. Page scripts can read
+  geometry derived from those styles. Keep the setting on the original session.
+  A synchronous page request can delay CDP responses. Health checks share a
+  deadline across their reads and can be interrupted by close. A health timeout
+  on a pinned connection leaves it unverified until a positive check.
+  The agent sets no maximum session age. Its two-second idle checks refresh
+  Hermes's ten-minute inactivity timer on success. A session can span many
+  bounded actions on the same owner. Website login expiry is independent.
 - Action cancellation preserves a healthy Hermes browser only after a bounded
   receipt confirms that the model request and native work have stopped. The
   pinned OpenAI nonstreaming request path needs read-only observation of its exact
@@ -241,6 +252,9 @@
   execution token; abandoned callbacks cannot adopt a later run. Every receipt,
   including failure paths, checks for pending native work and questions. Close
   also joins owned descendants and retains uncertain cleanup state.
+  Only the outer browse context establishes caller cancellation or expiry.
+  Private callback cancellation can follow worker loss; report the retained
+  session's uncertainty instead of disguising it as caller cancellation.
 - Retain closed tombstones and original creation identities for the host lifetime.
   Scope admission and release belong to the controller. Accept a new
   framework-issued creation claim independently of an old identity in the same
@@ -299,6 +313,11 @@
   checks belong inside the wrapper handler before native dispatch, since
   middleware exceptions can fail open. A native Python call is a batch: its
   checkpoint cannot confirm each operation or prevent every internal retry.
+  Prepend retained-page Lightpanda guidance to the native `browser_exec`
+  description while preserving its helper reference, parameters and handler.
+  For new-document navigation, match the returned frame and loader to the main
+  frame, check the observed destination, and wait for the requested content.
+  The site can update its path or expose a title while the document is loading.
 - Private worker messages use bounded, correlated frames over inherited pipes;
   raw stdout/stderr and returned Hermes transcripts never become protocol data.
   Questions and results must be bounded and redact known values. Private
@@ -773,6 +792,14 @@ For test-only changes, reuse a pinned runtime image and compile race binaries in
 a directly resource-limited Go bookworm container. Verify CPU, memory and swap
 limits from inside that compiler container; keep BuildKit stopped when no image
 rebuild is needed. Reuse its module/build cache to avoid repeated cold builds.
+
+The native connection regression checks that the first page loads and applies
+an external stylesheet. It also holds a synchronous page request during
+verification and checks that close can interrupt a pending health check.
+On 2026-11-26 the isolated DEFOS title probe succeeded with scripted navigation
+and retained the original session. The live GPT-4.1 retry passed managed model
+setup and lost its first native batch. Its receipt did not identify a failing
+command. Keep that live workflow open pending independent confirmation.
 
 ```sh
 go test -race -count=1 -timeout=3m ./... ./.github/tests

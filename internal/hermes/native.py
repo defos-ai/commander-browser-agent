@@ -65,14 +65,15 @@ class NativeBrowser:
             if not self.worker.closing:
                 self.worker.mark_lost()
 
-    def identity(self, *, allow_lost=False):
+    def identity(self, deadline=None, *, allow_lost=False):
+        deadline = time.monotonic() + 1 if deadline is None else deadline
         pin = self.worker.browser_pin
         if pin is None or self.worker.lost and not allow_lost or self.worker.closing:
             raise RuntimeError("browser_unavailable")
         identity = self.worker.browser_identity()
         route = {name: pin[name] for name in ("target", "automation_session")}
         if (any(pin.get(name) != value for name, value in identity.items()) or
-                self.worker.browser_route() != route):
+                self.worker.browser_route(deadline) != route):
             raise RuntimeError("browser_unavailable")
         return pin
 
@@ -116,6 +117,7 @@ class NativeBrowser:
                 params.clear()
             self.reply(identifier, ok=False, state="lost")
             return
+        deadline = time.monotonic() + timeout_ms / 1000
         if command == "begin":
             with self.worker.lock:
                 with self.lock:
@@ -126,7 +128,7 @@ class NativeBrowser:
                         self.reply(identifier, ok=False, state="lost")
                         return
                     lease = self.current = Lease(lease_id)
-            if not self.start(lease, identifier, lambda: self.begin(lease, timeout_ms, require_connected)):
+            if not self.start(lease, identifier, lambda: self.begin(lease, deadline, require_connected)):
                 self.fail(lease)
                 self.reply(identifier, ok=False, state="lost")
             return
@@ -142,16 +144,16 @@ class NativeBrowser:
             self.reply(identifier, ok=False, state="lost")
             return
         if command == "end" and method is None and params is None:
-            operation = lambda: self.end(lease, uncertain)
+            operation = lambda: self.end(lease, uncertain, deadline)
         elif command == "events" and method is None and params is None:
-            operation = lambda: (self.events(), None)
+            operation = lambda: (self.events(deadline), None)
         elif command == "destroy" and method is None and params is None:
-            operation = lambda: self.destroy(lease)
+            operation = lambda: self.destroy(lease, deadline)
         elif command == "renderer" and method is None and params is None:
-            operation = lambda: ({"endpoint": self.identity()["endpoint"]}, None)
+            operation = lambda: ({"endpoint": self.identity(deadline)["endpoint"]}, None)
         elif (command == "call" and isinstance(method, str) and method in METHODS and isinstance(params, dict) and
               not set(params).intersection({"session_id", "sessionId", "target_id", "targetId"})):
-            operation = lambda: (self.call(method, params, timeout_ms), None)
+            operation = lambda: (self.call(method, params, deadline), None)
         else:
             if isinstance(params, dict):
                 params.clear()
@@ -164,24 +166,17 @@ class NativeBrowser:
             self.fail(lease)
             self.reply(identifier, ok=False, state="lost")
 
-    def begin(self, lease, timeout_ms, require_connected):
-        if not self.worker.native_lock.acquire(timeout=min(2, timeout_ms / 1000)):
+    def begin(self, lease, deadline, require_connected):
+        if not self.worker.native_lock.acquire(timeout=min(2, self.worker.probe_remaining(deadline))):
             raise RuntimeError("browser_unavailable")
         lease.locked = True
         if self.worker.closing or lease.closing:
             raise RuntimeError("browser_unavailable")
-        state = self.worker.probe_browser()
+        state = self.worker.probe_browser(deadline)
         if state == "starting":
             if require_connected:
                 raise RuntimeError("browser_not_connected")
-            from tools.browser_use_cli import browser_exec
-            self.worker.browser_attempted = True
-            result = browser_exec("print('ready')", session=self.worker.session_name,
-                                  task_id=self.worker.session_name, timeout_s=5)
-            result = json.loads(result) if isinstance(result, str) else result
-            if not isinstance(result, dict) or result.get("success") is not True:
-                raise RuntimeError("browser_unavailable")
-            self.worker.pin_browser()
+            self.worker.open_browser(deadline)
         elif state != "connected":
             raise RuntimeError("browser_unavailable")
         if self.worker.closing or lease.closing:
@@ -190,17 +185,16 @@ class NativeBrowser:
             lease.ready = True
         return None, "connected"
 
-    def call(self, method, params, timeout_ms):
+    def call(self, method, params, deadline):
         try:
             if len(json.dumps(params, ensure_ascii=True).encode()) > MAX_PARAMS:
                 raise RuntimeError("browser_request_limit")
-            pin = self.identity()
-            from browser_harness.helpers import cdp
-            result = cdp(method, session_id=pin["automation_session"],
-                         _response_timeout=min(8, timeout_ms / 1000), **params)
+            pin = self.identity(deadline)
+            result = self.worker.browser_cdp(method, params, session_id=pin["automation_session"],
+                                              deadline=deadline)
             if result.get("exceptionDetails") or len(json.dumps(result, ensure_ascii=True).encode()) > MAX_RESULT:
                 raise RuntimeError("browser_result_unconfirmed")
-            self.identity()
+            self.identity(deadline)
             return result
         finally:
             params.clear()
@@ -211,13 +205,12 @@ class NativeBrowser:
             raise RuntimeError("browser_event_unavailable")
         return value
 
-    def events(self):
+    def events(self, deadline):
         if not self.events_lock.acquire(blocking=False):
             raise RuntimeError("browser_event_unavailable")
         try:
-            pin = self.identity()
-            from browser_harness.helpers import drain_events
-            events = drain_events()
+            pin = self.identity(deadline)
+            events = self.worker.daemon_rpc({"meta": "drain_events"}, deadline).get("events")
             if not isinstance(events, list) or len(events) >= MAX_EVENTS:
                 raise RuntimeError("browser_event_limit")
             output = []
@@ -249,20 +242,20 @@ class NativeBrowser:
                 output.append({"method": method, "params": selected})
             if len(json.dumps(output, ensure_ascii=True).encode()) > MAX_EVENT_RESULT:
                 raise RuntimeError("browser_event_limit")
-            self.identity()
+            self.identity(deadline)
             return output
         finally:
             self.events_lock.release()
 
-    def destroy(self, lease):
-        pin = self.identity(allow_lost=True)
-        from browser_harness.helpers import cdp
-        result = cdp("Target.closeTarget", targetId=pin["target"], _response_timeout=2.0)
+    def destroy(self, lease, deadline):
+        deadline = min(deadline, time.monotonic() + 2)
+        pin = self.identity(deadline, allow_lost=True)
+        result = self.worker.browser_cdp("Target.closeTarget", {"targetId": pin["target"]}, deadline=deadline)
         self.fail(lease)
         return result, "lost"
 
-    def join(self, threads, seconds=2):
-        deadline = time.monotonic() + seconds
+    def join(self, threads, seconds=2, deadline=None):
+        deadline = min(time.monotonic() + seconds, deadline) if deadline is not None else time.monotonic() + seconds
         for thread in threads:
             if thread is not threading.current_thread():
                 thread.join(max(0, deadline - time.monotonic()))
@@ -276,11 +269,12 @@ class NativeBrowser:
             if self.current is lease:
                 self.current = None
 
-    def end(self, lease, uncertain):
+    def end(self, lease, uncertain, deadline):
         try:
             with self.lock:
                 threads = set(lease.threads)
-            if not self.join(threads) or uncertain or lease.failed or self.worker.probe_browser() != "connected":
+            if (not self.join(threads, deadline=deadline) or uncertain or lease.failed or
+                    self.worker.probe_browser(deadline) != "connected"):
                 raise RuntimeError("browser_unavailable")
             return None, "connected"
         except Exception:
