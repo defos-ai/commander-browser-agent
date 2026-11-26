@@ -442,7 +442,7 @@
   updated shared settings, subject to Commander's managed delivery leases.
   Setup is bounded to ten minutes,
   separately from active browsing, and cannot extend the outer task deadline.
-  Commander v0.6.0 supports reusable `SecretRequestOptions.Default` bytes as
+  Commander supports reusable `SecretRequestOptions.Default` bytes as
   create-if-missing seeds; existing values, including expired ones, take
   precedence. It has no lookup-only or lazy-default action API. The operator
   chose question-first validation followed by reusable default seeds. Defaults
@@ -468,7 +468,7 @@
   owns operator waiting, fallback eligibility and saved answers. Protect question
   text, options and answers through the session redactor; keep their transcripts
   out of results, logs and artifacts. Each wait is bounded to three minutes and
-  the browse wall deadline still wins. In Commander v0.6.0, canceling a waiter
+  the browse wall deadline still wins. In Commander, canceling a waiter
   does not retract its saved pending question; do not promise automatic cleanup.
 - [internal/commander/](internal/commander/) owns runtime readiness, model setup,
   clarification, managed login secret delivery and checkpoint orchestration. These are private
@@ -700,7 +700,7 @@
 
 - [compose.yaml](compose.yaml) follows the example agent's isolated FS demo:
   UID1000-owned state, one controller, loopback MCP/API/Admin ports 4283/4284/4285,
-  and optional Playground using the same `COMMANDER_VERSION` (default `v0.6.0`).
+  and optional Playground using the same `COMMANDER_VERSION` (default `v0.9.0`).
   Commander host images explicitly use linux/amd64; the agent image supports
   linux/amd64 and linux/arm64. Never run demo Playground with `--all-in-one`.
 - Start the local demo with its packaged runtimes:
@@ -741,7 +741,7 @@
   Grant the new repository write access before publishing. Do not let the old
   monorepo workflow keep publishing the same version/stable tags.
 - The next standalone release is `v0.2.1`. Published Commander framework/providers
-  are pinned to `v0.6.0`, with no local `replace`. Agent release versions are
+  are pinned to `v0.9.0`, with no local `replace`. Agent release versions are
   independent of Commander versions. An ignored development workspace may map
   dependencies to local checkouts.
 - Manifest generation uses `framework/agent/manifest.Render` and its embedded
@@ -770,7 +770,7 @@
   Go environment free of release/model tokens. The four-field `metadata` command
   remains independent of these functions. Descriptions are capability metadata,
   never action readiness or permission to launch a package.
-- Commander v0.6.0 registers and publishes the same dependency declarations.
+- Commander registers and publishes the same dependency declarations.
   Use exact executable requirement names `lightpanda` and `hermes-runtime` so
   Admin can connect unavailable runtime checks to their setup guidance. Versions
   come from the pinned discovery constants; declarations neither install software
