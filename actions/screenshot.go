@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"sync/atomic"
 	"time"
 
 	browserruntime "github.com/defos-ai/commander-browser-agent/browser"
@@ -40,7 +39,7 @@ type Screenshot struct {
 	*action.Base
 	runner         BrowserRunner
 	browserFactory contracts.BrowserFactory
-	configuration  atomic.Pointer[browserruntime.HermesOptions]
+	discovery      commander.RuntimeDiscovery
 	validateInput  func(any) error
 	validateOutput func(any) error
 }
@@ -61,25 +60,8 @@ func NewScreenshot(runner BrowserRunner, factory contracts.BrowserFactory) *Scre
 	}
 }
 
-func (a *Screenshot) Discover(ctx context.Context, env environment.Environment, scope *environment.DiscoveryScope) (status action.Status, discoveryErr error) {
-	a.configuration.Store(nil)
-	a.SetStatus(action.Unknown)
-	defer func() {
-		if err := ctx.Err(); err != nil {
-			a.configuration.Store(nil)
-			a.SetStatus(action.Unknown)
-			status, discoveryErr = action.Unknown, errors.Join(err, context.Cause(ctx))
-		}
-	}()
-	if a.browserFactory == nil {
-		a.SetUnavailable("The host must provide its browser factory", actionmodel.Requirement{Kind: actionmodel.ConfigurationRequirement, Name: "browser-factory"})
-		return action.Unavailable, nil
-	}
-	configuration, status, err := commander.DiscoverRuntime(ctx, a.Base, a.runner, env, scope)
-	if err == nil && status == action.Ready {
-		a.configuration.Store(configuration)
-	}
-	return status, err
+func (a *Screenshot) Discover(ctx context.Context, env environment.Environment, scope *environment.DiscoveryScope) (action.Status, error) {
+	return a.discovery.Discover(ctx, env, scope, a.Base, a.runner, commander.MissingCapabilities{BrowserFactory: a.browserFactory == nil})
 }
 
 func (a *Screenshot) Run(ctx context.Context, raw json.RawMessage) (action.Result, error) {
@@ -89,7 +71,7 @@ func (a *Screenshot) Run(ctx context.Context, raw json.RawMessage) (action.Resul
 	if err := a.Check(); err != nil {
 		return action.Result{}, err
 	}
-	configuration := a.configuration.Load()
+	configuration := a.discovery.Options()
 	if configuration == nil || a.runner == nil || a.browserFactory == nil {
 		return action.Result{}, errors.New("screenshot is unavailable; run discovery first")
 	}

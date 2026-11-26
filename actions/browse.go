@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"sync/atomic"
 
 	browserruntime "github.com/defos-ai/commander-browser-agent/browser"
 	"github.com/defos-ai/commander-browser-agent/browser/contracts"
@@ -30,10 +29,10 @@ type BrowseOutput = commander.HermesBrowseOutput
 
 type Browse struct {
 	*action.Base
-	runner        BrowserRunner
-	agentFactory  contracts.BrowserAgentFactory
-	configuration atomic.Pointer[browserruntime.HermesOptions]
-	setup         commander.Setup
+	runner       BrowserRunner
+	agentFactory contracts.BrowserAgentFactory
+	discovery    commander.RuntimeDiscovery
+	setup        commander.Setup
 }
 
 // NewBrowse creates fresh discovery/setup state without opening a runtime.
@@ -47,28 +46,11 @@ func NewBrowse(runner BrowserRunner, factory contracts.BrowserAgentFactory, vali
 	}
 }
 
-func (a *Browse) Discover(ctx context.Context, env environment.Environment, scope *environment.DiscoveryScope) (status action.Status, discoveryErr error) {
-	a.configuration.Store(nil)
-	defer func() {
-		if ctx.Err() != nil {
-			a.configuration.Store(nil)
-			a.SetStatus(action.Unknown)
-			status, discoveryErr = action.Unknown, errors.Join(ctx.Err(), context.Cause(ctx))
-		}
-	}()
-	if a.agentFactory == nil {
-		a.SetUnavailable("The host must provide its browser agent factory", actionmodel.Requirement{Kind: actionmodel.ConfigurationRequirement, Name: "browser-agent-factory"})
-		return action.Unavailable, nil
-	}
-	if a.setup.ValidateModel == nil {
-		a.SetUnavailable("The host must provide its browser model validator", actionmodel.Requirement{Kind: actionmodel.ConfigurationRequirement, Name: "browser-model-validator"})
-		return action.Unavailable, nil
-	}
-	configuration, status, err := commander.DiscoverRuntime(ctx, a.Base, a.runner, env, scope)
-	if err == nil && status == action.Ready {
-		a.configuration.Store(configuration)
-	}
-	return status, err
+func (a *Browse) Discover(ctx context.Context, env environment.Environment, scope *environment.DiscoveryScope) (action.Status, error) {
+	return a.discovery.Discover(ctx, env, scope, a.Base, a.runner, commander.MissingCapabilities{
+		BrowserAgentFactory: a.agentFactory == nil,
+		ModelValidator:      a.setup.ValidateModel == nil,
+	})
 }
 
 func (a *Browse) Run(ctx context.Context, raw json.RawMessage) (action.Result, error) {
@@ -78,7 +60,7 @@ func (a *Browse) Run(ctx context.Context, raw json.RawMessage) (action.Result, e
 	if err := a.Check(); err != nil {
 		return action.Result{}, err
 	}
-	configuration := a.configuration.Load()
+	configuration := a.discovery.Options()
 	if configuration == nil || a.runner == nil || a.agentFactory == nil {
 		return action.Result{}, errors.New("browse is unavailable; run discovery first")
 	}
