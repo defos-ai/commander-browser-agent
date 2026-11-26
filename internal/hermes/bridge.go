@@ -93,7 +93,6 @@ type Worker struct {
 	readyDone chan error
 	procDone  chan struct{}
 	readDone  chan struct{}
-	closedAck chan struct{}
 	closeDone chan struct{}
 	closeOnce sync.Once
 }
@@ -193,7 +192,7 @@ func newWorker(config Config) *Worker {
 	w := &Worker{config: config, values: sensitive.New(),
 		lifetime: lifetime, cancel: cancel, gate: make(chan struct{}, 1), readyDone: make(chan error, 1),
 		writeGate: make(chan struct{}, 1), health: make(map[string]chan health), browserCalls: make(map[string]chan browserReply),
-		procDone: make(chan struct{}), readDone: make(chan struct{}), closedAck: make(chan struct{}), closeDone: make(chan struct{})}
+		procDone: make(chan struct{}), readDone: make(chan struct{}), closeDone: make(chan struct{})}
 	w.render = textrender.New(lifetime, func() { w.fail(ErrUncertain) })
 	return w
 }
@@ -284,7 +283,7 @@ func (w *Worker) readFrames() {
 	w.mu.Lock()
 	expected := w.closing && w.ack
 	w.mu.Unlock()
-	if !expected {
+	if !expected || scanner.Err() != nil {
 		w.fail(ErrProtocol)
 	}
 }
@@ -312,7 +311,6 @@ func (w *Worker) route(message frame) bool {
 		if strictJSON(message.Payload, &closed) == nil {
 			w.ack, w.clean = true, closed.Clean
 			w.mu.Unlock()
-			close(w.closedAck)
 			return true
 		}
 	}
@@ -938,6 +936,20 @@ func (w *Worker) Close() error {
 	return w.closeErr
 }
 
+func (w *Worker) waitForCleanExit(ctx context.Context) bool {
+	// The process can exit before readFrames consumes its buffered close receipt.
+	for _, done := range []chan struct{}{w.procDone, w.readDone} {
+		select {
+		case <-done:
+		case <-ctx.Done():
+			return false
+		}
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return ctx.Err() == nil && w.ack && w.clean && w.waitErr == nil && !w.fault
+}
+
 func (w *Worker) shutdown() {
 	defer close(w.closeDone)
 	identifier, idErr := freshID()
@@ -974,33 +986,7 @@ func (w *Worker) shutdown() {
 	if idErr == nil {
 		_ = w.send(grace, "close", identifier, struct{}{})
 	}
-	acknowledged, exited := false, false
-	ack, process := w.closedAck, w.procDone
-	for !(acknowledged && exited) {
-		select {
-		case <-ack:
-			acknowledged = true
-			ack = nil
-		case <-process:
-			exited = true
-			process = nil
-			if !acknowledged {
-				select {
-				case <-w.closedAck:
-					acknowledged = true
-				case <-w.readDone:
-				case <-grace.Done():
-				}
-			}
-		case <-grace.Done():
-		}
-		if grace.Err() != nil || exited && !acknowledged {
-			break
-		}
-	}
-	w.mu.Lock()
-	clean := renderClean && modelClean && acknowledged && exited && w.clean && w.waitErr == nil && !w.fault
-	w.mu.Unlock()
+	clean := w.waitForCleanExit(grace) && renderClean && modelClean
 	if clean && processGroupExists(w.cmd) {
 		clean = false
 	}
@@ -1020,13 +1006,6 @@ func (w *Worker) shutdown() {
 	}
 	stopRenderWait()
 	_ = w.input.Close()
-	if clean {
-		select {
-		case <-w.readDone:
-		case <-time.After(time.Second):
-			clean = false
-		}
-	}
 	_ = w.output.Close()
 	<-w.readDone
 	w.mu.Lock()
