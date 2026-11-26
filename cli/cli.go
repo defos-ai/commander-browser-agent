@@ -68,11 +68,9 @@ func Run(ctx context.Context, args []string, stderr io.Writer) (result error) {
 			result = errors.Join(result, err)
 		}
 	}()
-	actions := browser.NewActions(sessions, dependencies.Actions)
 	agent, err := browser.NewAgent(agents.AgentConfig{
 		ID:                agentID,
 		Sessions:          sessions,
-		Actions:           actions,
 		ArtifactFileStore: dependencies.ArtifactFileStore,
 		Logger:            logger,
 		HeartbeatInterval: &configuration.heartbeatInterval,

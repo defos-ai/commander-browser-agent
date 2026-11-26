@@ -11,6 +11,8 @@ import (
 
 const AgentType agents.AgentType = "browser-agent"
 
+var _ agentactions.BrowserRunner = (*commander.SessionManager)(nil)
+
 // NewAgent supplies a process-local session provider and uses the injected
 // capabilities for an omitted action catalog. An explicitly empty catalog stays empty.
 func NewAgent(config agents.AgentConfig, dependencies agentactions.Dependencies) (*agents.Agent, error) {
