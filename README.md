@@ -29,6 +29,8 @@ One agent container runs the Go agent, Hermes `v0.23.1` and Lightpanda `1.0.2`
 as separate processes. Native runs need those packaged runtimes installed;
 Windows hosts use Docker or WSL.
 
+[Release notes](docs/releases/README.md)
+
 ## License
 
 Agent source: [MIT](LICENSE). Commander dependencies: AGPL-3.0-only.

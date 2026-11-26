@@ -9,7 +9,8 @@
 - Keep the root README brief and written for people: capabilities, Commander
   connection links, a minimal local start, runtime prerequisites and licensing.
   Put implementation contracts, detailed configuration, operational commands,
-  limitations, testing and release instructions here instead of expanding README.
+  limitations and testing here. Release instructions and versioned notes belong
+  in [docs/releases/](docs/releases/README.md).
 - The module imports Commander framework and providers only. Do not import
   Commander apps or add a controller inside the agent. Agent source is
   [MIT](LICENSE); Commander framework and provider dependencies remain
@@ -737,8 +738,8 @@
   derive names. Keep the existing GHCR package `defos-ai/commander-browser-agent`.
   Grant the new repository write access before publishing. Do not let the old
   monorepo workflow keep publishing the same version/stable tags.
-- Run **Make release** on the default branch and enter an unused agent version
-  in `vMAJOR.MINOR.PATCH` form, for example `v0.6.0`.
+- Follow the [release guide](docs/releases/README.md) and
+  [note format](docs/releases/AGENTS.md) when preparing a version.
   Published Commander framework/providers are pinned to `v0.9.0`, with no local
   `replace`. Agent release versions are independent of Commander versions. An
   ignored development workspace may map dependencies to local checkouts.

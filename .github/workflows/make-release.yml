@@ -30,7 +30,7 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
-      - name: Validate version and package names
+      - name: Validate version, package names and release notes
         id: package
         env:
           VERSION: ${{ inputs.version }}
@@ -40,6 +40,8 @@ jobs:
         run: |
           test "$GITHUB_REF" = "refs/heads/$DEFAULT_BRANCH"
           metadata=$(go run ./.github/scripts/release.go metadata --version "$VERSION" --repository "$GITHUB_REPOSITORY")
+          agent_type=$(jq -er '.type' <<< "$metadata")
+          bash .github/scripts/release-notes.sh "docs/releases/note-$VERSION.md" "$agent_type $VERSION" > /dev/null
           echo "metadata=$metadata" >> "$GITHUB_OUTPUT"
 
   tests:
