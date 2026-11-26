@@ -31,13 +31,13 @@ jobs:
         run: |
           go mod download
           go test -race -count=1 -timeout=3m ./... ./.github/tests
-          go vet ./... ./.github/scripts ./.github/tests
+          go vet -tags=integration ./... ./.github/scripts ./.github/tests
 
   runtime:
     needs: unit
     name: Runtime / ${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 30
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -47,15 +47,25 @@ jobs:
     env:
       GOWORK: "off"
       PLATFORM: linux/${{ matrix.arch }}
+      BROWSER_TEST_AGENT_IMAGE: commander-browser-agent:local
     steps:
       - uses: actions/checkout@v7
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-      - uses: actions/setup-go@v7
+      # Commander v0.9.0 publishes the API and controller for amd64.
+      - uses: docker/setup-qemu-action@v4
+        if: matrix.arch == 'arm64'
         with:
-          go-version-file: go.mod
+          platforms: amd64
       - uses: docker/setup-buildx-action@v4
+        id: builder
+        with:
+          driver-opts: |
+            cpu-period=100000
+            cpu-quota=400000
+            memory=3500m
+            memory-swap=3500m
       - name: Build browser agent
         uses: docker/build-push-action@v7
         with:
@@ -63,12 +73,15 @@ jobs:
           file: docker/Dockerfile
           platforms: ${{ env.PLATFORM }}
           load: true
-          tags: commander-browser-agent:local
+          tags: ${{ env.BROWSER_TEST_AGENT_IMAGE }}
           cache-from: type=gha,scope=agent-${{ matrix.arch }}
           cache-to: type=gha,scope=agent-${{ matrix.arch }},mode=max
+      - name: Stop the image builder
+        run: docker buildx stop "${{ steps.builder.outputs.name }}"
       - name: Check packaged browser runtimes
         run: |
-          docker run --rm --platform "$PLATFORM" --network none --entrypoint /bin/sh commander-browser-agent:local -ec '
+          docker run --rm --platform "$PLATFORM" --network none --cpus=2 --memory=2500m --memory-swap=2500m \
+            --entrypoint /bin/sh "$BROWSER_TEST_AGENT_IMAGE" -ec '
             test "$(id -u)" = 1000
             "$LIGHTPANDA_PATH" version
             test -s /usr/share/doc/lightpanda/LICENSE
@@ -79,46 +92,12 @@ jobs:
             test -s /usr/local/lib/python3.14/LICENSE.txt
             /opt/hermes/.venv/bin/python -I -S /usr/local/lib/commander-browser/hermes/check.py
           '
-      - name: Build agent workflow tests
-        run: |
-          docker run --rm --platform "$PLATFORM" --user "$(id -u):$(id -g)" --workdir /src \
-            --mount "type=bind,source=$PWD,target=/src,readonly" \
-            --mount "type=bind,source=$RUNNER_TEMP,target=/out" \
-            --env GOWORK=off --env GOTOOLCHAIN=local \
-            --env GOMODCACHE=/tmp/go-mod --env GOCACHE=/tmp/go-build \
-            golang:1.26.7-bookworm sh -ec '
-              go mod download
-              CGO_ENABLED=1 go test -c -race -tags=hermesintegration -o /out/browser-session-tests ./tests
-            '
-      - name: Test browser workflows and sessions
-        run: |
-          docker run --rm --platform "$PLATFORM" --init --network none \
-            --mount "type=bind,source=$RUNNER_TEMP/browser-session-tests,target=/browser-session-tests,readonly" \
-            --entrypoint /bin/sh commander-browser-agent:local -ec '
-              # This bounds the whole serial suite, including runtime startup.
-              /browser-session-tests -test.v -test.count=1 -test.timeout=12m
-              browsers_running() {
-                for process_comm in /proc/[0-9]*/comm; do
-                  if IFS= read -r process_name 2>/dev/null < "$process_comm"; then
-                    case "$process_name" in lightpanda*|python*) return 0 ;; esac
-                  fi
-                done
-                return 1
-              }
-              for cleanup_attempt in 1 2 3 4 5 6 7 8 9 10; do
-                if ! browsers_running; then break; fi
-                sleep 0.1
-              done
-              if browsers_running; then
-                echo "Browser processes remain after session cleanup" >&2
-                exit 1
-              fi
-              # Hermes tests check each clean-close profile delta and explicitly
-              # require retained private state after deliberate uncertain loss.
-              for session_profile in /tmp/commander-browser-session-*; do
-                if [ -e "$session_profile" ]; then
-                  echo "Browser profile remains after session cleanup" >&2
-                  exit 1
-                fi
-              done
-            '
+      - name: Run the Commander browser mission
+        run: ./scripts/test.sh state/e2e
+      - name: Save mission and service logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-mission-${{ matrix.arch }}
+          path: state/e2e/*.log
+          if-no-files-found: ignore

@@ -780,92 +780,33 @@
 
 ## Validation
 
-Keep tests/fixtures under `tests/`, with external packages testing public action
-and host APIs. Prefer API scenarios for registration, real rendering and artifact
-acceptance; retain focused discovery/identity failure tests. Do not add production
-configuration or exported injection solely for tests.
-Keep the suite lean: prioritize agent behavior and meaningful regressions over
-repeated schema/configuration permutations or tests of framework internals.
-Shared HTTP pages belong in `tests/fixtures/`; the fake HTTP model belongs in
-`tests/fakes/`.
-For test-only changes, reuse a pinned runtime image and compile race binaries in
-a directly resource-limited Go bookworm container. Verify CPU, memory and swap
-limits from inside that compiler container; keep BuildKit stopped when no image
-rebuild is needed. Reuse its module/build cache to avoid repeated cold builds.
+Run the browser mission with `./scripts/test.sh`. The runner owns an isolated
+Compose project and its cleanup. Use the published Commander v0.9.0 API and
+controller, the production agent image, and the packaged Hermes and Lightpanda
+processes. Keep host credentials, Docker sockets and production state outside
+the stack. Local builds and runs share the resource limits under Browser runtime.
 
-The native connection regression checks that the first page loads and applies
-an external stylesheet. It also holds a synchronous page request during
-verification and checks that close can interrupt a pending health check.
-On 2026-11-26 the isolated DEFOS title probe succeeded with scripted navigation
-and retained the original session. The live GPT-4.1 retry passed managed model
-setup and lost its first native batch. Its receipt did not identify a failing
-command. Keep that live workflow open pending independent confirmation.
+[The mission test](tests/browser_mission_test.go) imports
+[the test mission](tests/fixtures/browser-mission.json) and drives one operation with
+`framework/testing/missiontest`. It acts as the operator for questions and
+continuations. Login with a managed password and transient code, read a unique
+report from the authenticated page with Hermes, then capture a protected
+Lightpanda PNG. Verify the shared session identity, download the declared
+artifacts, close the session, and verify the completed operation's saved report.
+
+Keep the website and scripted Chat Completions provider in [tests/fixtures/](tests/fixtures/).
+They run on loopback shared with the agent. Use the Commander API for managed
+secrets and session control. Use `missiontest` for mission import, operations,
+readiness, decisions and verified artifact downloads. Add scenarios for observable
+agent behavior. The Go tests do not start or tear down Docker.
+
+The live GPT-4.1 DEFOS probe on 2026-11-26 passed model setup and lost its
+first native batch. Its cause remains unconfirmed. The local mission exercises
+the browser with a scripted provider.
+
+The release tooling has separate checks. To run them and vet the source locally:
 
 ```sh
-go test -race -count=1 -timeout=3m ./... ./.github/tests
-go vet ./... ./.github/scripts ./.github/tests
+GOWORK=off go test -race -count=1 -timeout=3m ./... ./.github/tests
+GOWORK=off go vet -tags=integration ./... ./.github/scripts ./.github/tests
 ```
-
-The production catalog workflow uses the `hermesintegration` tag. It exercises
-the actual default actions over
-the FS bus with managed secret delivery, checkpoint receipts and artifact upload.
-Its fake model uses the real SDK HTTP boundary; no external model or demo stack
-is required.
-The production manager owns browser lifecycle; fixtures own HTTP pages only.
-CI runs the full runtime suite on native amd64 (`ubuntu-24.04`) and ARM64
-(`ubuntu-24.04-arm`) runners, with explicit matching image/compiler/test platforms
-and separate image caches. It compiles the race-enabled test binary in the Go
-Bookworm image for a compatible glibc baseline, then executes it as the runtime
-image's UID1000 with no external network. Use `--init` for this test container
-to reap browser descendants. Emulated smoke checks do not replace native ARM64
-workflow results.
-The `hermesintegration` tag adds permanent private-bridge scenarios using the
-packaged Python/Hermes paths and a fake HTTP model: native navigation, host
-admission, clarification, cookie reuse across runs, cancellation and confirmed
-close. Offline readiness scenarios use the actual packaged virtual environment,
-reject caught network/process import attempts, and require quiet metadata with
-no model requests, retained profiles or child processes. Discovery unit tests
-cover lexical virtualenv paths, explicit executable scope, failed rediscovery
-and cancellation causes. Commander dispatch scenarios also cover root allocation,
-direct-parent reuse, independent cookie jars, exact-claim rejection, private callback lifetime,
-inventory controls, clean cancellation with reuse and lost-target refusal.
-Native managed-login scenarios also cover password/OTP delivery without model
-setup, authenticated reuse by native reasoning, independent accounts on one
-origin, stale/expired transient deliveries, form mutation, dropped responses,
-pending-session close, and event overflow before filtering. Login values must
-remain absent from model requests and public Commander messages.
-Native screenshots also compare decoded pixels after secret redaction, verify
-source state and cookie continuity, and exercise allocated-renderer interruption.
-Native checkpoint scenarios hold and retry actual persistence receipts before
-start, clarification, batch dispatch and final output; reject old fences, failed
-loads and saves; and verify cancellation, late receipts and explicit continuation.
-The private native browse scenario combines managed setup, native observations,
-clarification, protected artifact upload, retained-page reuse, refused final
-persistence and a clarification consuming its wall allowance. Response-allowance
-tests exercise native truncation recovery without equating Hermes's reported
-counter with actual forwarded HTTP requests.
-Focused tests exercise the combined thirty-fence limit and exact execution/claim
-checks without starting a runtime.
-CI runs the native integration suite with a twelve-minute test-binary bound;
-this covers the whole serial suite, including repeated runtime readiness checks
-and worker startup. Keep individual action, readiness and cleanup bounds intact.
-Clean-close Hermes scenarios check that their private profiles are removed;
-intentional uncertain-loss scenarios require retained lost state and profiles.
-The container must have no surviving Python or Lightpanda processes before it
-is discarded, including after those uncertain cases.
-The default-catalog workflow uses a loopback HTTP fixture in the same test
-container: managed model setup, native browse/clarification, reusable login
-credentials, transient OTP, authenticated browse reuse and protected screenshot
-artifacts. It holds the first browse start receipt before any worker starts and
-login's start receipt before website submissions, rejects output after refused
-final persistence, and refuses an independent saved replay fence before setup
-or worker startup. It runs without a Docker socket or external model.
-The bridge currently supports the OpenAI Chat Completions wire profile for
-OpenAI and explicitly selected Other. Tests include escaped provider echoes,
-native observations, key rotation, exact reusable-secret requests, private worker
-files/environments and redirect refusal. Other provider wire profiles remain
-separate work; default actions already use the verified native profile.
-
-Future API workflow tests that invoke global cleanup must use a dedicated stack,
-with Docker lifecycle owned by setup/CI outside Go tests. Keep fixtures under
-`tests/` and always stop that stack on failure.

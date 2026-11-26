@@ -1,0 +1,121 @@
+x-runtime: &runtime
+  init: true
+  stop_grace_period: 30s
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+
+x-agent-environment: &agent-environment
+  BUS_URL: file:///state/bus
+  STORAGE_URL: file:///state/storage
+
+x-commander-environment: &commander-environment
+  <<: *agent-environment
+  DATABASE_URL: file:///state/database
+  # Fixture key for managed secrets in this disposable database.
+  SECRETS_ENCRYPTION_KEY: 014ac583269fe047014ac583269fe047014ac583269fe047014ac583269fe047
+
+x-api-login: &api-login
+  API_USERNAME: browser-fixture-user
+  API_PASSWORD: browser-fixture-password
+
+services:
+  volume-init:
+    <<: *runtime
+    image: ghcr.io/defos-ai/commander-controller:v0.9.0
+    platform: linux/amd64
+    network_mode: none
+    user: "0:0"
+    cap_add: [CHOWN]
+    cpus: 0.25
+    mem_limit: 64000000
+    memswap_limit: 64000000
+    entrypoint: ["chown"]
+    command: ["1000:1000", "/state/bus", "/state/storage", "/state/database"]
+    volumes: &commander-volumes
+      - bus:/state/bus
+      - storage:/state/storage
+      - database:/state/database
+
+  controller:
+    <<: *runtime
+    image: ghcr.io/defos-ai/commander-controller:v0.9.0
+    platform: linux/amd64
+    network_mode: none
+    cpus: 0.5
+    mem_limit: 256000000
+    memswap_limit: 256000000
+    environment: *commander-environment
+    volumes: *commander-volumes
+    depends_on:
+      volume-init:
+        condition: service_completed_successfully
+
+  api:
+    <<: *runtime
+    image: ghcr.io/defos-ai/commander-api:v0.9.0
+    platform: linux/amd64
+    cpus: 0.5
+    mem_limit: 256000000
+    memswap_limit: 256000000
+    environment:
+      <<: [*commander-environment, *api-login]
+      API_RUNTIME: docker-compose
+      API_LISTEN_ADDRESS: 0.0.0.0:4274
+      API_ALLOWED_HOSTS: localhost,127.0.0.1,api
+    volumes: *commander-volumes
+    depends_on:
+      controller:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "--max-time", "2", "http://127.0.0.1:4274/readyz"]
+      interval: 1s
+      timeout: 3s
+      retries: 60
+
+  agent:
+    <<: *runtime
+    image: ${BROWSER_TEST_AGENT_IMAGE:?run scripts/test.sh}
+    pull_policy: never
+    cpus: 2.5
+    mem_limit: 3200000000
+    memswap_limit: 3200000000
+    environment: *agent-environment
+    command: ["--heartbeat-interval=1s"]
+    volumes:
+      - bus:/state/bus
+      - storage:/state/storage
+    depends_on:
+      api:
+        condition: service_healthy
+
+  mission:
+    <<: *runtime
+    image: ${BROWSER_TEST_AGENT_IMAGE:?run scripts/test.sh}
+    pull_policy: never
+    profiles: [test]
+    # The agent reaches both Go HTTP fixtures on the mission runner's loopback.
+    network_mode: service:agent
+    cpus: 0.5
+    mem_limit: 256000000
+    memswap_limit: 256000000
+    environment:
+      <<: *api-login
+      COMMANDER_API_URL: http://api:4274
+    volumes:
+      - type: bind
+        source: ${BROWSER_TEST_BINARY:?run scripts/test.sh}
+        target: /browser-mission.test
+        read_only: true
+        bind:
+          create_host_path: false
+    entrypoint: ["/browser-mission.test"]
+    command: ["-test.v", "-test.count=1", "-test.timeout=10m"]
+
+networks:
+  default:
+    internal: true
+
+volumes:
+  bus:
+  database:
+  storage:

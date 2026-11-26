@@ -1,0 +1,26 @@
+{
+  "name": "authenticated-account-report",
+  "objectives": [
+    "Sign in to the fixture account using its managed credentials and one-time code.",
+    "Use the same browser session to read the account report and capture a protected text screenshot.",
+    "Close the session and deliver the report text and screenshot artifact ID."
+  ],
+  "required_actions": ["login", "browse", "screenshot"],
+  "starting_actions": ["login"],
+  "policies": {"completion": {"decision_by": "operator"}},
+  "input_schema": {
+    "type": "object",
+    "properties": {"account_url": {"type": "string", "format": "uri"}},
+    "required": ["account_url"],
+    "additionalProperties": false
+  },
+  "output_schema": {
+    "type": "object",
+    "properties": {
+      "report_text": {"type": "string", "minLength": 1},
+      "screenshot_artifact_id": {"type": "string", "format": "uuid"}
+    },
+    "required": ["report_text", "screenshot_artifact_id"],
+    "additionalProperties": false
+  }
+}
