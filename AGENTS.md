@@ -737,10 +737,11 @@
   derive names. Keep the existing GHCR package `defos-ai/commander-browser-agent`.
   Grant the new repository write access before publishing. Do not let the old
   monorepo workflow keep publishing the same version/stable tags.
-- The next standalone release is `v0.2.1`. Published Commander framework/providers
-  are pinned to `v0.9.0`, with no local `replace`. Agent release versions are
-  independent of Commander versions. An ignored development workspace may map
-  dependencies to local checkouts.
+- Run **Make release** on the default branch and enter an unused agent version
+  in `vMAJOR.MINOR.PATCH` form, for example `v0.6.0`.
+  Published Commander framework/providers are pinned to `v0.9.0`, with no local
+  `replace`. Agent release versions are independent of Commander versions. An
+  ignored development workspace may map dependencies to local checkouts.
 - Manifest generation uses `framework/agent/manifest.Render` and its embedded
   template. Do not add a repository-local template or a `--template` release flag.
 - Native release assets cover Linux and macOS, each on amd64 and arm64. Do not
