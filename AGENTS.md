@@ -777,19 +777,20 @@
 
 ## Validation
 
-Run the browser mission with `./scripts/test.sh`. The runner owns an isolated
+Run the browser missions with `./scripts/test.sh`. The runner owns an isolated
 Compose project and its cleanup. Use the published Commander v0.9.0 API and
 controller, the production agent image, and the packaged Hermes and Lightpanda
 processes. Keep host credentials, Docker sockets and production state outside
 the stack. Local builds and runs share the resource limits under Browser runtime.
 
-[The mission test](tests/browser_mission_test.go) imports
-[the test mission](tests/fixtures/browser-mission.json) and drives one operation with
-`framework/testing/missiontest`. It acts as the operator for questions and
-continuations. Login with a managed password and transient code, read a unique
-report from the authenticated page with Hermes, then capture a protected
-Lightpanda PNG. Verify the shared session identity, download the declared
-artifacts, close the session, and verify the completed operation's saved report.
+[The mission test](tests/browser_mission_test.go) drives two independent
+operations with `framework/testing/missiontest`. The
+[authenticated report](tests/fixtures/browser-mission.json) covers managed login
+and OTP, session reuse and a protected Lightpanda PNG. The
+[public report](tests/fixtures/fresh-browse-mission.json) starts with `browse`,
+answers a native Hermes clarification through Commander and checks which page
+Lightpanda fetched. Both download the declared artifacts, confirm session close
+and verify the completed operation's saved report.
 
 Keep the website and scripted Chat Completions provider in [tests/fixtures/](tests/fixtures/).
 They run on loopback shared with the agent. Use the Commander API for managed
@@ -798,7 +799,7 @@ readiness, decisions and verified artifact downloads. Add scenarios for observab
 agent behavior. The Go tests do not start or tear down Docker.
 
 The live GPT-4.1 DEFOS probe on 2026-11-26 passed model setup and lost its
-first native batch. Its cause remains unconfirmed. The local mission exercises
+first native batch. Its cause remains unconfirmed. The local missions exercise
 the browser with a scripted provider.
 
 The release tooling has separate checks. To run them and vet the source locally:

@@ -11,6 +11,8 @@ import (
 	"image"
 	"image/png"
 	"os"
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/defos-ai/commander-browser-agent/actions"
@@ -27,6 +29,9 @@ import (
 //go:embed fixtures/browser-mission.json
 var browserMission []byte
 
+//go:embed fixtures/fresh-browse-mission.json
+var freshBrowseMission []byte
+
 type accountReport struct {
 	Text         string `json:"report_text"`
 	ScreenshotID string `json:"screenshot_artifact_id"`
@@ -37,27 +42,51 @@ func TestBrowserMissionThroughAPI(t *testing.T) {
 		URL:         os.Getenv("COMMANDER_API_URL"),
 		Credentials: host.BasicCredentials{Username: os.Getenv("API_USERNAME"), Password: os.Getenv("API_PASSWORD")},
 	}
-	driver := missiontest.Connect(t, config)
-	control := fixtures.NewCommander(t, config.URL, config.Credentials)
+	// Both operations use the same model endpoint because Commander remembers
+	// the validated endpoint as a reusable setting.
 	site := fixtures.NewMission(t)
+	control := fixtures.NewCommander(t, config.URL, config.Credentials)
+	control.SetSecret(fmt.Sprintf("browser-model-api-key-%x", sha256.Sum256([]byte(site.Endpoint))), fixtures.ModelKey)
 
-	definition, err := missions.LoadMission(browserMission)
+	for _, scenario := range []struct {
+		name string
+		run  func(*testing.T, missiontest.Config, *fixtures.Mission)
+	}{
+		{"authenticated_report", testAuthenticatedReport},
+		{"fresh_browse", testFreshBrowse},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			before := site.ModelValidations()
+			scenario.run(t, config, site)
+			if got := site.ModelValidations() - before; got != 1 {
+				t.Errorf("expected one model connection check, got %d", got)
+			}
+		})
+	}
+}
+
+func startBrowserMission(t *testing.T, config missiontest.Config, raw []byte, input any) (*missiontest.Driver, operations.Operation) {
+	t.Helper()
+	driver := missiontest.Connect(t, config)
+	definition, err := missions.LoadMission(raw)
 	if err != nil {
 		t.Fatal(err)
 	}
 	definition.Name += "-" + id.New()
 	driver.ImportMission(definition)
 	driver.WaitForActions(definition.RequiredActions...)
+	return driver, driver.Start(definition.Name, input)
+}
 
+func testAuthenticatedReport(t *testing.T, config missiontest.Config, site *fixtures.Mission) {
+	accountURL := site.URL + "/account"
+	driver, op := startBrowserMission(t, config, browserMission, map[string]string{"account_url": accountURL})
+	control := fixtures.NewCommander(t, config.URL, config.Credentials)
 	// The fixture binds an explicit loopback port, so its URL is also its canonical origin.
 	const profile = "test-account"
 	credentialBase := fmt.Sprintf("browser-login-%s-%x", profile, sha256.Sum256([]byte(site.URL+"\x00"+profile)))
 	control.SetSecret(credentialBase+"-username", fixtures.Username)
 	control.SetSecret(credentialBase+"-password", fixtures.Password)
-	control.SetSecret(fmt.Sprintf("browser-model-api-key-%x", sha256.Sum256([]byte(site.Endpoint))), fixtures.ModelKey)
-
-	accountURL := site.URL + "/account"
-	op := driver.Start(definition.Name, map[string]string{"account_url": accountURL})
 	login := driver.Assign(op.ID, missiontest.Assignment{ActionName: actions.LoginName, Input: actions.LoginInput{
 		URL: site.URL + "/login", VerificationURL: accountURL, ExpectedText: fixtures.AccountText,
 	}})
@@ -73,22 +102,12 @@ func TestBrowserMissionThroughAPI(t *testing.T) {
 		Objective: "Read the report on the signed-in account page and return its report text.",
 		URL:       accountURL, MaxIterations: 5, MaxTokensPerResponse: 512,
 	})
-	answerQuestion(t, driver, browse, "browser_model_provider_1", "Other (OpenAI-compatible)")
-	answerQuestion(t, driver, browse, "browser_model_1", fixtures.ModelName)
-	answerQuestion(t, driver, browse, "browser_model_url_1", site.Endpoint)
+	answerModelSetup(t, driver, browse, site.Endpoint)
 	browse = successfulTask(t, driver, browse, sessions.Open)
 	if browse.Result.Session.Reference != login.Result.Session.Reference {
 		t.Fatal("browse did not inherit the login session")
 	}
-	observation := decode[actions.BrowseOutput](t, browse.Result.Output)
-	if observation.Runtime != "hermes" || observation.Engine != "lightpanda" || observation.Status != "completed" ||
-		observation.Text != site.ReportText || observation.ModelRequests < 2 {
-		t.Fatalf("browse failed to read the authenticated report (status %s, requests %d)", observation.Status, observation.ModelRequests)
-	}
-	browseFiles := downloadFiles(t, driver, browse, map[string]string{"browse.json": "application/json"})
-	if decode[actions.BrowseOutput](t, browseFiles["browse.json"]) != observation {
-		t.Fatal("downloaded browse.json differs from the accepted browse result")
-	}
+	observation := verifyBrowseResult(t, driver, browse, site.ReportText, 2)
 
 	capture := continueWith(t, driver, browse, actions.ScreenshotName, actions.ScreenshotInput{Viewport: "mobile"})
 	capture = successfulTask(t, driver, capture, sessions.Use)
@@ -121,6 +140,58 @@ func TestBrowserMissionThroughAPI(t *testing.T) {
 	}
 }
 
+func testFreshBrowse(t *testing.T, config missiontest.Config, site *fixtures.Mission) {
+	reportsURL := site.URL + "/reports"
+	driver, op := startBrowserMission(t, config, freshBrowseMission, map[string]string{"reports_url": reportsURL})
+	browse := driver.Assign(op.ID, missiontest.Assignment{ActionName: actions.BrowseName, Input: actions.BrowseInput{
+		URL: reportsURL, Objective: "Ask which report to open, North or South, then open it and return its identifier.",
+		MaxIterations: 5, MaxTokensPerResponse: 512,
+	}})
+	answerModelSetup(t, driver, browse, site.Endpoint)
+	question, _ := waitForQuestion(t, driver, browse, "browser_clarification_1")
+	if !strings.HasSuffix(question.Text, "Which report should I open?") || !slices.Equal(question.Options, []string{"North", "South"}) {
+		t.Fatal("Commander did not present the native report question and its two choices")
+	}
+	const choice = "South"
+	driver.Answer(op.ID, question.ID, choice)
+	browse = successfulTask(t, driver, browse, sessions.Open)
+	if browse.ParentTaskID != "" {
+		t.Fatal("browse inherited a parent task")
+	}
+	observation := verifyBrowseResult(t, driver, browse, site.PublicReportText(choice), 3)
+	site.AssertPublicVisits(t, choice)
+	driver.Resolve(op.ID, driver.WaitForContinuation(op.ID, browse.ID))
+	fixtures.NewCommander(t, config.URL, config.Credentials).CloseSession(browse)
+
+	completed := driver.Complete(op.ID, observation.Text)
+	report := driver.Report(op.ID)
+	if completed.Status != operations.Completed || len(completed.Tasks) != 1 || completed.ReportID != report.ID ||
+		decode[string](t, completed.Output) != observation.Text || decode[string](t, report.Output) != observation.Text {
+		t.Fatal("completed mission did not retain the selected report identifier")
+	}
+}
+
+func answerModelSetup(t *testing.T, driver *missiontest.Driver, browse operations.Task, endpoint string) {
+	t.Helper()
+	answerQuestion(t, driver, browse, "browser_model_provider_1", "Other (OpenAI-compatible)")
+	answerQuestion(t, driver, browse, "browser_model_1", fixtures.ModelName)
+	answerQuestion(t, driver, browse, "browser_model_url_1", endpoint)
+}
+
+func verifyBrowseResult(t *testing.T, driver *missiontest.Driver, browse operations.Task, wantText string, minRequests int) actions.BrowseOutput {
+	t.Helper()
+	observation := decode[actions.BrowseOutput](t, browse.Result.Output)
+	if observation.Runtime != "hermes" || observation.Engine != "lightpanda" || observation.Status != "completed" ||
+		observation.Text != wantText || observation.ModelRequests < minRequests {
+		t.Fatalf("browse did not return the expected report (status %s, requests %d)", observation.Status, observation.ModelRequests)
+	}
+	files := downloadFiles(t, driver, browse, map[string]string{"browse.json": "application/json"})
+	if decode[actions.BrowseOutput](t, files["browse.json"]) != observation {
+		t.Fatal("downloaded browse.json differs from the accepted browse result")
+	}
+	return observation
+}
+
 func uniformImage(frame image.Image) bool {
 	bounds := frame.Bounds()
 	background := frame.At(bounds.Min.X, bounds.Min.Y)
@@ -137,7 +208,14 @@ func uniformImage(frame image.Image) bool {
 // Answer the exact saved question and return the running task that requested it.
 func answerQuestion(t *testing.T, driver *missiontest.Driver, task operations.Task, key, answer string) operations.Task {
 	t.Helper()
-	var questionID string
+	question, running := waitForQuestion(t, driver, task, key)
+	driver.Answer(task.OperationID, question.ID, answer)
+	return running
+}
+
+func waitForQuestion(t *testing.T, driver *missiontest.Driver, task operations.Task, key string) (operations.Question, operations.Task) {
+	t.Helper()
+	var question operations.Question
 	var running operations.Task
 	driver.WaitFor(task.OperationID, func(op operations.Operation) bool {
 		for _, current := range op.Tasks {
@@ -153,14 +231,13 @@ func answerQuestion(t *testing.T, driver *missiontest.Driver, task operations.Ta
 				if q.Key != key || q.CommandID != running.CommandID {
 					t.Fatalf("%s asked an unexpected execution question while waiting for %s", task.ActionName, key)
 				}
-				questionID = q.ID
+				question = q
 				return true
 			}
 		}
 		return false
 	})
-	driver.Answer(task.OperationID, questionID, answer)
-	return running
+	return question, running
 }
 
 func successfulTask(t *testing.T, driver *missiontest.Driver, task operations.Task, mode sessions.Mode) operations.Task {

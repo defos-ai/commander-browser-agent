@@ -1,0 +1,17 @@
+{
+  "name": "selected-public-report",
+  "objectives": [
+    "Ask the operator which public report to open and read its identifier in a fresh browser session.",
+    "Close the session and return the identifier from the selected report."
+  ],
+  "required_actions": ["browse"],
+  "starting_actions": ["browse"],
+  "policies": {"completion": {"decision_by": "operator"}},
+  "input_schema": {
+    "type": "object",
+    "properties": {"reports_url": {"type": "string", "format": "uri"}},
+    "required": ["reports_url"],
+    "additionalProperties": false
+  },
+  "output_schema": {"type": "string", "minLength": 1}
+}

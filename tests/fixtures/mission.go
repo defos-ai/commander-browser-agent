@@ -27,6 +27,7 @@ const (
 // on the agent's loopback network. The report changes for every test run.
 type Mission struct {
 	URL, Endpoint, ReportText string
+	reports                   map[string]*publicReport
 	passwords, codes          atomic.Int32
 	validations, observations atomic.Int32
 }
@@ -36,6 +37,7 @@ func NewMission(t *testing.T) *Mission {
 	site := &Mission{ReportText: "Archive report " + rand.Text()}
 	challenge, session := rand.Text(), rand.Text()
 	mux := http.NewServeMux()
+	site.servePublicReports(mux)
 	mux.HandleFunc("GET /login", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		fmt.Fprint(w, `<form method="post" action="/login">
@@ -79,9 +81,11 @@ func NewMission(t *testing.T) *Mission {
 		fmt.Fprintf(w, "<h1>%s</h1><p>%s</p><p>Reader %s</p>", AccountText, site.ReportText, Username)
 	})
 	mux.HandleFunc("POST /v1/chat/completions", site.complete)
-	server := httptest.NewServer(mux)
+	server := httptest.NewUnstartedServer(mux)
+	site.URL = "http://" + server.Listener.Addr().String()
+	site.Endpoint = site.URL + "/v1/chat/completions"
+	server.Start()
 	t.Cleanup(server.Close)
-	site.URL, site.Endpoint = server.URL, server.URL+"/v1/chat/completions"
 	return site
 }
 
@@ -96,6 +100,7 @@ func (site *Mission) complete(w http.ResponseWriter, r *http.Request) {
 		Messages []struct {
 			Role    string
 			Content json.RawMessage
+			ToolID  string `json:"tool_call_id"`
 		}
 		Tools []json.RawMessage
 	}
@@ -111,26 +116,42 @@ func (site *Mission) complete(w http.ResponseWriter, r *http.Request) {
 	}
 	last := req.Messages[len(req.Messages)-1]
 	message := map[string]any{"role": "assistant"}
-	finish := "stop"
 	switch {
 	case len(req.Tools) == 0 && len(req.Messages) == 1 && last.Role == "user":
 		site.validations.Add(1)
 		message["content"] = "OK"
+	case last.Role == "user" && bytes.Contains(last.Content, []byte(site.URL+"/reports")):
+		message = toolCall("choose_report", "clarify", map[string]any{
+			"questions": []any{map[string]any{"question": "Which report should I open?", "choices": []string{"North", "South"}}},
+		})
 	case last.Role == "user":
 		// Inspect the document left open by login on the original browser target.
-		args, _ := json.Marshal(map[string]string{"code": `print(cdp('Runtime.evaluate', expression='document.body.textContent', returnByValue=True)['result']['value'])`})
-		message["content"] = nil
-		message["tool_calls"] = []any{map[string]any{
-			"id": "read_account", "type": "function",
-			"function": map[string]string{"name": "browser_exec", "arguments": string(args)},
-		}}
-		finish = "tool_calls"
+		message = toolCall("read_account", "browser_exec", map[string]string{"code": `print(cdp('Runtime.evaluate', expression='document.body.textContent', returnByValue=True)['result']['value'])`})
+	case last.Role == "tool" && last.ToolID == "choose_report":
+		code, ok := site.navigateToAnswer(last.Content)
+		if !ok {
+			http.Error(w, "Expected a submitted report choice", http.StatusBadRequest)
+			return
+		}
+		message = toolCall("read_public_report", "browser_exec", map[string]string{"code": code})
+	case last.Role == "tool" && last.ToolID == "read_public_report":
+		// Hermes may wrap browser output in text before sending it to the model.
+		identifier := reportIdentifier.Find(last.Content)
+		if identifier == nil {
+			http.Error(w, "Expected a public report observation", http.StatusBadRequest)
+			return
+		}
+		message["content"] = string(identifier)
 	case last.Role == "tool" && bytes.Contains(last.Content, []byte(site.ReportText)) && bytes.Contains(last.Content, []byte("[REDACTED]")):
 		site.observations.Add(1)
 		message["content"] = site.ReportText
 	default:
-		http.Error(w, "Authenticated report observation missing", http.StatusBadRequest)
+		http.Error(w, "Unexpected report conversation", http.StatusBadRequest)
 		return
+	}
+	finish := "stop"
+	if message["tool_calls"] != nil {
+		finish = "tool_calls"
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{
@@ -140,11 +161,20 @@ func (site *Mission) complete(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func toolCall(id, name string, arguments any) map[string]any {
+	args, _ := json.Marshal(arguments)
+	return map[string]any{"role": "assistant", "content": nil, "tool_calls": []any{map[string]any{
+		"id": id, "type": "function", "function": map[string]string{"name": name, "arguments": string(args)},
+	}}}
+}
+
+func (site *Mission) ModelValidations() int32 { return site.validations.Load() }
+
 func (site *Mission) AssertUsed(t *testing.T) {
 	t.Helper()
 	for name, count := range map[string]int32{
 		"password submission": site.passwords.Load(), "code submission": site.codes.Load(),
-		"model validation": site.validations.Load(), "authenticated report observation": site.observations.Load(),
+		"authenticated report observation": site.observations.Load(),
 	} {
 		if count != 1 {
 			t.Errorf("expected one %s, got %d", name, count)
