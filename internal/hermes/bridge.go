@@ -703,7 +703,7 @@ func (w *Worker) Run(ctx context.Context, request Request, handler Handler) (res
 				continue
 			}
 			var event Event
-			if seen[message.ID] || strictJSON(message.Payload, &event) != nil || !validEvent(event) {
+			if seen[message.ID] || strictJSON(message.Payload, &event) != nil || !event.Valid() {
 				w.fail(ErrProtocol)
 				return Result{}, errors.Join(ErrProtocol, w.Close())
 			}
@@ -753,7 +753,7 @@ func (w *Worker) Run(ctx context.Context, request Request, handler Handler) (res
 				}
 				return Result{}, w.cancelRun(errors.Join(errHandler, cause), identifier, frames, nil)
 			}
-			if handlerErr != nil || event.Kind != "progress" && (!validReply(reply, event, request.APIKey) || event.Kind == "admit" && !reply.Approved) {
+			if handlerErr != nil || event.Kind != "progress" && (!reply.ValidFor(event) || containsKey(reply.Answer, request.APIKey)) {
 				refuse, finish := context.WithTimeout(context.Background(), time.Second)
 				_ = w.send(refuse, "reply", message.ID, Reply{})
 				finish()
@@ -823,7 +823,7 @@ func (w *Worker) cancelRun(cause error, identifier string, frames <-chan frame, 
 			continue
 		}
 		var event Event
-		valid := !seen[message.ID] && strictJSON(message.Payload, &event) == nil && validEvent(event)
+		valid := !seen[message.ID] && strictJSON(message.Payload, &event) == nil && event.Valid()
 		clear(message.Payload)
 		if !valid {
 			w.fail(ErrProtocol)
@@ -881,37 +881,6 @@ func boundedText(value string, maximum int, required bool) bool {
 }
 
 func containsKey(value string, key []byte) bool { return bytes.Contains([]byte(value), key) }
-
-func validEvent(event Event) bool {
-	if len(event.Options) > 4 {
-		return false
-	}
-	switch event.Kind {
-	case "admit":
-		return event.Tool == "browser_exec" && event.Sequence > 0 && event.Text == "" && len(event.Options) == 0
-	case "question":
-		if event.Tool != "" || event.Sequence != 0 || !boundedText(event.Text, 2000, true) {
-			return false
-		}
-		for _, option := range event.Options {
-			if !boundedText(option, 500, true) {
-				return false
-			}
-		}
-		return true
-	case "progress":
-		return (event.Tool == "" || event.Tool == "browser_exec") && (event.Text == "started" || event.Text == "finished") &&
-			(event.Tool == "" && event.Sequence == 0 || event.Tool == "browser_exec" && event.Sequence > 0) && len(event.Options) == 0
-	}
-	return false
-}
-
-func validReply(reply Reply, event Event, key []byte) bool {
-	if !boundedText(reply.Answer, 2000, event.Kind == "question") || containsKey(reply.Answer, key) {
-		return false
-	}
-	return event.Kind == "question" || reply.Answer == ""
-}
 
 func validResult(result Result) bool {
 	if !boundedText(result.Text, 65536, false) || result.ModelRequests < 0 || result.ModelRequests > 1_000_000 {

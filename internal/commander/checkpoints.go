@@ -5,10 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
 	"sync"
 	"time"
-	"unicode/utf8"
 
 	"github.com/defos-ai/commander-browser-agent/browser/contracts"
 	"github.com/defos-ai/commander/framework/agent/action"
@@ -197,7 +195,7 @@ func (c *HermesCheckpoints) Handler(inner contracts.Hooks) contracts.Hooks {
 		if err := c.enter(ctx); err != nil {
 			return contracts.Reply{}, err
 		}
-		if !c.started || c.finishAttempt || c.callback || c.action != "browse" || !c.identity(ctx) || !validHermesCheckpointEvent(event) {
+		if !c.started || c.finishAttempt || c.callback || c.action != "browse" || !c.identity(ctx) || !event.Valid() {
 			c.leave()
 			return contracts.Reply{}, c.fail(errHermesCheckpoint)
 		}
@@ -225,9 +223,7 @@ func (c *HermesCheckpoints) Handler(inner contracts.Hooks) contracts.Hooks {
 		}
 		defer c.leave()
 		c.callback = false
-		if !c.identity(ctx) || ctx.Err() != nil ||
-			event.Kind == "admit" && (!reply.Approved || reply.Answer != "") ||
-			event.Kind == "question" && !hermesCheckpointText(reply.Answer, 2000) {
+		if !c.identity(ctx) || ctx.Err() != nil || !reply.ValidFor(event) {
 			return contracts.Reply{}, c.fail(hermesCheckpointError(ctx, errHermesCheckpoint))
 		}
 		if event.Kind == "question" {
@@ -335,31 +331,6 @@ func (c *HermesCheckpoints) save(ctx context.Context, name string, fact hermesCh
 		return c.fail(hermesCheckpointError(waiting, err))
 	}
 	return c.failed()
-}
-
-func validHermesCheckpointEvent(event contracts.Event) bool {
-	switch event.Kind {
-	case "admit":
-		return event.Sequence > 0 && event.Tool == "browser_exec" && event.Text == "" && len(event.Options) == 0
-	case "question":
-		if event.Sequence != 0 || event.Tool != "" || !hermesCheckpointText(event.Text, 2000) || len(event.Options) > 4 {
-			return false
-		}
-		for _, option := range event.Options {
-			if !hermesCheckpointText(option, 500) {
-				return false
-			}
-		}
-		return true
-	case "progress":
-		return len(event.Options) == 0 && (event.Text == "started" || event.Text == "finished") &&
-			(event.Tool == "" && event.Sequence == 0 || event.Tool == "browser_exec" && event.Sequence > 0)
-	}
-	return false
-}
-
-func hermesCheckpointText(text string, limit int) bool {
-	return len(text) <= limit && strings.TrimSpace(text) != "" && utf8.ValidString(text) && !strings.ContainsRune(text, 0)
 }
 
 func hermesBrowseStatus(status string) bool {

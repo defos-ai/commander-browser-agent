@@ -1,7 +1,11 @@
 // Package contracts defines browser capabilities without a Commander or runtime dependency.
 package contracts
 
-import "context"
+import (
+	"context"
+	"strings"
+	"unicode/utf8"
+)
 
 // BrowserAgent reasons about a bounded task on an already-owned session.
 // Implementations must not create a replacement session or reuse expired access.
@@ -57,9 +61,49 @@ type Event struct {
 	Options  []string `json:"options,omitempty"`
 }
 
+// Valid checks a single hook event. The host checks ordering and execution limits.
+func (e Event) Valid() bool {
+	switch e.Kind {
+	case "admit":
+		return e.Tool == "browser_exec" && e.Sequence > 0 && e.Text == "" && len(e.Options) == 0
+	case "progress":
+		return (e.Tool == "" && e.Sequence == 0 || e.Tool == "browser_exec" && e.Sequence > 0) &&
+			(e.Text == "started" || e.Text == "finished") && len(e.Options) == 0
+	case "question":
+		if e.Tool != "" || e.Sequence != 0 || !clarificationText(e.Text, 2000) || len(e.Options) > 4 {
+			return false
+		}
+		for _, option := range e.Options {
+			if !clarificationText(option, 500) {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
 type Reply struct {
 	Approved bool   `json:"approved,omitempty"`
 	Answer   string `json:"answer,omitempty"`
+}
+
+// ValidFor requires approval for admission and an answer for clarification.
+// Progress is a notification and its reply is ignored.
+func (r Reply) ValidFor(event Event) bool {
+	switch event.Kind {
+	case "admit":
+		return r.Approved && r.Answer == ""
+	case "question":
+		return clarificationText(r.Answer, 2000)
+	case "progress":
+		return true
+	}
+	return false
+}
+
+func clarificationText(text string, maxBytes int) bool {
+	return len(text) <= maxBytes && utf8.ValidString(text) && !strings.ContainsRune(text, 0) && strings.TrimSpace(text) != ""
 }
 
 // Hooks must respect cancellation. Admission requires a positive approval;
