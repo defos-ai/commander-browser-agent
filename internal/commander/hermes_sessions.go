@@ -99,7 +99,7 @@ func (m *SessionManager) hermesRuntime(ctx context.Context, item *entry, mode se
 		m.mu.Unlock()
 		return nil, err
 	}
-	if item.backend != "" && (item.backend != "hermes" || item.hermesOptions != options) {
+	if item.hermesOptions != nil && *item.hermesOptions != options {
 		m.mu.Unlock()
 		return nil, errors.New("browser session belongs to a different runtime")
 	}
@@ -118,11 +118,11 @@ func (m *SessionManager) hermesRuntime(ctx context.Context, item *entry, mode se
 		m.touchLocked(item)
 		return worker, nil
 	}
-	if mode != sessions.Open || item.backend != "" {
+	if mode != sessions.Open || item.hermesOptions != nil {
 		m.mu.Unlock()
 		return nil, errors.New("browser session has not been started")
 	}
-	item.backend, item.hermesOptions, item.engine = "hermes", options, browserruntime.Lightpanda
+	item.hermesOptions = &options
 	item.view.Kind, item.view.Label, item.view.Busy = string(browserruntime.Lightpanda), "Lightpanda browser session (Hermes)", true
 	item.lifetime, item.cancel = context.WithCancel(context.Background())
 	item.startDone = make(chan struct{})

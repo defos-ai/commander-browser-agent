@@ -171,7 +171,7 @@
 
 - [agent.go](agent.go) supplies one [session manager](internal/commander/sessions.go)
   per agent unless the caller provides a Commander sessions provider. Constructors
-  and `Prepare` open no browsers. `Run` requires the exact framework-owned session
+  and `Prepare` open no browsers. `RunHermes` requires the exact framework-owned session
   binding and creation claim from `action.SessionFromContext`.
 - `browse` and `login` declare `session_mode: open` and use
   `action.OpenSession(ctx)`; `screenshot` declares `use` and uses
@@ -202,17 +202,14 @@
   controls. Close must interrupt work and join startup/cleanup before reporting
   `closed`; uncertain cleanup and owner shutdown retain `lost` references.
 - [internal/commander/hermes_sessions.go](internal/commander/hermes_sessions.go)
-  binds a private Hermes runtime to that same manager and exact creation claim.
-  Its trusted absolute runtime paths are host
-  configuration, never action inputs. A claim cannot switch between the Go and
-  Hermes backends or change its pinned paths. `RunHermes` lends a callback-scoped
-  bridge through [internal/hermes/session.go](internal/hermes/session.go); retained
-  or detached contexts cannot start later work. Default actions use this bridge
-  on local child processes; existing Go sessions cannot move to Hermes.
-- `HermesOptions` contains the discovered absolute Python, Hermes source and
-  Lightpanda paths. Refuse incomplete configuration before startup and pin the
-  complete selection to the original creation claim. A retained session cannot
-  change runtime paths. Constructors and preparation open no runtime.
+  starts the Hermes worker on first open and reuses it for that creation claim.
+  `RunHermes` lends a callback-scoped bridge through
+  [internal/hermes/session.go](internal/hermes/session.go). Returning from the
+  callback revokes access. Go library callers can start and own a separate
+  Lightpanda runtime through [browser.Start](browser/runtime.go).
+- Host discovery supplies the absolute Python, Hermes source and Lightpanda
+  paths in `HermesOptions`. Validate all three before startup and pin them to
+  the original creation claim, including when startup returns a partial runtime.
 - [browser/runtime.go](browser/runtime.go) exposes only retained runtime lifecycle:
   completion, independent verification, scoped callback access and cleanup.
   The Commander adapter owns full creation claims, binding/mode validation,

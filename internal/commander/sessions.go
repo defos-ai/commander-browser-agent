@@ -29,16 +29,13 @@ type SessionManager struct {
 type entry struct {
 	claim         sessions.CreationClaim
 	view          sessions.Session
-	engine        browserruntime.Engine
-	backend       string
 	resource      browserruntime.Runtime
-	hermesOptions browserruntime.HermesOptions
+	hermesOptions *browserruntime.HermesOptions
 	gate          chan struct{}
 	stopping      chan struct{}
 	lifetime      context.Context
 	cancel        context.CancelFunc
 	startDone     chan struct{}
-	browser       browserruntime.Runtime
 	closing       bool
 	explicit      bool
 	cleanupDone   chan struct{}
@@ -171,148 +168,6 @@ func (m *SessionManager) WithSession(ctx context.Context, work func(context.Cont
 	return err
 }
 
-// Run uses the exact framework binding and an explicitly selected engine.
-// Action cancellation interrupts this work without closing a connected session.
-func (m *SessionManager) Run(ctx context.Context, options browserruntime.Options, work func(context.Context) error) (view sessions.Session, runErr error) {
-	if err := ctx.Err(); err != nil {
-		return view, err
-	}
-	if err := options.Validate(); err != nil {
-		return view, err
-	}
-	if work == nil {
-		return view, errors.New("browser session work is required")
-	}
-	binding, ok := action.SessionFromContext(ctx)
-	if !ok {
-		return view, errors.New("browser work requires a framework session binding")
-	}
-	if err := binding.Validate(); err != nil {
-		return view, err
-	}
-	m.mu.Lock()
-	item := m.items[binding.ID]
-	if item == nil {
-		m.mu.Unlock()
-		return view, sessions.ErrUnknownSession
-	}
-	if item.claim != binding.Claim() {
-		m.mu.Unlock()
-		return view, sessions.ErrConflict
-	}
-	m.mu.Unlock()
-	select {
-	case item.gate <- struct{}{}:
-		defer func() { <-item.gate }()
-	case <-ctx.Done():
-		return view, ctx.Err()
-	case <-item.stopping:
-		m.mu.Lock()
-		defer m.mu.Unlock()
-		return item.view.Clone(), m.availableLocked(item)
-	}
-	defer func() {
-		m.mu.Lock()
-		defer m.mu.Unlock()
-		if item.view.Busy {
-			item.view.Busy = false
-			m.touchLocked(item)
-		}
-		view = item.view.Clone()
-	}()
-	browser, err := m.browser(ctx, item, binding.Mode, options)
-	if err != nil {
-		return view, err
-	}
-	workCtx, cancel := context.WithCancel(ctx)
-	workCtx = sensitive.WithValues(workCtx, item.values)
-	workCtx = withRenderProgress(workCtx)
-	stopLifetime := context.AfterFunc(item.lifetime, cancel)
-	defer func() { stopLifetime(); cancel() }()
-	runErr = browser.WithContext(workCtx, work)
-	if ctx.Err() != nil {
-		runErr = ctx.Err()
-	} else if runErr == nil {
-		runErr = workCtx.Err()
-	}
-	return view, runErr
-}
-
-func (m *SessionManager) browser(ctx context.Context, item *entry, mode sessions.Mode, options browserruntime.Options) (browserruntime.Runtime, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	m.mu.Lock()
-	if err := m.availableLocked(item); err != nil {
-		m.mu.Unlock()
-		return nil, err
-	}
-	if item.backend != "" && item.backend != "go" {
-		m.mu.Unlock()
-		return nil, errors.New("browser session belongs to a different runtime")
-	}
-	if item.engine != "" && item.engine != options.Engine {
-		m.mu.Unlock()
-		return nil, errors.New("browser engine differs from the session's engine")
-	}
-	if item.browser != nil {
-		if item.view.State != "connected" || runtimeStopped(item.browser) {
-			m.mu.Unlock()
-			return nil, errors.New("browser session is not connected")
-		}
-		item.view.Busy = true
-		m.touchLocked(item)
-		browser := item.browser
-		m.mu.Unlock()
-		return browser, nil
-	}
-	if mode != sessions.Open || item.engine != "" {
-		m.mu.Unlock()
-		return nil, errors.New("browser session has not been started")
-	}
-	item.engine = options.Engine
-	item.backend = "go"
-	item.view.Kind, item.view.Label, item.view.Busy = string(options.Engine), engineLabel(options.Engine), true
-	item.lifetime, item.cancel = context.WithCancel(context.Background())
-	item.startDone = make(chan struct{})
-	m.touchLocked(item)
-	m.mu.Unlock()
-
-	stopStartup := context.AfterFunc(ctx, item.cancel)
-	browser, err := browserruntime.Start(item.lifetime, options)
-	stopStartup()
-	m.mu.Lock()
-	item.browser = browser
-	if browser != nil {
-		item.resource = browser
-	}
-	close(item.startDone)
-	if err == nil && browser == nil {
-		err = errors.New("browser startup returned no runtime")
-	}
-	if ctx.Err() != nil {
-		err = ctx.Err()
-	} else if err == nil && (item.closing || m.stopped || item.lifetime.Err() != nil) {
-		err = sessions.ErrSessionClosing
-	}
-	if err != nil {
-		if !item.closing && !m.stopped {
-			item.view.State, item.view.Reason = "failed", "Browser startup failed"
-			m.touchLocked(item)
-		}
-		m.cleanupLocked(item, false)
-		m.mu.Unlock()
-		return nil, err
-	}
-	now := time.Now().UTC()
-	item.view.State, item.view.Reason = "connected", ""
-	item.view.ConnectedAt, item.view.VerifiedAt = &now, &now
-	m.touchLocked(item)
-	m.mu.Unlock()
-	go m.monitor(item, browser)
-	return browser, nil
-}
-
 func (m *SessionManager) monitor(item *entry, browser browserruntime.Runtime) {
 	<-browser.Done()
 	m.mu.Lock()
@@ -410,20 +265,7 @@ func (m *SessionManager) Control(ctx context.Context, request sessions.Control) 
 	if unavailable := m.availableLocked(item); unavailable != nil {
 		return item.view.Clone(), unavailable
 	}
-	if item.backend == "hermes" {
-		m.applyHermesHealthLocked(item, err, revision)
-		return item.view.Clone(), err
-	}
-	if err != nil {
-		item.view.State, item.view.Reason, item.view.VerifiedAt = "unverified", "Browser connection could not be verified", nil
-	} else {
-		now := time.Now().UTC()
-		item.view.State, item.view.Reason, item.view.VerifiedAt = "connected", "", &now
-		if item.view.ConnectedAt == nil {
-			item.view.ConnectedAt = &now
-		}
-	}
-	m.touchLocked(item)
+	m.applyHermesHealthLocked(item, err, revision)
 	return item.view.Clone(), err
 }
 
@@ -563,20 +405,4 @@ func (m *SessionManager) notifyLocked() {
 	case m.changes <- struct{}{}:
 	default:
 	}
-}
-
-func runtimeStopped(runtime browserruntime.Runtime) bool {
-	select {
-	case <-runtime.Done():
-		return true
-	default:
-		return false
-	}
-}
-
-func engineLabel(engine browserruntime.Engine) string {
-	if engine == browserruntime.Lightpanda {
-		return "Lightpanda browser session"
-	}
-	return "Browser session"
 }
